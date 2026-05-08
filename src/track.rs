@@ -8,7 +8,12 @@
 //! Apple's `wave` audio extension) are captured as raw bytes in
 //! [`SampleDescription::extra`] for downstream codec crates.
 
+use crate::edit::EditList;
 use crate::header::{Hdlr, Mdhd, Tkhd};
+use crate::media_meta::{
+    parse_chan, parse_clap, parse_colr, parse_pasp, Chan, Clap, ColorParameters, MetaKeyValue,
+    Pasp, Tapt,
+};
 use crate::sample_table::SampleTable;
 
 #[cfg(feature = "registry")]
@@ -16,6 +21,56 @@ use oxideav_core::{Error, Result};
 
 #[cfg(not(feature = "registry"))]
 use crate::standalone::{Error, Result};
+
+/// Track-reference relationship (`tref` child). Round-2 surfaces the
+/// reference type plus the related-track-id list; later rounds may
+/// resolve them to actual `Track` references on the demuxer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackRef {
+    /// FourCC of the reference type (e.g. `chap`, `tmcd`, `scpt`,
+    /// `ssrc`, `sync`, `hint`, `mpod`).
+    pub kind: TrackRefKind,
+    /// The 4-byte FourCC as bytes (kept for unknown reference types).
+    pub fourcc: [u8; 4],
+    /// Related track ids (1-based; 0 is permitted per QTFF p. 51).
+    pub track_ids: Vec<u32>,
+}
+
+/// High-level discriminator for [`TrackRef::kind`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackRefKind {
+    /// `chap` — chapter list (typically references a text track).
+    Chapter,
+    /// `tmcd` — time code track.
+    Timecode,
+    /// `scpt` — transcript / script.
+    Transcript,
+    /// `ssrc` — non-primary source for an `imap`.
+    NonPrimarySource,
+    /// `sync` — sync between tracks.
+    Sync,
+    /// `hint` — hint-track source media (RTP).
+    Hint,
+    /// `mpod` — MPEG-DASH / MPEG-4 OD reference.
+    Mpod,
+    /// Anything else (`subt`, `cdsc`, vendor-specific, …).
+    Other,
+}
+
+impl TrackRefKind {
+    pub fn from_fourcc(f: &[u8; 4]) -> Self {
+        match f {
+            b"chap" => Self::Chapter,
+            b"tmcd" => Self::Timecode,
+            b"scpt" => Self::Transcript,
+            b"ssrc" => Self::NonPrimarySource,
+            b"sync" => Self::Sync,
+            b"hint" => Self::Hint,
+            b"mpod" => Self::Mpod,
+            _ => Self::Other,
+        }
+    }
+}
 
 /// One sample-description-table entry. QTFF p. 70 ("Sample
 /// Description Atoms") — the first 16 bytes are universal:
@@ -45,6 +100,20 @@ pub struct SampleDescription {
     /// 36 for audio v0). Suitable for handing as extradata to a
     /// codec.
     pub extra: Vec<u8>,
+
+    // ─────── Round-2 video extension atoms ───────
+    /// `gama` — 16.16 fixed-point gamma; `None` when absent.
+    pub gamma: Option<u32>,
+    /// `pasp` — pixel aspect ratio.
+    pub pasp: Option<Pasp>,
+    /// `clap` — clean aperture.
+    pub clap: Option<Clap>,
+    /// `colr` — colour parameters (Apple `nclc` or ISO `nclx`).
+    pub colr: Option<ColorParameters>,
+
+    // ─────── Round-2 audio extension atoms ───────
+    /// `chan` — Apple Core Audio channel layout (raw fields surfaced).
+    pub chan: Option<Chan>,
 }
 
 /// One track's accumulated state.
@@ -56,6 +125,17 @@ pub struct Track {
     /// Sample-description table — at least one entry per QTFF p. 69.
     pub sample_descriptions: Vec<SampleDescription>,
     pub sample_table: SampleTable,
+    /// `edts/elst` edit list, when present. Empty list means "no
+    /// edits" — the track plays its media start-to-end.
+    pub edits: EditList,
+    /// `tref` references this track makes to other tracks
+    /// (chapter / timecode / etc).
+    pub references: Vec<TrackRef>,
+    /// Apple Track Aperture Mode Dimensions (`tapt`); `None` when
+    /// the track has no `tapt` atom.
+    pub tapt: Option<Tapt>,
+    /// Track-level Apple `meta` key-value pairs, when present.
+    pub meta: Vec<MetaKeyValue>,
 }
 
 impl Track {
@@ -125,6 +205,7 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
             entry.width = u16::from_be_bytes([body[24], body[25]]);
             entry.height = u16::from_be_bytes([body[26], body[27]]);
             entry.extra = body[70..].to_vec();
+            scan_video_extensions(&mut entry)?;
         } else if hdlr.is_audio() && body.len() >= 20 {
             // Sound sample description v0 (QTFF p. 100):
             //   ver:2 rev:2 vendor:4 channels:2 sample_size:2
@@ -144,6 +225,7 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
             if body.len() > extra_start {
                 entry.extra = body[extra_start..].to_vec();
             }
+            scan_audio_extensions(&mut entry)?;
         } else {
             // Unknown handler — keep whatever follows the universal 16-byte
             // header. Useful for `subt`/`tmcd`/`meta` tracks in later rounds.
@@ -154,6 +236,78 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
         p = body_end;
     }
     Ok(out)
+}
+
+/// Scan the `extra` blob of a video sample description for the
+/// well-known atom-style extensions (`gama`, `pasp`, `clap`, `colr`).
+/// Recognised atoms are extracted into typed fields; the original
+/// `extra` blob is left intact so codec-specific bytes (e.g. `avcC`,
+/// `hvcC`) remain available for downstream consumers.
+fn scan_video_extensions(entry: &mut SampleDescription) -> Result<()> {
+    let buf = entry.extra.clone();
+    walk_atoms(&buf, |fourcc, payload| {
+        match fourcc {
+            b"gama" if payload.len() >= 4 => {
+                entry.gamma = Some(u32::from_be_bytes([
+                    payload[0], payload[1], payload[2], payload[3],
+                ]));
+            }
+            b"pasp" => {
+                entry.pasp = Some(parse_pasp(payload)?);
+            }
+            b"clap" => {
+                entry.clap = Some(parse_clap(payload)?);
+            }
+            b"colr" => {
+                entry.colr = Some(parse_colr(payload)?);
+            }
+            _ => {}
+        }
+        Ok(())
+    })
+}
+
+/// Scan the `extra` blob of an audio sample description for `chan`
+/// (and only `chan` in round 2 — codec-specific extensions such as
+/// `wave` / `esds` stay opaque for downstream codec crates).
+fn scan_audio_extensions(entry: &mut SampleDescription) -> Result<()> {
+    let buf = entry.extra.clone();
+    walk_atoms(&buf, |fourcc, payload| {
+        if fourcc == b"chan" {
+            entry.chan = Some(parse_chan(payload)?);
+        }
+        Ok(())
+    })
+}
+
+/// Walk the top-level atoms inside an in-memory buffer. The callback
+/// receives the FourCC and the atom's payload (no header). Unknown /
+/// truncated atoms are silently dropped to stay forgiving against
+/// malformed extras.
+fn walk_atoms<F>(buf: &[u8], mut visit: F) -> Result<()>
+where
+    F: FnMut(&[u8; 4], &[u8]) -> Result<()>,
+{
+    let mut p = 0usize;
+    while p + 8 <= buf.len() {
+        let size = u32::from_be_bytes([buf[p], buf[p + 1], buf[p + 2], buf[p + 3]]) as usize;
+        if size == 0 {
+            // size==0 ⇒ extends to end of containing buffer.
+            let mut fc = [0u8; 4];
+            fc.copy_from_slice(&buf[p + 4..p + 8]);
+            visit(&fc, &buf[p + 8..])?;
+            break;
+        }
+        if size < 8 || p + size > buf.len() {
+            // Malformed; bail out lenient.
+            break;
+        }
+        let mut fc = [0u8; 4];
+        fc.copy_from_slice(&buf[p + 4..p + 8]);
+        visit(&fc, &buf[p + 8..p + size])?;
+        p += size;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

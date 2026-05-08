@@ -12,16 +12,18 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::atom::{
-    self, read_atom_header, read_payload, walk_children, AtomHeader, CO64, DREF, ELST, FREE, FTYP,
-    GMHD, HDLR, MDHD, MDIA, MINF, MOOV, MVHD, SKIP, SMHD, STBL, STCO, STSC, STSD, STSS, STSZ, STTS,
-    TKHD, TRAK, VMHD, WIDE,
+    read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CTTS, DREF, EDTS, ELST,
+    ENOF, FREE, FTYP, GMHD, HDLR, ILST, KEYS, MDAT, MDHD, MDIA, META, MINF, MOOV, MVHD, PROF, SKIP,
+    SMHD, STBL, STCO, STSC, STSD, STSS, STSZ, STTS, TAPT, TKHD, TRAK, TREF, VMHD, WIDE,
 };
+use crate::edit::{parse_elst, EditList};
 use crate::header::{parse_ftyp, parse_hdlr, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd};
+use crate::media_meta::{parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
 use crate::sample_table::{
-    parse_co64, parse_stco, parse_stsc, parse_stss, parse_stsz, parse_stts, SampleEntry,
-    SampleTable,
+    parse_co64, parse_ctts, parse_stco, parse_stsc, parse_stss, parse_stsz, parse_stts,
+    SampleEntry, SampleTable,
 };
-use crate::track::{parse_stsd, Track};
+use crate::track::{parse_stsd, Track, TrackRef, TrackRefKind};
 
 #[cfg(feature = "registry")]
 use oxideav_core::{
@@ -40,6 +42,13 @@ pub struct MovDemuxer {
     pub ftyp: Option<Ftyp>,
     pub mvhd: Option<Mvhd>,
     pub tracks: Vec<Track>,
+    /// Movie-level Apple `meta` key-value pairs (when the file
+    /// carries an Apple-shaped `meta` atom at moov scope).
+    pub meta: Vec<MetaKeyValue>,
+    /// True iff the first non-skip top-level atom after `ftyp` is
+    /// `moov`, indicating the file is laid out for streaming
+    /// ("faststart").
+    faststart: bool,
     /// Pre-flattened sample queue, sorted by file offset for friendly
     /// I/O patterns. Each entry is `(stream_index, sample)`.
     samples: Vec<(u32, SampleEntry)>,
@@ -72,6 +81,13 @@ impl MovDemuxer {
         let mut ftyp: Option<Ftyp> = None;
         let mut mvhd: Option<Mvhd> = None;
         let mut tracks: Vec<Track> = Vec::new();
+        let mut movie_meta: Vec<MetaKeyValue> = Vec::new();
+        // Faststart probe: track whether `moov` precedes `mdat` in
+        // the top-level atom stream, ignoring `ftyp`, `free`, `skip`,
+        // `wide`. Per QTFF "Movie Atom" — moov-first allows streaming
+        // playback before the full file has been received.
+        let mut seen_moov_before_mdat = false;
+        let mut seen_mdat = false;
 
         // Top-level walk — accept arbitrary order, recognise the
         // common atoms, skip everything else.
@@ -95,13 +111,26 @@ impl MovDemuxer {
                     ftyp = Some(parse_ftyp(&payload)?);
                 }
                 t if t == &MOOV => {
-                    parse_moov(input.as_mut(), &hdr, body_end, &mut mvhd, &mut tracks)?;
+                    if !seen_mdat {
+                        seen_moov_before_mdat = true;
+                    }
+                    parse_moov(
+                        input.as_mut(),
+                        &hdr,
+                        body_end,
+                        &mut mvhd,
+                        &mut tracks,
+                        &mut movie_meta,
+                    )?;
+                }
+                t if t == &MDAT => {
+                    seen_mdat = true;
                 }
                 t if t == &FREE || t == &SKIP || t == &WIDE => {
                     // free-space atoms — skip
                 }
                 _ => {
-                    // mdat or unknown — ignored at the top level.
+                    // unknown — ignored at the top level.
                 }
             }
 
@@ -140,11 +169,21 @@ impl MovDemuxer {
             ftyp,
             mvhd,
             tracks,
+            meta: movie_meta,
+            faststart: seen_moov_before_mdat,
             samples,
             next: 0,
             #[cfg(feature = "registry")]
             streams,
         })
+    }
+
+    /// True when the file is laid out for streaming playback
+    /// ("faststart"): `moov` appears before any `mdat` at top level.
+    /// `ftyp`, `free`, `skip`, `wide` atoms encountered before `moov`
+    /// do not invalidate the faststart classification.
+    pub fn is_faststart(&self) -> bool {
+        self.faststart
     }
 
     // Stub used by `open()` to validate the container before we
@@ -256,6 +295,7 @@ fn parse_moov<R: Read + Seek + ?Sized>(
     body_end: u64,
     mvhd: &mut Option<Mvhd>,
     tracks: &mut Vec<Track>,
+    meta: &mut Vec<MetaKeyValue>,
 ) -> Result<()> {
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
     walk_children(r, Some(body_end), |r, child| {
@@ -267,6 +307,11 @@ fn parse_moov<R: Read + Seek + ?Sized>(
             t if t == &TRAK => {
                 let track = parse_trak(r, child)?;
                 tracks.push(track);
+            }
+            t if t == &META => {
+                if let Some(kv) = parse_meta_atom(r, child)? {
+                    *meta = kv;
+                }
             }
             _ => {}
         }
@@ -288,14 +333,141 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
             t if t == &MDIA => {
                 parse_mdia(r, child, &mut track)?;
             }
-            t if t == &ELST || t == &atom::EDTS => {
-                // Edit list — round-2 candidate. Skipped here.
+            t if t == &EDTS => {
+                track.edits = parse_edts(r, child)?;
+            }
+            t if t == &TREF => {
+                track.references = parse_tref(r, child)?;
+            }
+            t if t == &TAPT => {
+                track.tapt = Some(parse_tapt(r, child)?);
+            }
+            t if t == &META => {
+                if let Some(kv) = parse_meta_atom(r, child)? {
+                    track.meta = kv;
+                }
             }
             _ => {}
         }
         Ok(())
     })?;
     Ok(track)
+}
+
+fn parse_edts<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<EditList> {
+    let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
+    r.seek(SeekFrom::Start(hdr.payload_offset))?;
+    let mut out = EditList::new();
+    walk_children(r, Some(body_end), |r, child| {
+        if child.fourcc == ELST {
+            let body = read_payload(r, child)?;
+            out = parse_elst(&body)?;
+        }
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+fn parse_tref<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Vec<TrackRef>> {
+    let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
+    r.seek(SeekFrom::Start(hdr.payload_offset))?;
+    let mut out = Vec::new();
+    walk_children(r, Some(body_end), |r, child| {
+        // Each child's payload is a tightly-packed list of u32 track ids.
+        let payload = read_payload(r, child)?;
+        let mut ids = Vec::with_capacity(payload.len() / 4);
+        for chunk in payload.chunks_exact(4) {
+            ids.push(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        out.push(TrackRef {
+            kind: TrackRefKind::from_fourcc(&child.fourcc),
+            fourcc: child.fourcc,
+            track_ids: ids,
+        });
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+fn parse_tapt<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tapt> {
+    let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
+    r.seek(SeekFrom::Start(hdr.payload_offset))?;
+    let mut out = Tapt::default();
+    walk_children(r, Some(body_end), |r, child| {
+        let body = read_payload(r, child)?;
+        match &child.fourcc {
+            t if t == &CLEF => out.clef = Some(parse_tapt_dims(&body)?),
+            t if t == &PROF => out.prof = Some(parse_tapt_dims(&body)?),
+            t if t == &ENOF => out.enof = Some(parse_tapt_dims(&body)?),
+            _ => {}
+        }
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// Parse an Apple-shaped `meta` atom. The QTFF / Apple iTunes layout
+/// is `[hdlr (mdta)][keys][ilst]` (the `hdlr` may carry a different
+/// 4-byte handler — we treat any handler the same way and look for a
+/// `keys` table followed by an `ilst` value list). Returns `None` when
+/// the atom doesn't carry the key-value structure (e.g. ISO BMFF
+/// `meta` with `XMP_` / `bxml`).
+///
+/// QTFF documents the `meta` atom only by reference; the layout
+/// surfaced here matches Apple's QuickTime developer guidance and
+/// what `iTunes`/`MOV` writers emit in practice.
+fn parse_meta_atom<R: Read + Seek + ?Sized>(
+    r: &mut R,
+    hdr: &AtomHeader,
+) -> Result<Option<Vec<MetaKeyValue>>> {
+    let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
+    r.seek(SeekFrom::Start(hdr.payload_offset))?;
+    // Apple's `meta` atom in `moov`/`trak` does NOT carry the leading
+    // `[ver+flags=4]` FullBox header that ISO BMFF mandates. To stay
+    // forgiving we *peek* at the next 8 bytes: if they look like a
+    // valid sub-atom header (size ≥ 8 and inside body_end) we proceed
+    // immediately; otherwise we skip the 4-byte FullBox header first.
+    let pos_now = r.stream_position()?;
+    let remain = body_end - pos_now;
+    if remain >= 4 {
+        let mut peek = [0u8; 8];
+        if remain >= 8 {
+            r.read_exact(&mut peek)?;
+            r.seek(SeekFrom::Start(pos_now))?;
+            let size = u32::from_be_bytes([peek[0], peek[1], peek[2], peek[3]]) as u64;
+            if size < 8 || size > remain {
+                // Not a valid sub-atom header — assume FullBox prefix
+                // and consume 4 bytes.
+                r.seek(SeekFrom::Start(pos_now + 4))?;
+            }
+        }
+    }
+
+    let mut keys: Vec<(String, [u8; 4])> = Vec::new();
+    let mut pending_ilst: Option<Vec<u8>> = None;
+
+    walk_children(r, Some(body_end), |r, child| {
+        match &child.fourcc {
+            t if t == &KEYS => {
+                let body = read_payload(r, child)?;
+                keys = parse_keys(&body)?;
+            }
+            t if t == &ILST => {
+                pending_ilst = Some(read_payload(r, child)?);
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+
+    if keys.is_empty() && pending_ilst.is_none() {
+        return Ok(None);
+    }
+    let kv = match pending_ilst {
+        Some(body) => parse_ilst(&body, &keys)?,
+        None => Vec::new(),
+    };
+    Ok(Some(kv))
 }
 
 fn parse_mdia<R: Read + Seek + ?Sized>(
@@ -387,6 +559,10 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
                 let body = read_payload(r, child)?;
                 table.stss = parse_stss(&body)?;
             }
+            t if t == &CTTS => {
+                let body = read_payload(r, child)?;
+                table.ctts = parse_ctts(&body)?;
+            }
             _ => {}
         }
         Ok(())
@@ -439,7 +615,7 @@ impl Demuxer for MovDemuxer {
         let stream = &self.streams[stream_idx as usize];
         let mut pkt = Packet::new(stream_idx, stream.time_base, data)
             .with_dts(sample.dts as i64)
-            .with_pts(sample.dts as i64)
+            .with_pts(sample.pts())
             .with_keyframe(sample.keyframe);
         if sample.duration > 0 {
             pkt = pkt.with_duration(sample.duration as i64);
@@ -503,7 +679,7 @@ pub fn probe(p: &oxideav_core::ProbeData) -> u8 {
     0
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "registry"))]
 mod tests {
     use super::*;
     use std::io::Cursor;

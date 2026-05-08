@@ -46,6 +46,18 @@ pub struct StscEntry {
     pub sample_description_id: u32,
 }
 
+/// `ctts` composition-time-to-sample table entry. ISO BMFF
+/// §8.6.1.3.2 — version 0 carries unsigned offsets, version 1 carries
+/// signed offsets. We always store the signed form; for v0 streams,
+/// values are non-negative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CttsEntry {
+    pub sample_count: u32,
+    /// Composition-time offset added to each of the run's samples'
+    /// DTS to produce its PTS: `pts = dts + composition_offset`.
+    pub composition_offset: i32,
+}
+
 /// Parsed sample table for a single track.
 #[derive(Clone, Debug, Default)]
 pub struct SampleTable {
@@ -63,6 +75,9 @@ pub struct SampleTable {
     /// Sync sample numbers (1-based per QTFF p. 73). Empty means
     /// "every sample is a keyframe" (the spec's implicit-sync case).
     pub stss: Vec<u32>,
+    /// `ctts` composition-time offsets per sample run. Empty means
+    /// "no composition offsets" — DTS == PTS for every sample.
+    pub ctts: Vec<CttsEntry>,
 }
 
 /// One entry in the iterator output: enough to read the sample bytes
@@ -83,6 +98,17 @@ pub struct SampleEntry {
     pub sample_description_id: u32,
     /// True when this sample is listed in `stss` (or the table is empty).
     pub keyframe: bool,
+    /// Composition offset (PTS - DTS), zero when `ctts` is absent.
+    /// Signed so that v1 ctts streams with negative offsets survive.
+    pub composition_offset: i32,
+}
+
+impl SampleEntry {
+    /// Presentation timestamp = DTS + composition_offset (saturating
+    /// to keep the i64 surface monotonic for downstream code).
+    pub fn pts(&self) -> i64 {
+        (self.dts as i64).saturating_add(self.composition_offset as i64)
+    }
 }
 
 impl SampleTable {
@@ -207,6 +233,36 @@ pub fn parse_co64(payload: &[u8]) -> Result<Vec<u64>> {
     Ok(out)
 }
 
+/// Parse `ctts` composition-time-to-sample payload.
+///
+/// Layout per ISO BMFF §8.6.1.3.2: `[version:1][flags:3][n:4]` then
+/// `n × {sample_count:4, sample_offset:4}`. Version-0 sample_offset
+/// is unsigned; version-1 is signed. We normalise to `i32` (v0
+/// offsets are guaranteed positive — the cast is a no-op).
+pub fn parse_ctts(payload: &[u8]) -> Result<Vec<CttsEntry>> {
+    need(payload, 0, 8, "ctts header")?;
+    let version = payload[0];
+    let n = read_u32(&payload[4..]);
+    let body = &payload[8..];
+    if body.len() < (n as usize) * 8 {
+        return Err(Error::invalid("MOV: ctts truncated table"));
+    }
+    let mut out = Vec::with_capacity(n as usize);
+    for i in 0..(n as usize) {
+        let off = i * 8;
+        let count = read_u32(&body[off..]);
+        let offset = match version {
+            0 => read_u32(&body[off + 4..]) as i32,
+            _ => i32::from_be_bytes([body[off + 4], body[off + 5], body[off + 6], body[off + 7]]),
+        };
+        out.push(CttsEntry {
+            sample_count: count,
+            composition_offset: offset,
+        });
+    }
+    Ok(out)
+}
+
 /// Parse `stss` sync-sample table (1-based sample numbers).
 pub fn parse_stss(payload: &[u8]) -> Result<Vec<u32>> {
     need(payload, 0, 8, "stss header")?;
@@ -244,12 +300,16 @@ pub struct SampleIter<'a> {
     dts: u64,
     /// stss walking state — index into `table.stss` for next-keyframe.
     stss_idx: usize,
+    /// ctts walking state.
+    ctts_entry: usize,
+    ctts_remaining_in_run: u32,
 }
 
 impl<'a> SampleIter<'a> {
     fn new(t: &'a SampleTable) -> Self {
         let cursor_in_chunk = t.chunk_offsets.first().copied().unwrap_or(0);
         let stts_remaining_in_run = t.stts.first().map(|e| e.sample_count).unwrap_or(0);
+        let ctts_remaining_in_run = t.ctts.first().map(|e| e.sample_count).unwrap_or(0);
         Self {
             table: t,
             sample_idx: 0,
@@ -261,6 +321,32 @@ impl<'a> SampleIter<'a> {
             stts_remaining_in_run,
             dts: 0,
             stss_idx: 0,
+            ctts_entry: 0,
+            ctts_remaining_in_run,
+        }
+    }
+
+    /// Returns the composition offset for the current sample and
+    /// advances the ctts walker. Returns 0 when ctts is empty.
+    fn advance_ctts(&mut self) -> i32 {
+        if self.table.ctts.is_empty() {
+            return 0;
+        }
+        loop {
+            if self.ctts_entry >= self.table.ctts.len() {
+                return 0;
+            }
+            if self.ctts_remaining_in_run == 0 {
+                self.ctts_entry += 1;
+                if self.ctts_entry >= self.table.ctts.len() {
+                    return 0;
+                }
+                self.ctts_remaining_in_run = self.table.ctts[self.ctts_entry].sample_count;
+                continue;
+            }
+            let off = self.table.ctts[self.ctts_entry].composition_offset;
+            self.ctts_remaining_in_run -= 1;
+            return off;
         }
     }
 
@@ -375,6 +461,7 @@ impl Iterator for SampleIter<'_> {
         let offset = self.cursor_in_chunk;
         let dur = self.advance_stts();
         let kf = self.is_keyframe();
+        let composition_offset = self.advance_ctts();
         let entry = SampleEntry {
             index: self.sample_idx,
             offset,
@@ -383,6 +470,7 @@ impl Iterator for SampleIter<'_> {
             duration: dur,
             sample_description_id: self.current_sample_description_id(),
             keyframe: kf,
+            composition_offset,
         };
         // Bump cursors.
         self.sample_idx += 1;
@@ -507,6 +595,7 @@ mod tests {
             stsz_table: vec![],
             chunk_offsets: vec![512],
             stss: vec![],
+            ctts: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 1);
@@ -515,6 +604,75 @@ mod tests {
         assert_eq!(v[0].dts, 0);
         assert_eq!(v[0].duration, 100);
         assert!(v[0].keyframe);
+        assert_eq!(v[0].composition_offset, 0);
+    }
+
+    #[test]
+    fn ctts_v0_unsigned_offsets_round_trip() {
+        // 2 entries: 3 samples @ +1, 1 sample @ +5
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes()); // ver=0 + flags
+        p.extend_from_slice(&2u32.to_be_bytes());
+        p.extend_from_slice(&3u32.to_be_bytes());
+        p.extend_from_slice(&1u32.to_be_bytes());
+        p.extend_from_slice(&1u32.to_be_bytes());
+        p.extend_from_slice(&5u32.to_be_bytes());
+        let v = parse_ctts(&p).unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].sample_count, 3);
+        assert_eq!(v[0].composition_offset, 1);
+        assert_eq!(v[1].composition_offset, 5);
+    }
+
+    #[test]
+    fn ctts_v1_negative_offset_round_trip() {
+        // ver=1, single entry 2 × -3
+        let mut p = Vec::new();
+        p.push(1);
+        p.extend_from_slice(&[0, 0, 0]);
+        p.extend_from_slice(&1u32.to_be_bytes());
+        p.extend_from_slice(&2u32.to_be_bytes()); // count
+        p.extend_from_slice(&(-3i32).to_be_bytes());
+        let v = parse_ctts(&p).unwrap();
+        assert_eq!(v[0].composition_offset, -3);
+    }
+
+    #[test]
+    fn iter_with_ctts_offsets_pts() {
+        // 4 samples; ctts run [3 × +10, 1 × +0] → PTS = DTS + offset.
+        let table = SampleTable {
+            stts: vec![SttsEntry {
+                sample_count: 4,
+                sample_duration: 50,
+            }],
+            stsc: vec![StscEntry {
+                first_chunk: 1,
+                samples_per_chunk: 4,
+                sample_description_id: 1,
+            }],
+            stsz_default_size: Some(10),
+            stsz_count: 4,
+            stsz_table: vec![],
+            chunk_offsets: vec![100],
+            stss: vec![],
+            ctts: vec![
+                CttsEntry {
+                    sample_count: 3,
+                    composition_offset: 10,
+                },
+                CttsEntry {
+                    sample_count: 1,
+                    composition_offset: 0,
+                },
+            ],
+        };
+        let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
+        assert_eq!(v.len(), 4);
+        assert_eq!(v[0].composition_offset, 10);
+        assert_eq!(v[2].composition_offset, 10);
+        assert_eq!(v[3].composition_offset, 0);
+        assert_eq!(v[3].pts(), 150); // dts=150, off=0
+        assert_eq!(v[2].pts(), 110); // dts=100, off=10
     }
 
     #[test]
@@ -535,6 +693,7 @@ mod tests {
             stsz_table: vec![10, 20, 30, 40],
             chunk_offsets: vec![1000, 2000],
             stss: vec![1, 3],
+            ctts: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 4);

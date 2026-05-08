@@ -260,6 +260,20 @@ pub const UDTA: [u8; 4] = fourcc("udta");
 pub const TREF: [u8; 4] = fourcc("tref");
 pub const PNOT: [u8; 4] = fourcc("pnot");
 
+// Apple-specific / round-2 atoms.
+pub const GAMA: [u8; 4] = fourcc("gama");
+pub const PASP: [u8; 4] = fourcc("pasp");
+pub const CLAP: [u8; 4] = fourcc("clap");
+pub const COLR: [u8; 4] = fourcc("colr");
+pub const TAPT: [u8; 4] = fourcc("tapt");
+pub const CLEF: [u8; 4] = fourcc("clef");
+pub const PROF: [u8; 4] = fourcc("prof");
+pub const ENOF: [u8; 4] = fourcc("enof");
+pub const CHAN: [u8; 4] = fourcc("chan");
+pub const META: [u8; 4] = fourcc("meta");
+pub const KEYS: [u8; 4] = fourcc("keys");
+pub const ILST: [u8; 4] = fourcc("ilst");
+
 #[cfg(test)]
 mod tests {
     use super::*;

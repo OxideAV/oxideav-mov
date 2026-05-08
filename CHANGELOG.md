@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 2 — Apple-specific atoms + edit lists + composition timing.
+  - `src/lib.rs` (was missing in round 1) declaring the public module
+    surface and re-exporting the parsed types.
+  - `src/standalone.rs` shim providing a self-contained
+    `Error`/`Result`/`ReadSeek` API for `default-features = false`
+    consumers.
+  - `edts/elst` parser (`Edit` + `EditList`); supports v0 (32-bit) and
+    v1 (64-bit) entries plus the `media_time = -1` empty-edit
+    sentinel.
+  - `ctts` composition-time-to-sample parser; surfaces signed
+    `composition_offset` on `SampleEntry` so `pts() = dts + offset`.
+  - `tref` track-reference parser with classified `TrackRefKind`
+    (chap / tmcd / scpt / ssrc / sync / hint / mpod / other).
+  - `tapt` Apple Track Aperture Mode Dimensions (clef/prof/enof
+    sub-atoms each carrying 16.16 fixed-point pixel dimensions).
+  - Apple-shaped `meta` atom parser (hdlr + keys + ilst), surfacing a
+    flat `Vec<MetaKeyValue>` on `MovDemuxer` (movie-level) and
+    `Track::meta` (track-level).
+  - Visual sample-description extension scanner inside `stsd`:
+    detects `gama` (16.16 gamma), `pasp` (pixel aspect ratio),
+    `clap` (clean aperture), `colr` (Apple `nclc` *or* ISO `nclx`
+    discrimination via the leading 4-byte `colorParameterType`).
+  - Audio sample-description `chan` extension scanner (Apple Core
+    Audio channel-layout tag + bitmap; per-channel descriptions kept
+    as raw bytes for round 3).
+  - `MovDemuxer::is_faststart()` probe — true when `moov` precedes
+    `mdat` at top level.
+  - 18 new unit tests + 4 new integration tests (`synth_video_extensions.rs`,
+    `synth_edits_and_ctts.rs`, `synth_apple_meta.rs`).
 - Round 1 — initial QTFF demuxer.
   - Atom walker over QTFF `[size:4][type:4]([ext_size:8])?[payload]`
     with `size==1` (extended 64-bit) and `size==0` (to-end-of-file)
