@@ -575,6 +575,131 @@ fn unsupported_error(msg: impl Into<String>) -> Error {
     }
 }
 
+/// Built-in `file://` URL opener for [`MovDemuxer::open_with_aliases`].
+///
+/// Resolves a `file://`-scheme URL to a local-filesystem
+/// `std::fs::File` and wraps it in a `Box<dyn ReadSeek>` for the
+/// alias-resolver. URLs that don't start with `file://` (and the
+/// degenerate `file:` shape used by some legacy authoring tools) are
+/// rejected with [`std::io::ErrorKind::Unsupported`] so the alias
+/// chain falls through to the next alternate rather than fail the
+/// whole open.
+///
+/// The resolver does **not** try to interpret `host` parts: only
+/// `file:///absolute/path`, `file://localhost/absolute/path`, and the
+/// legacy `file:relative-or-absolute` forms are honoured. URL-encoded
+/// characters (`%20`, etc.) are decoded byte-by-byte before being
+/// fed to the filesystem, which matches the behaviour of macOS
+/// QuickTime Player on alias-chain resolution. Multi-byte UTF-8
+/// percent-encoded path components are forwarded verbatim — we don't
+/// re-encode after decoding.
+///
+/// Wire this in via:
+///
+/// ```ignore
+/// use oxideav_mov::{open_file_url, MovDemuxer};
+/// let f = std::fs::File::open("/path/to/local-aliases.mov")?;
+/// let dem = MovDemuxer::open_with_aliases(Box::new(f), open_file_url)?;
+/// ```
+///
+/// The opener is intentionally a free function (rather than a default
+/// argument on `open_with_aliases`) so callers who only want
+/// in-memory aliases pay nothing for it; consumers who want the
+/// "common local-aliases case" pull it in explicitly.
+pub fn open_file_url(url: &str) -> std::io::Result<Box<dyn ReadSeek>> {
+    let path = file_url_to_path(url).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("MOV: open_file_url: not a local file:// URL: '{url}'"),
+        )
+    })?;
+    let f = std::fs::File::open(&path)?;
+    Ok(Box::new(f))
+}
+
+/// Decode a `file://`-scheme URL into a filesystem path, returning
+/// `None` when the URL doesn't fit any of the recognised shapes:
+///
+/// * `file:///absolute/path`
+/// * `file://localhost/absolute/path` (`localhost` host stripped)
+/// * `file:absolute-or-relative-path` (legacy QuickTime alias shape)
+///
+/// Any URL with a non-empty, non-`localhost` host is rejected so
+/// callers don't accidentally read from a network mount that the user
+/// didn't authorise.
+fn file_url_to_path(url: &str) -> Option<std::path::PathBuf> {
+    // Lowercase scheme match (URL schemes are case-insensitive per
+    // RFC 3986 §3.1).
+    let rest = if url.len() >= 5 && url[..5].eq_ignore_ascii_case("file:") {
+        &url[5..]
+    } else {
+        return None;
+    };
+    // Three shapes:
+    //   file:///abs              → rest = "//"  + "/abs"
+    //   file://host/abs          → rest = "//host/abs"
+    //   file:rel-or-abs          → rest = "rel-or-abs"
+    let path_str = if let Some(after_slashes) = rest.strip_prefix("//") {
+        // Authority + path. Host must be empty or "localhost".
+        let slash = after_slashes.find('/').unwrap_or(after_slashes.len());
+        let host = &after_slashes[..slash];
+        if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
+            return None;
+        }
+        // Path is everything from the first slash onwards. Note that
+        // when host is empty, `slash` == 0, so path_str starts with
+        // a leading '/'.
+        if slash >= after_slashes.len() {
+            return None;
+        }
+        &after_slashes[slash..]
+    } else {
+        rest
+    };
+    // Percent-decode the path (defensive — the writer might URL-encode
+    // spaces or special characters).
+    let decoded = percent_decode_to_bytes(path_str)?;
+    let s = String::from_utf8(decoded).ok()?;
+    Some(std::path::PathBuf::from(s))
+}
+
+/// Minimal RFC 3986 percent-decoder for the `file://` opener — accepts
+/// `%XX` (uppercase or lowercase hex) and passes everything else
+/// through. Returns `None` on a malformed `%` escape rather than
+/// silently letting it through, matching the strict behaviour the
+/// HTTP/file URL parsers in `url` and `percent-encoding` crates apply
+/// (we don't pull either to keep this crate dep-free).
+fn percent_decode_to_bytes(s: &str) -> Option<Vec<u8>> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = hex_digit(bytes[i + 1])?;
+            let lo = hex_digit(bytes[i + 2])?;
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(b);
+            i += 1;
+        }
+    }
+    Some(out)
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[cfg(feature = "registry")]
 fn build_streams(tracks: &[Track], resolver: &dyn CodecResolver) -> Vec<StreamInfo> {
     let mut out = Vec::with_capacity(tracks.len());

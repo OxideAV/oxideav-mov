@@ -14,6 +14,7 @@ pub mod atom;
 pub mod bmff_meta;
 pub mod chapter;
 pub mod demuxer;
+pub mod derived;
 pub mod edit;
 pub mod gmhd;
 pub mod header;
@@ -32,15 +33,17 @@ pub mod registry;
 pub mod standalone;
 
 pub use bmff_meta::{
-    file_extents_for_item, idat_bytes_for_item, parse_bmff_meta, BmffMeta, ItemExtent,
-    ItemInfoEntry, ItemLocation, ItemReference,
+    file_extents_for_item, idat_bytes_concat, idat_bytes_for_item, item_data, parse_bmff_meta,
+    primary_item_data, BmffMeta, ItemDataLocation, ItemExtent, ItemInfoEntry, ItemLocation,
+    ItemReference,
 };
 pub use chapter::{
     decode_text_sample, decode_text_sample_full, parse_text_sample_styles, ChapterEntry,
     ChapterList, ColorRgba, FontTableEntry, HighlightColor, HighlightRange, StyleRecord,
     TextSampleStyles,
 };
-pub use demuxer::{MovDemuxer, MAX_ALIAS_DEPTH};
+pub use demuxer::{open_file_url, MovDemuxer, MAX_ALIAS_DEPTH};
+pub use derived::{parse_grid, parse_overlay, parse_overlay_with_source_count, Grid, Overlay};
 pub use edit::{Edit, EditList};
 pub use gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, Tcmi, TextHeader};
 pub use header::{Ftyp, Hdlr, Mdhd, Mvhd, Tkhd, TrackRotation};

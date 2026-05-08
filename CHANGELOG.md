@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 9 — HEIF derived-image payloads (`grid` / `iovl`),
+  `pitm`-aware primary-item-bytes convenience helper, and a built-in
+  `file://` URL opener for reference-movie alias chains.
+  - New `derived` module with `parse_grid` / `parse_overlay` /
+    `parse_overlay_with_source_count`. ISO/IEC 23008-12 §6.6.2.3.1
+    (grid: rows/cols/output dimensions, both 16- and 32-bit shapes
+    via the flags bit) and §6.6.2.3.2 (overlay: 4×u16 RGBA canvas
+    fill, signed `(h_offset, v_offset)` offsets per layer) are both
+    decoded. `parse_overlay` infers the layer count from the body's
+    residual length, while `parse_overlay_with_source_count`
+    validates against the caller-provided `dimg` target count.
+    Public types: `Grid`, `Overlay`.
+  - `bmff_meta::primary_item_data(meta) -> Option<ItemDataLocation>`
+    walks `pitm` → `iloc` and returns the primary item's bytes (when
+    `idat`-resident, concatenated across multi-extent items) or its
+    file-extents (when `construction_method == 0`). Construction
+    method 2 (`item_offset`) is surfaced via
+    `ItemDataLocation::Other` so callers can dispatch their own
+    indirection. Generic `item_data(meta, item_id)` covers the same
+    surface for any item.
+  - `bmff_meta::idat_bytes_concat` — convenience helper that joins
+    the multi-extent `idat` slices [`idat_bytes_for_item`] returns
+    into a single `Vec<u8>`, matching the common single-byte-string
+    consumer (HEIF derived-image payloads, small inline metadata).
+  - `demuxer::open_file_url` — built-in `file://` URL opener for
+    [`MovDemuxer::open_with_aliases`]. Handles
+    `file:///absolute/path`, `file://localhost/path`, and the legacy
+    `file:rel-or-abs` shapes; rejects non-`file:` schemes and
+    foreign-host authorities with `std::io::ErrorKind::Unsupported`
+    so the alias chain falls through. Percent-decodes path segments
+    so URL-encoded spaces (`%20`) resolve to real filesystem paths
+    on macOS / Linux.
+  - 24 new tests (10 `derived` unit + 13 `synth_round9` integration
+    + 1 `_smoke` helper). Total now 172 (was 148).
+  - Public types added: `Grid`, `Overlay`, `ItemDataLocation`. New
+    helpers: `parse_grid`, `parse_overlay`,
+    `parse_overlay_with_source_count`, `primary_item_data`,
+    `item_data`, `idat_bytes_concat`, `open_file_url`.
+
 - Round 8 — HEIF/HEIC item-properties container (`iprp`/`ipco`/`ipma`),
   meta-only files (no `moov` tracks), and `iref` typed-reference
   resolver helpers (`derived_from`, `auxiliary_for`, `thumbnail_of`,

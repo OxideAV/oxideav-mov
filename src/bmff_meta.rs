@@ -758,6 +758,97 @@ pub fn idat_bytes_for_item(meta: &BmffMeta, item_id: u32) -> Option<Vec<&[u8]>> 
     Some(out)
 }
 
+/// Concatenated `idat`-resident bytes for an item, eliding the multi-
+/// extent split that [`idat_bytes_for_item`] surfaces. Convenience wrapper
+/// around [`idat_bytes_for_item`] for the common single-byte-string
+/// consumer (HEIF derived-image payloads, small inline metadata).
+pub fn idat_bytes_concat(meta: &BmffMeta, item_id: u32) -> Option<Vec<u8>> {
+    let parts = idat_bytes_for_item(meta, item_id)?;
+    let mut total = 0usize;
+    for p in &parts {
+        total += p.len();
+    }
+    let mut out = Vec::with_capacity(total);
+    for p in parts {
+        out.extend_from_slice(p);
+    }
+    Some(out)
+}
+
+/// Where an item's data lives, irrespective of construction method.
+///
+/// This is the input shape for the [`primary_item_data`] convenience
+/// helper: it surfaces both `idat`-resident items (the common case for
+/// HEIF derived images and small `Exif`/`xmp ` metadata blobs) and
+/// file-extents items (`construction_method == 0`, the typical shape
+/// for bulk HEVC payloads in HEIF) without forcing the caller to
+/// branch by hand. `Other` is a fall-through for the rare
+/// `construction_method == 2` (item_offset, where the data lives at an
+/// offset *inside another item*) — we surface the construction method
+/// + extents so callers can dispatch their own resolver.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ItemDataLocation {
+    /// Construction-method 1: the bytes are inside the file's `idat`
+    /// box, already concatenated into one slice.
+    Idat(Vec<u8>),
+    /// Construction-method 0: a list of `(absolute_file_offset,
+    /// length)` pairs; concatenate the resulting reads to recover the
+    /// item's bytes.
+    FileExtents(Vec<(u64, u64)>),
+    /// Construction-method 2 or any other future shape: caller must
+    /// resolve via the parent item / data-reference table itself.
+    /// `extents` carry whatever the iloc parser saw verbatim.
+    Other {
+        construction_method: u8,
+        extents: Vec<ItemExtent>,
+        base_offset: u64,
+        data_reference_index: u16,
+    },
+}
+
+/// Walk `pitm` → `iloc` and return the primary item's data location in
+/// one call. Returns `None` when:
+///
+/// * the file has no `pitm` (no primary item declared), or
+/// * the `pitm` points at an item id that has no `iloc` entry.
+///
+/// On the `idat` path the bytes are already concatenated; on the
+/// `file_extents` path the caller still has to read the input. We
+/// return the absolute file offsets so the caller can issue the reads
+/// itself — we don't reach back into the demuxer's `Read + Seek`
+/// handle from this helper because the parsed `BmffMeta` is owned
+/// independently of the input.
+///
+/// Construction-method 2 (`item_offset`) items are surfaced through
+/// [`ItemDataLocation::Other`] so the caller can pick its own resolver
+/// — we don't follow the indirection here because the spec leaves the
+/// outer-item resolution to the consumer.
+pub fn primary_item_data(meta: &BmffMeta) -> Option<ItemDataLocation> {
+    let pid = meta.primary_item?;
+    item_data(meta, pid)
+}
+
+/// Same as [`primary_item_data`] but for an arbitrary item id.
+/// Returns `None` when `iloc` has no entry for the id.
+pub fn item_data(meta: &BmffMeta, item_id: u32) -> Option<ItemDataLocation> {
+    let loc = meta.find_location(item_id)?;
+    match loc.construction_method {
+        0 => Some(ItemDataLocation::FileExtents(
+            loc.extents
+                .iter()
+                .map(|e| (loc.base_offset + e.offset, e.length))
+                .collect(),
+        )),
+        1 => idat_bytes_concat(meta, item_id).map(ItemDataLocation::Idat),
+        m => Some(ItemDataLocation::Other {
+            construction_method: m,
+            extents: loc.extents.clone(),
+            base_offset: loc.base_offset,
+            data_reference_index: loc.data_reference_index,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
