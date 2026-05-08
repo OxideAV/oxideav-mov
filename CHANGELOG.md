@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 7 — ISO BMFF §8.11 `meta` box parsing (HEIF/HEIC/MIAF/AVIF
+  surface), multi-hop `rmra/url ` alias-chain following with cycle
+  detection, and the QTFF text-sample style trailers
+  (`styl`/`ftab`/`hlit`/`hclr`/`drpo`).
+  - New `bmff_meta` module with `BmffMeta { handler_type, primary_item,
+    items, locations, idat, xml, bxml, references }` plus
+    `ItemExtent`, `ItemLocation`, `ItemInfoEntry`, `ItemReference`
+    types. `pitm` v0/v1, `iloc` v0/v1/v2 (offset/length/base_offset/
+    extent_index sized 0/4/8 each), `iinf` with `infe` v0/v1/v2/v3,
+    `idat`, `xml `, `bxml`, and `iref` (v0 u16 ids, v1 u32 ids, all
+    typed children) all decode.
+  - `MovDemuxer` exposes `bmff_meta: Option<BmffMeta>` (movie-scope)
+    and `file_bmff_meta: Option<BmffMeta>` (top-level scope, common
+    for HEIF still-image files); `Track` exposes `bmff_meta:
+    Option<BmffMeta>` (track-scope). The Apple key-value `meta` shape
+    still wins when both interpretations of a single atom are valid;
+    we only fall back to BMFF mode when the Apple parser declines.
+  - `file_extents_for_item(meta, id)` / `idat_bytes_for_item(meta, id)`
+    helpers resolve a HEIF item to its file-offset extents (when
+    construction_method == 0) or to its inline `idat` slice (when
+    construction_method == 1).
+  - `MovDemuxer::open_with_aliases` / `open_with_aliases_resolver` now
+    follow up to `MAX_ALIAS_DEPTH = 4` reference-movie hops with a
+    visited-URL set so cycles are rejected before the depth cap is
+    reached. Self-contained inputs still pass through untouched and
+    the opener is never called for them.
+  - `chapter::parse_text_sample_styles(data) -> (String, TextSampleStyles)`
+    walks the trailing extension atoms of an Apple text sample and
+    surfaces every documented styling record: `styl` style runs
+    (start/end/font/face/size/RGBA), `hlit` highlight ranges, `hclr`
+    highlight colour, `drpo` drop-shadow offsets (signed i16), and
+    `ftab` font-table entries. The existing
+    `decode_text_sample_full` (encd-only) is preserved unchanged.
+  - Public types added: `BmffMeta`, `ItemExtent`, `ItemInfoEntry`,
+    `ItemLocation`, `ItemReference`, `parse_bmff_meta`,
+    `file_extents_for_item`, `idat_bytes_for_item`, `MAX_ALIAS_DEPTH`,
+    `parse_text_sample_styles`, `TextSampleStyles`, `StyleRecord`,
+    `ColorRgba`, `HighlightRange`, `HighlightColor`, `FontTableEntry`.
+
 - Round 6 — alias-chain following (one hop), `tmcd` sample-description
   decode inside `stsd`, and `encd` text-encoding-override surfacing on
   chapter samples.

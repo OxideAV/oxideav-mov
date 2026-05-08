@@ -17,6 +17,7 @@ use crate::atom::{
     MOOV, MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SKIP, SMHD, STBL, STCO,
     STSC, STSD, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
 };
+use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
 use crate::edit::{parse_elst, EditList};
 use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
@@ -39,6 +40,14 @@ use oxideav_core::{
 #[cfg(not(feature = "registry"))]
 use crate::standalone::{Error, ReadSeek, Result};
 
+/// Maximum number of `rmra/url ` alias hops [`MovDemuxer::open_with_aliases`]
+/// will follow before refusing the open. The cap matches the widely-used
+/// QuickTime player heuristic (chains of more than ~4 hops indicate
+/// either an authoring bug or a deliberate denial-of-service shape) and
+/// is paired with a visited-URL set so cycles abort even before the
+/// depth limit is reached.
+pub const MAX_ALIAS_DEPTH: usize = 4;
+
 /// Round-1 demuxer. Lifetime is bounded by the input reader; on
 /// `open` we walk `moov` once and cache enough state to stream
 /// packets without reseeking the index.
@@ -60,6 +69,16 @@ pub struct MovDemuxer {
     /// the parsed alias list around so callers that treat `rmra` as
     /// purely informational can still inspect it.
     pub reference_movies: Vec<ReferenceMovie>,
+    /// Movie-level ISO BMFF §8.11 `meta` box, when the file's
+    /// `moov/meta` is in the ISO/IEC 14496-12 (HEIF / MIAF / MPEG-7)
+    /// shape rather than the Apple key-value shape (which lives in
+    /// [`Self::meta`]). The two are mutually exclusive: a single
+    /// `meta` atom can only be one shape at a time.
+    pub bmff_meta: Option<BmffMeta>,
+    /// File-level ISO BMFF §8.11 `meta` box, when the input's top
+    /// level carries a `meta` atom (typical for HEIF / MIAF / AVIF /
+    /// JPEG-XL still images). Independent of any `moov/meta`.
+    pub file_bmff_meta: Option<BmffMeta>,
     /// True iff the first non-skip top-level atom after `ftyp` is
     /// `moov`, indicating the file is laid out for streaming
     /// ("faststart").
@@ -83,25 +102,22 @@ impl MovDemuxer {
         Self::open_with(input, &NULL_RESOLVER)
     }
 
-    /// Open a QuickTime file, transparently following one `rmra/url `
-    /// alias hop when the input file is a *reference movie*: a `.mov`
+    /// Open a QuickTime file, transparently following any `rmra/url `
+    /// alias hops when the input file is a *reference movie*: a `.mov`
     /// whose `moov` carries only an `rmra` list and no inline tracks
     /// (QTFF "Reference Movies" §). The `opener` callback is invoked
     /// with each `url ` alias in order; the first URL it can open is
-    /// re-parsed as a regular QuickTime file, and the resulting
-    /// demuxer is returned.
-    ///
-    /// Round 6 limits itself to a *single hop*: if the alias-target
-    /// is itself another reference movie (no tracks, only rmra) we
-    /// surface an `Unsupported` error rather than chase the chain
-    /// further. This matches QuickTime's own behaviour of refusing
-    /// excessive indirection.
+    /// re-parsed as a regular QuickTime file. If that resolved target
+    /// is itself another reference movie, the resolver continues
+    /// chasing the chain up to [`MAX_ALIAS_DEPTH`] hops, with a
+    /// visited-URL set to detect cycles.
     ///
     /// Non-`url ` data references (`alis` / `rsrc`) are skipped — the
     /// opener never receives them. Returns `Unsupported` when:
     ///   * no alias has a usable `url ` reference, or
     ///   * the opener errors on every URL it sees, or
-    ///   * the resolved alias target is itself a reference-only file.
+    ///   * the chain exceeds [`MAX_ALIAS_DEPTH`] hops, or
+    ///   * the chain forms a cycle (a URL is revisited).
     ///
     /// `opener` returns its own error type via [`std::io::Error`]; an
     /// I/O failure on a single URL is treated the same as "URL not
@@ -144,27 +160,67 @@ impl MovDemuxer {
         match Self::open_with(input, resolver) {
             Ok(d) => Ok(d),
             Err(_e) if !refs.is_empty() => {
-                // Walk the aliases — first usable URL wins.
-                for r in &refs {
-                    let url = match r.data_ref.as_ref() {
-                        Some(crate::reference::DataReference::Url(s)) => s.as_str(),
-                        _ => continue,
+                // Multi-hop walk with a visited-URL set so cycles abort.
+                let mut visited: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                let mut depth = 0usize;
+                let mut current_refs = refs;
+                loop {
+                    if depth >= MAX_ALIAS_DEPTH {
+                        return Err(unsupported_error(format!(
+                            "MOV: alias chain exceeds MAX_ALIAS_DEPTH={MAX_ALIAS_DEPTH}"
+                        )));
+                    }
+                    // Try the alternates in order; first reachable URL wins.
+                    let mut next_input: Option<Box<dyn ReadSeek>> = None;
+                    let mut tried = 0usize;
+                    let mut last_url: Option<String> = None;
+                    for r in &current_refs {
+                        let url = match r.data_ref.as_ref() {
+                            Some(crate::reference::DataReference::Url(s)) => s.clone(),
+                            _ => continue,
+                        };
+                        tried += 1;
+                        if visited.contains(&url) {
+                            return Err(unsupported_error(format!(
+                                "MOV: alias chain cycle detected (revisit of '{url}')"
+                            )));
+                        }
+                        match opener(url.as_str()) {
+                            Ok(b) => {
+                                visited.insert(url.clone());
+                                last_url = Some(url);
+                                next_input = Some(b);
+                                break;
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                    let mut nxt = match next_input {
+                        Some(b) => b,
+                        None => {
+                            return Err(unsupported_error(format!(
+                                "MOV: alias chain exhausted ({tried} alternate(s) tried, none \
+                                 reachable)"
+                            )));
+                        }
                     };
-                    let next = match opener(url) {
-                        Ok(b) => b,
-                        Err(_) => continue,
-                    };
-                    // One hop only — refuse a target that's also a
-                    // pure reference-only file. Any error from the
-                    // resolved target's open is surfaced verbatim so
-                    // callers can distinguish "alias chain too deep"
-                    // from "alias target is malformed".
-                    return Self::open_with(next, resolver);
+                    // Probe the resolved target.
+                    nxt.seek(SeekFrom::Start(0))?;
+                    let nxt_refs = Self::probe_reference_movies(nxt.as_mut())?;
+                    nxt.seek(SeekFrom::Start(0))?;
+                    match Self::open_with(nxt, resolver) {
+                        Ok(d) => return Ok(d),
+                        Err(_e) if !nxt_refs.is_empty() => {
+                            // Another reference-movie hop — descend.
+                            depth += 1;
+                            current_refs = nxt_refs;
+                            let _ = last_url; // already added to visited
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
-                Err(unsupported_error(format!(
-                    "MOV: alias chain exhausted ({} alternate(s) tried, none reachable)",
-                    refs.len()
-                )))
             }
             Err(e) => Err(e),
         }
@@ -225,6 +281,8 @@ impl MovDemuxer {
         let mut movie_meta: Vec<MetaKeyValue> = Vec::new();
         let mut movie_user_data: Vec<UserDataEntry> = Vec::new();
         let mut reference_movies: Vec<ReferenceMovie> = Vec::new();
+        let mut movie_bmff_meta: Option<BmffMeta> = None;
+        let mut file_bmff_meta: Option<BmffMeta> = None;
         let mut has_mvex = false;
         // Faststart probe: track whether `moov` precedes `mdat` in
         // the top-level atom stream, ignoring `ftyp`, `free`, `skip`,
@@ -267,8 +325,18 @@ impl MovDemuxer {
                         &mut movie_meta,
                         &mut movie_user_data,
                         &mut reference_movies,
+                        &mut movie_bmff_meta,
                         &mut has_mvex,
                     )?;
+                }
+                t if t == &META => {
+                    // File-level meta box — common in HEIF/HEIC/AVIF
+                    // still-image files. The parser distinguishes the
+                    // ISO BMFF §8.11 shape from the Apple key-value
+                    // shape; only the former is meaningful at file
+                    // scope (Apple `meta` is never written at file
+                    // level in practice).
+                    file_bmff_meta = parse_bmff_meta(input.as_mut(), &hdr)?;
                 }
                 t if t == &MDAT => {
                     seen_mdat = true;
@@ -350,6 +418,8 @@ impl MovDemuxer {
             meta: movie_meta,
             user_data: movie_user_data,
             reference_movies,
+            bmff_meta: movie_bmff_meta,
+            file_bmff_meta,
             faststart: seen_moov_before_mdat,
             samples,
             next: 0,
@@ -568,6 +638,7 @@ fn parse_moov<R: Read + Seek + ?Sized>(
     meta: &mut Vec<MetaKeyValue>,
     user_data: &mut Vec<UserDataEntry>,
     reference_movies: &mut Vec<ReferenceMovie>,
+    bmff_meta: &mut Option<BmffMeta>,
     has_mvex: &mut bool,
 ) -> Result<()> {
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
@@ -582,8 +653,12 @@ fn parse_moov<R: Read + Seek + ?Sized>(
                 tracks.push(track);
             }
             t if t == &META => {
+                // Try Apple shape first; fall back to ISO BMFF §8.11
+                // shape when the Apple parser declines.
                 if let Some(kv) = parse_meta_atom(r, child)? {
                     *meta = kv;
+                } else if let Some(b) = parse_bmff_meta(r, child)? {
+                    *bmff_meta = Some(b);
                 }
             }
             t if t == &UDTA => {
@@ -696,6 +771,8 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
             t if t == &META => {
                 if let Some(kv) = parse_meta_atom(r, child)? {
                     track.meta = kv;
+                } else if let Some(b) = parse_bmff_meta(r, child)? {
+                    track.bmff_meta = Some(b);
                 }
             }
             t if t == &UDTA => {
