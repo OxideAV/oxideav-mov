@@ -1,0 +1,29 @@
+[package]
+name = "oxideav-mov"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust Apple QuickTime File Format (QTFF) demuxer — atom walker, sample-table parser, codec FourCC resolution via oxideav-core registry"
+repository = "https://github.com/OxideAV/oxideav-mov"
+homepage = "https://github.com/OxideAV/oxideav-mov"
+readme = "README.md"
+keywords = ["multimedia", "container", "quicktime", "mov", "qtff"]
+categories = ["multimedia::encoding"]
+
+[features]
+default = ["registry"]
+
+# Wires up the demuxer trait implementation against `oxideav-core` so the
+# crate plugs into the `oxideav` framework registry. Default-on; turn off
+# for the standalone build path that exposes a free-standing parsing API
+# without the framework dependency tree.
+registry = ["dep:oxideav-core"]
+
+[dependencies]
+# `oxideav-core` is gated behind the default-on `registry` feature so
+# downstream consumers can depend on `oxideav-mov` with
+# `default-features = false` and avoid the framework dependency tree
+# entirely.
+oxideav-core = { version = "0.1", optional = true }
