@@ -12,20 +12,21 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::atom::{
-    read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DREF, EDTS,
-    ELST, ENOF, FREE, FTYP, GMHD, HDLR, ILST, KEYS, MDAT, MDHD, MDIA, META, MINF, MOOF, MOOV, MVEX,
-    MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SKIP, SMHD, STBL, STCO, STSC, STSD,
-    STSS, STSZ, STTS, TAPT, TKHD, TRAK, TREF, VMHD, WIDE,
+    read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DINF, DREF,
+    EDTS, ELST, ENOF, FREE, FTYP, GMHD, HDLR, ILST, KEYS, MDAT, MDHD, MDIA, META, MINF, MOOF, MOOV,
+    MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SKIP, SMHD, STBL, STCO, STSC,
+    STSD, STSS, STSZ, STTS, TAPT, TKHD, TRAK, TREF, UDTA, VMHD, WIDE,
 };
 use crate::edit::{parse_elst, EditList};
 use crate::header::{parse_ftyp, parse_hdlr, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd};
 use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
-use crate::reference::{parse_rdrf, ReferenceMovie};
+use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
 use crate::sample_table::{
     parse_co64, parse_ctts, parse_stco, parse_stsc, parse_stss, parse_stsz, parse_stts,
     SampleEntry, SampleTable,
 };
 use crate::track::{parse_stsd, Track, TrackRef, TrackRefKind};
+use crate::user_data::{parse_udta, UserDataEntry};
 
 #[cfg(feature = "registry")]
 use oxideav_core::{
@@ -47,6 +48,10 @@ pub struct MovDemuxer {
     /// Movie-level Apple `meta` key-value pairs (when the file
     /// carries an Apple-shaped `meta` atom at moov scope).
     pub meta: Vec<MetaKeyValue>,
+    /// Movie-level `udta` user-data entries (©nam, ©cpy, name, …) at
+    /// `moov/udta` scope. Track-level `udta` is exposed through
+    /// [`Track::user_data`].
+    pub user_data: Vec<UserDataEntry>,
     /// Apple "reference movies" parsed from the optional `moov/rmra`
     /// container. When non-empty AND the file lacks an in-file `mdat`,
     /// `open()` fails with an `Unsupported` error; otherwise we keep
@@ -90,6 +95,7 @@ impl MovDemuxer {
         let mut mvhd: Option<Mvhd> = None;
         let mut tracks: Vec<Track> = Vec::new();
         let mut movie_meta: Vec<MetaKeyValue> = Vec::new();
+        let mut movie_user_data: Vec<UserDataEntry> = Vec::new();
         let mut reference_movies: Vec<ReferenceMovie> = Vec::new();
         let mut has_mvex = false;
         // Faststart probe: track whether `moov` precedes `mdat` in
@@ -131,6 +137,7 @@ impl MovDemuxer {
                         &mut mvhd,
                         &mut tracks,
                         &mut movie_meta,
+                        &mut movie_user_data,
                         &mut reference_movies,
                         &mut has_mvex,
                     )?;
@@ -213,6 +220,7 @@ impl MovDemuxer {
             mvhd,
             tracks,
             meta: movie_meta,
+            user_data: movie_user_data,
             reference_movies,
             faststart: seen_moov_before_mdat,
             samples,
@@ -355,6 +363,7 @@ fn parse_moov<R: Read + Seek + ?Sized>(
     mvhd: &mut Option<Mvhd>,
     tracks: &mut Vec<Track>,
     meta: &mut Vec<MetaKeyValue>,
+    user_data: &mut Vec<UserDataEntry>,
     reference_movies: &mut Vec<ReferenceMovie>,
     has_mvex: &mut bool,
 ) -> Result<()> {
@@ -373,6 +382,10 @@ fn parse_moov<R: Read + Seek + ?Sized>(
                 if let Some(kv) = parse_meta_atom(r, child)? {
                     *meta = kv;
                 }
+            }
+            t if t == &UDTA => {
+                let body = read_payload(r, child)?;
+                *user_data = parse_udta(&body)?;
             }
             t if t == &RMRA => {
                 *reference_movies = parse_rmra(r, child)?;
@@ -481,6 +494,10 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
                 if let Some(kv) = parse_meta_atom(r, child)? {
                     track.meta = kv;
                 }
+            }
+            t if t == &UDTA => {
+                let body = read_payload(r, child)?;
+                track.user_data = parse_udta(&body)?;
             }
             _ => {}
         }
@@ -664,13 +681,36 @@ fn parse_minf<R: Read + Seek + ?Sized>(
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
     walk_children(r, Some(body_end), |r, child| {
         match &child.fourcc {
-            t if t == &VMHD || t == &SMHD || t == &GMHD || t == &DREF => {
-                // Header / data-info — captured at the type level via hdlr.
+            t if t == &VMHD || t == &SMHD || t == &GMHD => {
+                // Per-MediaType media-information header. The handler
+                // type already classifies the track for us; the header
+                // body's only payload-affecting field is `gmhd`'s
+                // `tmcd`/`text` extension which round-4 still
+                // captures only structurally.
+            }
+            t if t == &DINF => {
+                parse_dinf(r, child, track)?;
             }
             t if t == &STBL => {
                 parse_stbl(r, child, track)?;
             }
             _ => {}
+        }
+        Ok(())
+    })
+}
+
+fn parse_dinf<R: Read + Seek + ?Sized>(
+    r: &mut R,
+    hdr: &AtomHeader,
+    track: &mut Track,
+) -> Result<()> {
+    let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
+    r.seek(SeekFrom::Start(hdr.payload_offset))?;
+    walk_children(r, Some(body_end), |r, child| {
+        if child.fourcc == DREF {
+            let body = read_payload(r, child)?;
+            track.data_references = parse_dref(&body)?;
         }
         Ok(())
     })

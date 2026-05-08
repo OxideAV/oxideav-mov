@@ -14,7 +14,9 @@ use crate::media_meta::{
     parse_chan, parse_clap, parse_colr, parse_pasp, Chan, Clap, ColorParameters, Cslg,
     MetaKeyValue, Pasp, Tapt,
 };
+use crate::reference::DataReference;
 use crate::sample_table::SampleTable;
+use crate::user_data::UserDataEntry;
 
 #[cfg(feature = "registry")]
 use oxideav_core::{Error, Result};
@@ -140,6 +142,17 @@ pub struct Track {
     pub cslg: Option<Cslg>,
     /// Track-level Apple `meta` key-value pairs, when present.
     pub meta: Vec<MetaKeyValue>,
+    /// Track-level `udta` user-data entries, when present. Same atom
+    /// shape as the movie-level `udta` (©nam / ©cpy / `name` / etc.);
+    /// see [`crate::user_data::parse_udta`] for the layout.
+    pub user_data: Vec<UserDataEntry>,
+    /// Track-level data references parsed from `mdia/minf/dinf/dref`.
+    /// One entry per `dref` child atom; the most common shape is a
+    /// single `SelfRef` indicating the media is in the same file as
+    /// the moov (the demuxer's only currently-supported shape — but
+    /// surfacing the parsed list lets callers detect external-alias
+    /// tracks without having to walk the atom tree themselves).
+    pub data_references: Vec<DataReference>,
 }
 
 impl Track {
@@ -198,6 +211,23 @@ impl Track {
             .flat_map(|r| r.track_ids.iter().copied())
             .filter(|&id| id != 0)
             .collect()
+    }
+
+    /// Track-level `dref` data-reference list. Empty when the track
+    /// has no `dinf/dref` atom (legal per QTFF, in which case the
+    /// media is implicitly self-referential).
+    pub fn data_references(&self) -> &[DataReference] {
+        &self.data_references
+    }
+
+    /// True when the track's `dref` list contains *only* self-
+    /// references (or is empty). External-alias tracks return false
+    /// here; callers can then refuse to emit packets for them or fall
+    /// back to alias resolution.
+    pub fn is_self_contained(&self) -> bool {
+        self.data_references
+            .iter()
+            .all(|d| matches!(d, DataReference::SelfRef))
     }
 }
 

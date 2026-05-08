@@ -35,6 +35,13 @@ pub fn build_tkhd(track_id: u32, dur: u32, w_px: u32, h_px: u32) -> Vec<u8> {
     p[3] = 0x07; // flags = enabled+in-movie+in-preview
     p[12..16].copy_from_slice(&track_id.to_be_bytes());
     p[20..24].copy_from_slice(&dur.to_be_bytes());
+    // Identity 3×3 matrix at offset 40 (a=1.0, d=1.0, w=1.0 — 16.16 /
+    // 16.16 / 2.30); QTFF p. 199 Figure 4-1. Without this the parsed
+    // rotation classifies as "Other" since all-zero entries don't
+    // match any of the four cardinal orientations.
+    p[40..44].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // a
+    p[56..60].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // d
+    p[72..76].copy_from_slice(&0x4000_0000u32.to_be_bytes()); // w
     p[76..80].copy_from_slice(&(w_px << 16).to_be_bytes());
     p[80..84].copy_from_slice(&(h_px << 16).to_be_bytes());
     p

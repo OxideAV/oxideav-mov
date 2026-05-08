@@ -18,6 +18,7 @@ pub mod media_meta;
 pub mod reference;
 pub mod sample_table;
 pub mod track;
+pub mod user_data;
 
 #[cfg(feature = "registry")]
 pub mod registry;
@@ -27,11 +28,12 @@ pub mod standalone;
 
 pub use demuxer::MovDemuxer;
 pub use edit::{Edit, EditList};
-pub use header::{Ftyp, Hdlr, Mdhd, Mvhd, Tkhd};
+pub use header::{Ftyp, Hdlr, Mdhd, Mvhd, Tkhd, TrackRotation};
 pub use media_meta::{
     channel_mask_for_layout_tag, Chan, ChanDescription, Clap, ColorParameters, ColorParametersKind,
     Cslg, MetaKeyValue, Pasp, Tapt,
 };
-pub use reference::{DataReference, ReferenceMovie};
+pub use reference::{parse_dref, DataReference, ReferenceMovie};
 pub use sample_table::{SampleEntry, SampleTable};
 pub use track::{SampleDescription, Track, TrackRef, TrackRefKind};
+pub use user_data::{iso_language_tag, parse_udta, UserDataEntry, UserDataKind};

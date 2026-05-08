@@ -164,6 +164,35 @@ pub struct Tkhd {
     pub width_fp: u32,
     /// 16.16 fixed-point track height.
     pub height_fp: u32,
+    /// Raw 9-element 3×3 transformation matrix as stored on disk
+    /// (QTFF p. 199 Figure 4-1). Layout:
+    /// `[a b u; c d v; tx ty w]`. The first 8 are 16.16 fixed-point;
+    /// the trailing column `[u v w]` is 2.30 fixed-point (only `w` is
+    /// non-zero in normal display matrices, set to 1.0 = 0x40000000).
+    /// Stored as 9 raw `i32` values to keep both the integer rotation
+    /// classification and the 16.16 / 2.30 quirk available to callers.
+    pub matrix: [i32; 9],
+}
+
+/// Coarse rotation classification of a `tkhd` matrix. We surface the
+/// common 0/90/180/270 cases that almost every mobile camera writes;
+/// any other matrix (skew, mirror, off-axis scale, …) falls into
+/// `Other`. The classification is purely positional — it ignores
+/// translation (`tx`/`ty`) so the result reflects the *visual*
+/// orientation, not the placement on the canvas.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TrackRotation {
+    /// Identity: `[a d w] = [1 1 1]`, off-diagonals zero.
+    #[default]
+    None,
+    /// 90° clockwise: `b = -1, c = 1, a = d = 0`.
+    Rotate90,
+    /// 180°: `a = d = -1, b = c = 0`.
+    Rotate180,
+    /// 270° clockwise (= 90° counter-clockwise): `b = 1, c = -1`.
+    Rotate270,
+    /// Anything else (skew, mirror, scale ≠ ±1).
+    Other,
 }
 
 impl Tkhd {
@@ -175,6 +204,30 @@ impl Tkhd {
     }
     pub fn height(&self) -> u32 {
         self.height_fp >> 16
+    }
+
+    /// Classify the `matrix` into a coarse rotation enum. The four
+    /// recognised cases (None / 90 / 180 / 270) cover essentially
+    /// every mobile-phone-rotated landscape recording; anything else
+    /// returns [`TrackRotation::Other`].
+    ///
+    /// Evaluation looks only at the four 16.16 entries `[a, b, c, d]`
+    /// against `±1.0` and zero. Translation, scale, and the 2.30
+    /// trailing column are ignored.
+    pub fn rotation(&self) -> TrackRotation {
+        const ONE: i32 = 0x0001_0000;
+        const NEG_ONE: i32 = -0x0001_0000;
+        let a = self.matrix[0];
+        let b = self.matrix[1];
+        let c = self.matrix[3];
+        let d = self.matrix[4];
+        match (a, b, c, d) {
+            (ONE, 0, 0, ONE) => TrackRotation::None,
+            (0, ONE, NEG_ONE, 0) => TrackRotation::Rotate90,
+            (NEG_ONE, 0, 0, NEG_ONE) => TrackRotation::Rotate180,
+            (0, NEG_ONE, ONE, 0) => TrackRotation::Rotate270,
+            _ => TrackRotation::Other,
+        }
     }
 }
 
@@ -227,6 +280,17 @@ pub fn parse_tkhd(payload: &[u8]) -> Result<Tkhd> {
     let volume = i16::from_be_bytes([payload[p], payload[p + 1]]);
     p += 2;
     p += 2; // reserved
+    need(payload, p, 36, "tkhd matrix")?;
+    let mut matrix = [0i32; 9];
+    for (i, slot) in matrix.iter_mut().enumerate() {
+        let off = p + i * 4;
+        *slot = i32::from_be_bytes([
+            payload[off],
+            payload[off + 1],
+            payload[off + 2],
+            payload[off + 3],
+        ]);
+    }
     p += 36; // matrix
     need(payload, p, 8, "tkhd width+height")?;
     let width_fp = read_u32(&payload[p..]);
@@ -245,6 +309,7 @@ pub fn parse_tkhd(payload: &[u8]) -> Result<Tkhd> {
         volume,
         width_fp,
         height_fp,
+        matrix,
     })
 }
 
@@ -458,6 +523,112 @@ mod tests {
         assert_eq!(t.track_id, 1);
         assert_eq!(t.width(), 320);
         assert_eq!(t.height(), 240);
+    }
+
+    /// Helper: build a v0 `tkhd` with a custom 9-element matrix
+    /// (16.16 fixed for the first 8 entries, 2.30 for `w`).
+    fn build_tkhd_with_matrix(matrix: [i32; 9]) -> Vec<u8> {
+        let mut p = vec![0u8; 84];
+        p[3] = 0x07;
+        p[15] = 1;
+        for (i, v) in matrix.iter().enumerate() {
+            let off = 40 + i * 4;
+            p[off..off + 4].copy_from_slice(&v.to_be_bytes());
+        }
+        // width × height
+        p[76..80].copy_from_slice(&(320u32 << 16).to_be_bytes());
+        p[80..84].copy_from_slice(&(240u32 << 16).to_be_bytes());
+        p
+    }
+
+    #[test]
+    fn tkhd_rotation_identity_recognised() {
+        // identity: a=1.0, d=1.0, w=1.0 (2.30 = 0x40000000)
+        let m = [
+            0x0001_0000i32,
+            0,
+            0,
+            0,
+            0x0001_0000i32,
+            0,
+            0,
+            0,
+            0x4000_0000i32,
+        ];
+        let t = parse_tkhd(&build_tkhd_with_matrix(m)).unwrap();
+        assert_eq!(t.matrix, m);
+        assert_eq!(t.rotation(), TrackRotation::None);
+    }
+
+    #[test]
+    fn tkhd_rotation_90_recognised() {
+        // 90° CW: a=0, b=1, c=-1, d=0
+        let m = [
+            0,
+            0x0001_0000i32,
+            0,
+            -0x0001_0000i32,
+            0,
+            0,
+            0,
+            0,
+            0x4000_0000i32,
+        ];
+        let t = parse_tkhd(&build_tkhd_with_matrix(m)).unwrap();
+        assert_eq!(t.rotation(), TrackRotation::Rotate90);
+    }
+
+    #[test]
+    fn tkhd_rotation_180_recognised() {
+        let m = [
+            -0x0001_0000i32,
+            0,
+            0,
+            0,
+            -0x0001_0000i32,
+            0,
+            0,
+            0,
+            0x4000_0000i32,
+        ];
+        let t = parse_tkhd(&build_tkhd_with_matrix(m)).unwrap();
+        assert_eq!(t.rotation(), TrackRotation::Rotate180);
+    }
+
+    #[test]
+    fn tkhd_rotation_270_recognised() {
+        // 270° CW: a=0, b=-1, c=1, d=0
+        let m = [
+            0,
+            -0x0001_0000i32,
+            0,
+            0x0001_0000i32,
+            0,
+            0,
+            0,
+            0,
+            0x4000_0000i32,
+        ];
+        let t = parse_tkhd(&build_tkhd_with_matrix(m)).unwrap();
+        assert_eq!(t.rotation(), TrackRotation::Rotate270);
+    }
+
+    #[test]
+    fn tkhd_rotation_skewed_falls_into_other() {
+        // a=2.0 — non-unit scale → not a clean rotation.
+        let m = [
+            0x0002_0000i32,
+            0,
+            0,
+            0,
+            0x0001_0000i32,
+            0,
+            0,
+            0,
+            0x4000_0000i32,
+        ];
+        let t = parse_tkhd(&build_tkhd_with_matrix(m)).unwrap();
+        assert_eq!(t.rotation(), TrackRotation::Other);
     }
 
     #[test]

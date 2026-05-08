@@ -294,6 +294,18 @@ pub const TRAF: [u8; 4] = fourcc("traf"); // track fragment inside moof
 // Round-3: Composition-shift-least-greatest atom.
 pub const CSLG: [u8; 4] = fourcc("cslg");
 
+// Round-4: Data information sub-atoms.
+pub const URL_: [u8; 4] = fourcc("url ");
+pub const URN_: [u8; 4] = fourcc("urn ");
+pub const ALIS: [u8; 4] = fourcc("alis");
+pub const RSRC: [u8; 4] = fourcc("rsrc");
+
+// Round-4: Base media (gmhd) sub-atoms — `gmin` (graphics-mode header)
+// and `text` / `tmcd` per-MediaType extensions inside `gmhd`.
+pub const GMIN: [u8; 4] = fourcc("gmin");
+pub const TEXT: [u8; 4] = fourcc("text");
+pub const TMCD: [u8; 4] = fourcc("tmcd");
+
 #[cfg(test)]
 mod tests {
     use super::*;

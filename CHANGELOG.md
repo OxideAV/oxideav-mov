@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 4 — `udta` user-data subtree, `dinf/dref` data-reference parsing, and `tkhd` matrix rotation classification.
+  - `user_data` module with `parse_udta`, `UserDataEntry`, and
+    `UserDataKind` (InternationalText / PlainUtf8 / Unknown).
+    Apple international-text records (©nam / ©cpy / ©day / ©dir /
+    …) are unwound into one entry per language record; QT-7 plain
+    `name` / `auth` / `cprt` are decoded as UTF-8 with their
+    embedded ISO 639-2/T language tag preserved. `iso_language_tag`
+    helper unpacks the 5-bits-per-char form into a 3-byte ASCII tag.
+  - `MovDemuxer::user_data` (movie scope) and `Track::user_data`
+    (track scope) populated from `moov/udta` and `trak/udta`.
+  - `parse_dref` for the data-reference list inside `mdia/minf/dinf/dref`.
+    Recognises `url ` (UTF-8), `urn ` (ISO BMFF two-string layout),
+    `alis` / `rsrc` (opaque), and the `flags & 0x01` self-reference
+    flag (returns `DataReference::SelfRef`). Surfaces on
+    `Track::data_references()` plus `Track::is_self_contained()`.
+  - `Tkhd::matrix` raw 9-element `i32` array plus
+    `Tkhd::rotation()` → `TrackRotation` (`None`/`Rotate90`/
+    `Rotate180`/`Rotate270`/`Other`) classifying the four cardinal
+    orientations from the matrix's `[a b c d]` corner.
+  - 13 new unit tests (`user_data`, `reference::parse_dref`,
+    `header::tkhd_rotation_*`) + 2 new integration tests
+    (`synth_user_data_dref_rotation.rs`).
 - Round 3 — channel-layout map, tref accessors, reference-movie + fragment refusal, cslg.
   - `Chan` now parses the variable-length `AudioChannelDescription`
     list (20 bytes each: label + flags + 3 × f32 coordinates) into
