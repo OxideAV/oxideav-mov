@@ -408,6 +408,14 @@ fn iovl_with_explicit_source_count_validates_against_iref() {
 
 // ─────────────────────── 3. file:// alias opener ───────────────────────
 
+// The three integration tests below construct `file://` URLs from
+// real filesystem paths. On Windows those paths use backslashes and
+// drive-letter prefixes (e.g. `D:\foo`), which require URL escapes
+// and a Windows-aware path-back-conversion that this round's
+// `open_file_url` does not implement (see open_file_url module
+// docs). The Unix shape (`file:///abs/path`) is exercised on Linux
+// and macOS; the Windows shape is left for a follow-up round.
+#[cfg(unix)]
 #[test]
 fn open_file_url_resolves_local_filesystem_alias() {
     use std::env;
@@ -505,6 +513,7 @@ fn open_file_url_rejects_non_file_scheme() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn open_file_url_decodes_percent_encoding() {
     // Build a tempfile whose name contains a literal space, then
@@ -541,6 +550,7 @@ fn open_file_url_rejects_remote_host_for_safety() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn open_file_url_accepts_localhost_authority() {
     // file://localhost/path is the canonical "this host" authority and

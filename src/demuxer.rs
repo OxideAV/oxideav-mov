@@ -594,6 +594,15 @@ fn unsupported_error(msg: impl Into<String>) -> Error {
 /// percent-encoded path components are forwarded verbatim — we don't
 /// re-encode after decoding.
 ///
+/// **Platform note**: this round's parser handles the Unix shape
+/// (`file:///abs/path` / `file://localhost/abs/path`) only. Windows
+/// `file:///C:/path` URLs land in the filesystem with an extra
+/// leading `/` because the parser doesn't strip drive-letter
+/// prefixes; callers on Windows that need authoritative `file://`
+/// resolution should bring their own opener that goes through
+/// `url::Url::to_file_path` or equivalent. A follow-up round can
+/// teach this parser the Windows shape if the corpus needs it.
+///
 /// Wire this in via:
 ///
 /// ```ignore
