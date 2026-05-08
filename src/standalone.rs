@@ -12,8 +12,8 @@ use std::fmt;
 use std::io;
 
 /// Standalone error type. Mirrors the variants we actually construct
-/// (`InvalidData` and `Eof` plus an I/O carrier) so the parsing
-/// modules don't need feature gates around individual call sites.
+/// (`InvalidData` / `Unsupported` / `Eof` plus an I/O carrier) so the
+/// parsing modules don't need feature gates around individual call sites.
 #[derive(Debug)]
 pub enum Error {
     /// Synthetic "unexpected end-of-stream" — produced by the demuxer
@@ -21,6 +21,9 @@ pub enum Error {
     Eof,
     /// Malformed input.
     InvalidData(String),
+    /// Recognised input shape that this demuxer cannot fully consume
+    /// (e.g. fragmented MP4, reference-movie aliases).
+    Unsupported(String),
     /// Underlying I/O error (file truncation, OS read failures, …).
     Io(io::Error),
 }
@@ -32,6 +35,13 @@ impl Error {
     pub fn invalid<S: Into<String>>(msg: S) -> Self {
         Error::InvalidData(msg.into())
     }
+
+    /// Build an [`Error::Unsupported`] — used for input that we
+    /// recognise but deliberately do not implement (fragmented MP4
+    /// boxes, reference-movie alias resolution).
+    pub fn unsupported<S: Into<String>>(msg: S) -> Self {
+        Error::Unsupported(msg.into())
+    }
 }
 
 impl fmt::Display for Error {
@@ -39,6 +49,7 @@ impl fmt::Display for Error {
         match self {
             Error::Eof => f.write_str("eof"),
             Error::InvalidData(m) => write!(f, "invalid data: {m}"),
+            Error::Unsupported(m) => write!(f, "unsupported: {m}"),
             Error::Io(e) => write!(f, "I/O: {e}"),
         }
     }

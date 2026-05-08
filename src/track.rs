@@ -11,8 +11,8 @@
 use crate::edit::EditList;
 use crate::header::{Hdlr, Mdhd, Tkhd};
 use crate::media_meta::{
-    parse_chan, parse_clap, parse_colr, parse_pasp, Chan, Clap, ColorParameters, MetaKeyValue,
-    Pasp, Tapt,
+    parse_chan, parse_clap, parse_colr, parse_pasp, Chan, Clap, ColorParameters, Cslg,
+    MetaKeyValue, Pasp, Tapt,
 };
 use crate::sample_table::SampleTable;
 
@@ -134,6 +134,10 @@ pub struct Track {
     /// Apple Track Aperture Mode Dimensions (`tapt`); `None` when
     /// the track has no `tapt` atom.
     pub tapt: Option<Tapt>,
+    /// `cslg` composition-shift-least-greatest atom (when present),
+    /// from `stbl` or `trak` scope. Lets a player short-circuit the
+    /// `ctts` scan when computing presentation-time bounds.
+    pub cslg: Option<Cslg>,
     /// Track-level Apple `meta` key-value pairs, when present.
     pub meta: Vec<MetaKeyValue>,
 }
@@ -160,6 +164,40 @@ impl Track {
     /// data (p. 69).
     pub fn primary_format(&self) -> Option<[u8; 4]> {
         self.sample_descriptions.first().map(|d| d.format)
+    }
+
+    /// 1-based track-id of the *chapter* track this track points at
+    /// (`tref/chap`), if any. Returns the first track-id of the
+    /// matching reference; multiple-chap tracks are unusual but
+    /// permitted by QTFF.
+    pub fn chapter_track_ref(&self) -> Option<u32> {
+        self.references
+            .iter()
+            .find(|r| r.kind == TrackRefKind::Chapter)
+            .and_then(|r| r.track_ids.first().copied())
+            .filter(|&id| id != 0)
+    }
+
+    /// 1-based track-id of the *timecode* track this track points at
+    /// (`tref/tmcd`), if any.
+    pub fn timecode_track_ref(&self) -> Option<u32> {
+        self.references
+            .iter()
+            .find(|r| r.kind == TrackRefKind::Timecode)
+            .and_then(|r| r.track_ids.first().copied())
+            .filter(|&id| id != 0)
+    }
+
+    /// All `tref` reference track-ids of the given kind. Useful when
+    /// a track references several others (e.g. multiple `hint` track
+    /// references for an RTP source).
+    pub fn track_refs_of_kind(&self, kind: TrackRefKind) -> Vec<u32> {
+        self.references
+            .iter()
+            .filter(|r| r.kind == kind)
+            .flat_map(|r| r.track_ids.iter().copied())
+            .filter(|&id| id != 0)
+            .collect()
     }
 }
 

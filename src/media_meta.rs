@@ -207,17 +207,184 @@ pub fn parse_tapt_dims(payload: &[u8]) -> Result<TaptDims> {
     })
 }
 
-/// Audio Channel Layout (Apple `chan`). Round-2 surface: the leading
-/// `[ver+flags=4][layout_tag=4][bitmap=4][n_descriptions=4]` plus the
-/// raw description blob. A full layout-tag-to-mask mapping is round 3.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Audio Channel Layout (Apple `chan`).
+///
+/// QTFF 2001-03 doesn't define `chan`; Apple's "Audio Channel Layouts"
+/// chapter of the QuickTime/Core Audio reference does. The on-disk
+/// layout matches `AudioChannelLayout` from `<CoreAudioTypes/CoreAudioTypes.h>`:
+///
+/// ```text
+/// [ver+flags = 4]                        // FullBox header
+/// [mChannelLayoutTag : u32]              // kAudioChannelLayoutTag_*
+/// [mChannelBitmap    : u32]              // used when tag = 0x10000 (UseChannelBitmap)
+/// [mNumberChannelDescriptions : u32]
+/// repeat mNumberChannelDescriptions times: 20 bytes
+///   [mChannelLabel   : u32]
+///   [mChannelFlags   : u32]
+///   [mCoordinates[3] : 3 × f32]
+/// ```
+///
+/// Each per-description record is 20 bytes wide (4 + 4 + 12). The
+/// `mChannelLayoutTag` either selects a pre-defined layout (e.g.
+/// `Stereo = 100`, `_5_1 = 121`) — in which case `mNumberChannelDescriptions`
+/// is required to be 0 — or carries the special sentinel
+/// `kAudioChannelLayoutTag_UseChannelDescriptions = 0` (every channel
+/// is fully described) or `kAudioChannelLayoutTag_UseChannelBitmap =
+/// 0x10000` (the `mChannelBitmap` is authoritative, descriptions
+/// absent).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Chan {
     pub layout_tag: u32,
     pub bitmap: u32,
     pub num_descriptions: u32,
-    /// Raw bytes of the per-channel descriptions (each 20 bytes wide
-    /// in CAF; we don't parse them in round 2).
+    /// Parsed per-channel descriptions (when present). Each entry is
+    /// 20 bytes on disk (label + flags + 3 × f32 coordinates).
+    pub channel_descriptions: Vec<ChanDescription>,
+    /// Raw bytes of the per-channel descriptions, retained for
+    /// downstream consumers that want the on-disk form.
     pub descriptions: Vec<u8>,
+}
+
+impl Chan {
+    /// Resolve to a USB-style channel-mask bitmap.
+    ///
+    /// * For pre-defined layout tags we apply the canonical CoreAudio
+    ///   tag → label set translation (see [`channel_mask_for_layout_tag`]).
+    /// * For `UseChannelBitmap` we return `Some(self.bitmap)` directly.
+    /// * For `UseChannelDescriptions` we OR each description's
+    ///   `(1 << (label - 1))` bit (label 1 = Left, 2 = Right, …).
+    /// * Unknown tags yield `None`.
+    pub fn channel_mask(&self) -> Option<u32> {
+        match self.layout_tag {
+            TAG_USE_CHANNEL_BITMAP => Some(self.bitmap),
+            TAG_USE_CHANNEL_DESCRIPTIONS => {
+                let mut m = 0u32;
+                for d in &self.channel_descriptions {
+                    if d.label >= 1 && d.label <= 32 {
+                        m |= 1u32 << (d.label - 1);
+                    }
+                }
+                Some(m)
+            }
+            tag => channel_mask_for_layout_tag(tag),
+        }
+    }
+
+    /// Channel count implied by the layout. The lower 16 bits of a
+    /// pre-defined layout tag carry the channel count
+    /// (`kAudioChannelLayoutTag_Stereo = (101 << 16) | 2`); when the
+    /// tag is `UseChannelDescriptions` we return the description count.
+    pub fn channel_count(&self) -> u32 {
+        if self.layout_tag == TAG_USE_CHANNEL_DESCRIPTIONS {
+            self.num_descriptions
+        } else if self.layout_tag == TAG_USE_CHANNEL_BITMAP {
+            self.bitmap.count_ones()
+        } else {
+            self.layout_tag & 0xFFFF
+        }
+    }
+}
+
+/// One per-channel description record (20 bytes on disk).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ChanDescription {
+    /// `mChannelLabel` — the [`AudioChannelLabel`] enum value
+    /// identifying which channel this is (1 = Left, 2 = Right, …).
+    pub label: u32,
+    /// `mChannelFlags` — IEEE-754-style flag bits (bit 0 = "rectangular
+    /// coordinates", bit 1 = "spherical coordinates", bit 2 = "meters").
+    pub flags: u32,
+    /// `mCoordinates[0..3]` — 3-D position when `flags` indicates
+    /// rectangular or spherical coords. Stored as raw `f32` triple.
+    pub coordinates: [f32; 3],
+}
+
+impl Eq for ChanDescription {}
+
+/// Apple Core Audio sentinel: descriptions are authoritative.
+pub const TAG_USE_CHANNEL_DESCRIPTIONS: u32 = 0;
+/// Apple Core Audio sentinel: `bitmap` is authoritative.
+pub const TAG_USE_CHANNEL_BITMAP: u32 = 0x0001_0000;
+
+// Pre-defined `kAudioChannelLayoutTag_*` constants we surface (the
+// commonly-encountered ones; the full CoreAudio list has ~150). Each
+// tag's low 16 bits carry the channel count, the high 16 bits the
+// layout id. See `<CoreAudioTypes/CoreAudioTypes.h>`.
+pub const TAG_MONO: u32 = (100 << 16) | 1;
+pub const TAG_STEREO: u32 = (101 << 16) | 2;
+pub const TAG_STEREO_HEADPHONES: u32 = (102 << 16) | 2;
+pub const TAG_MATRIX_STEREO: u32 = (103 << 16) | 2;
+pub const TAG_MID_SIDE: u32 = (104 << 16) | 2;
+pub const TAG_XY: u32 = (105 << 16) | 2;
+pub const TAG_BINAURAL: u32 = (106 << 16) | 2;
+pub const TAG_AMBISONIC_B_FORMAT: u32 = (107 << 16) | 4;
+pub const TAG_QUADRAPHONIC: u32 = (108 << 16) | 4;
+pub const TAG_PENTAGONAL: u32 = (109 << 16) | 5;
+pub const TAG_HEXAGONAL: u32 = (110 << 16) | 6;
+pub const TAG_OCTAGONAL: u32 = (111 << 16) | 8;
+pub const TAG_CUBE: u32 = (112 << 16) | 8;
+pub const TAG_MPEG_3_0_A: u32 = (113 << 16) | 3; // L R C
+pub const TAG_MPEG_3_0_B: u32 = (114 << 16) | 3; // C L R
+pub const TAG_MPEG_4_0_A: u32 = (115 << 16) | 4; // L R C Cs
+pub const TAG_MPEG_4_0_B: u32 = (116 << 16) | 4; // C L R Cs
+pub const TAG_MPEG_5_0_A: u32 = (117 << 16) | 5; // L R C Ls Rs
+pub const TAG_MPEG_5_0_B: u32 = (118 << 16) | 5; // L R Ls Rs C
+pub const TAG_MPEG_5_0_C: u32 = (119 << 16) | 5; // L C R Ls Rs
+pub const TAG_MPEG_5_0_D: u32 = (120 << 16) | 5; // C L R Ls Rs
+pub const TAG_MPEG_5_1_A: u32 = (121 << 16) | 6; // L R C LFE Ls Rs
+pub const TAG_MPEG_5_1_B: u32 = (122 << 16) | 6; // L R Ls Rs C LFE
+pub const TAG_MPEG_5_1_C: u32 = (123 << 16) | 6; // L C R Ls Rs LFE
+pub const TAG_MPEG_5_1_D: u32 = (124 << 16) | 6; // C L R Ls Rs LFE
+pub const TAG_MPEG_6_1_A: u32 = (125 << 16) | 7; // L R C LFE Ls Rs Cs
+pub const TAG_MPEG_7_1_A: u32 = (126 << 16) | 8; // L R C LFE Ls Rs Lc Rc
+pub const TAG_MPEG_7_1_B: u32 = (127 << 16) | 8; // C Lc Rc L R Ls Rs LFE
+pub const TAG_MPEG_7_1_C: u32 = (128 << 16) | 8; // L R C LFE Ls Rs Rls Rrs
+
+// Bit positions for the `channel_mask` USB-style bitmap. The
+// CoreAudio `AudioChannelLabel` enum values 1..=18 line up with the
+// well-known WAVEFORMATEXTENSIBLE channel-mask bits (1<<0 = FrontLeft,
+// etc.) which is what `Chan::channel_mask` exports.
+const FL: u32 = 1 << 0; // Front Left
+const FR: u32 = 1 << 1; // Front Right
+const FC: u32 = 1 << 2; // Front Center
+const LFE: u32 = 1 << 3; // Low Frequency
+const BL: u32 = 1 << 4; // Back Left
+const BR: u32 = 1 << 5; // Back Right
+const FLC: u32 = 1 << 6; // Front Left of Center
+const FRC: u32 = 1 << 7; // Front Right of Center
+const BC: u32 = 1 << 8; // Back Center
+const SL: u32 = 1 << 9; // Side Left
+const SR: u32 = 1 << 10; // Side Right
+
+/// Map a pre-defined `kAudioChannelLayoutTag_*` to a USB-style
+/// channel-mask bitmap (bit 0 = Front Left, bit 1 = Front Right, …).
+/// Returns `None` for layouts that don't have a mask analogue (e.g.
+/// `Cube`, `AmbisonicBFormat`, headphones / matrix stereo variants
+/// that share the plain Stereo mask, …); the caller can fall back to
+/// the raw `layout_tag`.
+pub fn channel_mask_for_layout_tag(tag: u32) -> Option<u32> {
+    match tag {
+        TAG_MONO => Some(FC),
+        TAG_STEREO | TAG_STEREO_HEADPHONES | TAG_MATRIX_STEREO => Some(FL | FR),
+        TAG_MID_SIDE | TAG_XY | TAG_BINAURAL => Some(FL | FR),
+        TAG_QUADRAPHONIC => Some(FL | FR | BL | BR),
+        TAG_PENTAGONAL => Some(FL | FR | FC | BL | BR),
+        TAG_HEXAGONAL => Some(FL | FR | FC | BL | BR | BC),
+        TAG_OCTAGONAL => Some(FL | FR | FC | BL | BR | BC | SL | SR),
+        TAG_MPEG_3_0_A | TAG_MPEG_3_0_B => Some(FL | FR | FC),
+        TAG_MPEG_4_0_A | TAG_MPEG_4_0_B => Some(FL | FR | FC | BC),
+        TAG_MPEG_5_0_A | TAG_MPEG_5_0_B | TAG_MPEG_5_0_C | TAG_MPEG_5_0_D => {
+            Some(FL | FR | FC | SL | SR)
+        }
+        TAG_MPEG_5_1_A | TAG_MPEG_5_1_B | TAG_MPEG_5_1_C | TAG_MPEG_5_1_D => {
+            Some(FL | FR | FC | LFE | SL | SR)
+        }
+        TAG_MPEG_6_1_A => Some(FL | FR | FC | LFE | SL | SR | BC),
+        TAG_MPEG_7_1_A => Some(FL | FR | FC | LFE | SL | SR | FLC | FRC),
+        TAG_MPEG_7_1_B => Some(FL | FR | FC | LFE | SL | SR | FLC | FRC),
+        TAG_MPEG_7_1_C => Some(FL | FR | FC | LFE | SL | SR | BL | BR),
+        _ => None,
+    }
 }
 
 /// Parse a `chan` payload.
@@ -228,16 +395,129 @@ pub fn parse_chan(payload: &[u8]) -> Result<Chan> {
     let layout_tag = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
     let bitmap = u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]]);
     let num = u32::from_be_bytes([payload[12], payload[13], payload[14], payload[15]]);
-    let descriptions = if payload.len() > 16 {
+    let descriptions_blob = if payload.len() > 16 {
         payload[16..].to_vec()
     } else {
         Vec::new()
     };
+    // Parse the variable-length AudioChannelDescription list (20 B each).
+    // We are lenient: if the declared count exceeds the available bytes
+    // we cap it and stop parsing rather than fail the whole atom (the
+    // raw bytes stay in `descriptions` for forensic recovery).
+    const REC: usize = 20;
+    let mut parsed = Vec::with_capacity(num as usize);
+    let cap = (descriptions_blob.len() / REC).min(num as usize);
+    for i in 0..cap {
+        let off = i * REC;
+        let label = u32::from_be_bytes([
+            descriptions_blob[off],
+            descriptions_blob[off + 1],
+            descriptions_blob[off + 2],
+            descriptions_blob[off + 3],
+        ]);
+        let flags = u32::from_be_bytes([
+            descriptions_blob[off + 4],
+            descriptions_blob[off + 5],
+            descriptions_blob[off + 6],
+            descriptions_blob[off + 7],
+        ]);
+        let c0 = f32::from_be_bytes([
+            descriptions_blob[off + 8],
+            descriptions_blob[off + 9],
+            descriptions_blob[off + 10],
+            descriptions_blob[off + 11],
+        ]);
+        let c1 = f32::from_be_bytes([
+            descriptions_blob[off + 12],
+            descriptions_blob[off + 13],
+            descriptions_blob[off + 14],
+            descriptions_blob[off + 15],
+        ]);
+        let c2 = f32::from_be_bytes([
+            descriptions_blob[off + 16],
+            descriptions_blob[off + 17],
+            descriptions_blob[off + 18],
+            descriptions_blob[off + 19],
+        ]);
+        parsed.push(ChanDescription {
+            label,
+            flags,
+            coordinates: [c0, c1, c2],
+        });
+    }
     Ok(Chan {
         layout_tag,
         bitmap,
         num_descriptions: num,
-        descriptions,
+        channel_descriptions: parsed,
+        descriptions: descriptions_blob,
+    })
+}
+
+/// Composition-shift least-greatest atom (`cslg`).
+///
+/// ISO BMFF §8.6.1.4 / QTFF Apple supplement. `cslg` lets a player
+/// derive the presentation time-line bounds without scanning every
+/// `ctts` entry, and it carries the offset between composition time
+/// and decode time for the first sample. Two on-disk versions:
+///
+/// * Version 0 — five `i32` fields.
+/// * Version 1 — five `i64` fields (used when any value exceeds 31 bits).
+///
+/// Fields, in spec order:
+///
+/// 1. `composition_to_dts_shift` — value to add to a CT to obtain the
+///    DTS so that all DTS values are non-negative.
+/// 2. `least_decode_to_display_delta` — minimum value of `composition_offset`.
+/// 3. `greatest_decode_to_display_delta` — maximum value of `composition_offset`.
+/// 4. `composition_start_time` — earliest CT in the track.
+/// 5. `composition_end_time` — latest CT + sample-duration in the track.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cslg {
+    pub composition_to_dts_shift: i64,
+    pub least_decode_to_display_delta: i64,
+    pub greatest_decode_to_display_delta: i64,
+    pub composition_start_time: i64,
+    pub composition_end_time: i64,
+}
+
+/// Parse a `cslg` payload.
+pub fn parse_cslg(payload: &[u8]) -> Result<Cslg> {
+    if payload.len() < 4 {
+        return Err(Error::invalid("MOV: cslg payload < 4 bytes"));
+    }
+    let version = payload[0];
+    let body = &payload[4..];
+    let (size, want) = match version {
+        0 => (4usize, 4 * 5),
+        1 => (8usize, 8 * 5),
+        v => return Err(Error::invalid(format!("MOV: cslg unknown version {v}"))),
+    };
+    if body.len() < want {
+        return Err(Error::invalid("MOV: cslg truncated table"));
+    }
+    let read = |o: usize| -> i64 {
+        if size == 4 {
+            i32::from_be_bytes([body[o], body[o + 1], body[o + 2], body[o + 3]]) as i64
+        } else {
+            i64::from_be_bytes([
+                body[o],
+                body[o + 1],
+                body[o + 2],
+                body[o + 3],
+                body[o + 4],
+                body[o + 5],
+                body[o + 6],
+                body[o + 7],
+            ])
+        }
+    };
+    Ok(Cslg {
+        composition_to_dts_shift: read(0),
+        least_decode_to_display_delta: read(size),
+        greatest_decode_to_display_delta: read(size * 2),
+        composition_start_time: read(size * 3),
+        composition_end_time: read(size * 4),
     })
 }
 
@@ -465,12 +745,112 @@ mod tests {
     fn chan_extracts_layout_tag() {
         let mut p = Vec::new();
         p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
-        p.extend_from_slice(&100u32.to_be_bytes()); // layout_tag = kAudioChannelLayoutTag_Stereo
+        p.extend_from_slice(&100u32.to_be_bytes()); // layout_tag = legacy plain "100"
         p.extend_from_slice(&0u32.to_be_bytes()); // bitmap
         p.extend_from_slice(&0u32.to_be_bytes()); // num_descriptions
         let c = parse_chan(&p).unwrap();
         assert_eq!(c.layout_tag, 100);
         assert_eq!(c.num_descriptions, 0);
+        assert!(c.channel_descriptions.is_empty());
+    }
+
+    #[test]
+    fn chan_stereo_layout_tag_maps_to_fl_fr() {
+        // kAudioChannelLayoutTag_Stereo = (101 << 16) | 2 → mask FL|FR.
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&TAG_STEREO.to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes());
+        let c = parse_chan(&p).unwrap();
+        assert_eq!(c.channel_count(), 2);
+        assert_eq!(c.channel_mask(), Some(FL | FR));
+    }
+
+    #[test]
+    fn chan_5_1_layout_tag_maps_to_full_mask() {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&TAG_MPEG_5_1_A.to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes());
+        let c = parse_chan(&p).unwrap();
+        assert_eq!(c.channel_count(), 6);
+        assert_eq!(c.channel_mask(), Some(FL | FR | FC | LFE | SL | SR));
+    }
+
+    #[test]
+    fn chan_use_channel_bitmap_returns_bitmap() {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&TAG_USE_CHANNEL_BITMAP.to_be_bytes());
+        let want_mask = FL | FR | FC | LFE;
+        p.extend_from_slice(&want_mask.to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes());
+        let c = parse_chan(&p).unwrap();
+        assert_eq!(c.channel_count(), 4);
+        assert_eq!(c.channel_mask(), Some(want_mask));
+    }
+
+    #[test]
+    fn chan_use_channel_descriptions_or_labels() {
+        // num=2: label 1 (Left), label 2 (Right) — full 20 B records.
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&TAG_USE_CHANNEL_DESCRIPTIONS.to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes()); // bitmap
+        p.extend_from_slice(&2u32.to_be_bytes()); // num_descriptions
+        for label in [1u32, 2u32] {
+            p.extend_from_slice(&label.to_be_bytes());
+            p.extend_from_slice(&0u32.to_be_bytes()); // flags
+            p.extend_from_slice(&0f32.to_be_bytes());
+            p.extend_from_slice(&0f32.to_be_bytes());
+            p.extend_from_slice(&0f32.to_be_bytes());
+        }
+        let c = parse_chan(&p).unwrap();
+        assert_eq!(c.channel_count(), 2);
+        assert_eq!(c.channel_descriptions.len(), 2);
+        assert_eq!(c.channel_descriptions[0].label, 1);
+        assert_eq!(c.channel_descriptions[1].label, 2);
+        assert_eq!(c.channel_mask(), Some(FL | FR));
+    }
+
+    #[test]
+    fn cslg_v0_round_trip() {
+        // Five i32 fields: shift=0, least=-3, greatest=10, start=0, end=300
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+        p.extend_from_slice(&0i32.to_be_bytes());
+        p.extend_from_slice(&(-3i32).to_be_bytes());
+        p.extend_from_slice(&10i32.to_be_bytes());
+        p.extend_from_slice(&0i32.to_be_bytes());
+        p.extend_from_slice(&300i32.to_be_bytes());
+        let c = parse_cslg(&p).unwrap();
+        assert_eq!(c.composition_to_dts_shift, 0);
+        assert_eq!(c.least_decode_to_display_delta, -3);
+        assert_eq!(c.greatest_decode_to_display_delta, 10);
+        assert_eq!(c.composition_end_time, 300);
+    }
+
+    #[test]
+    fn cslg_v1_round_trip_64bit() {
+        let mut p = Vec::new();
+        p.push(1); // version
+        p.extend_from_slice(&[0, 0, 0]);
+        for v in [0i64, -3, 10, 0, 300_000_000_000i64] {
+            p.extend_from_slice(&v.to_be_bytes());
+        }
+        let c = parse_cslg(&p).unwrap();
+        assert_eq!(c.composition_end_time, 300_000_000_000);
+        assert_eq!(c.least_decode_to_display_delta, -3);
+    }
+
+    #[test]
+    fn cslg_unknown_version_errors() {
+        let mut p = Vec::new();
+        p.push(2);
+        p.extend_from_slice(&[0, 0, 0]);
+        assert!(parse_cslg(&p).is_err());
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod demuxer;
 pub mod edit;
 pub mod header;
 pub mod media_meta;
+pub mod reference;
 pub mod sample_table;
 pub mod track;
 
@@ -27,6 +28,10 @@ pub mod standalone;
 pub use demuxer::MovDemuxer;
 pub use edit::{Edit, EditList};
 pub use header::{Ftyp, Hdlr, Mdhd, Mvhd, Tkhd};
-pub use media_meta::{Chan, Clap, ColorParameters, ColorParametersKind, MetaKeyValue, Pasp, Tapt};
+pub use media_meta::{
+    channel_mask_for_layout_tag, Chan, ChanDescription, Clap, ColorParameters, ColorParametersKind,
+    Cslg, MetaKeyValue, Pasp, Tapt,
+};
+pub use reference::{DataReference, ReferenceMovie};
 pub use sample_table::{SampleEntry, SampleTable};
 pub use track::{SampleDescription, Track, TrackRef, TrackRefKind};

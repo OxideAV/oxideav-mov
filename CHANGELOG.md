@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 3 — channel-layout map, tref accessors, reference-movie + fragment refusal, cslg.
+  - `Chan` now parses the variable-length `AudioChannelDescription`
+    list (20 bytes each: label + flags + 3 × f32 coordinates) into
+    `Vec<ChanDescription>`, plus a `channel_mask()` accessor that
+    resolves pre-defined `kAudioChannelLayoutTag_*` constants
+    (Mono / Stereo / Quad / Pentagonal / Hexagonal / Octagonal /
+    MPEG 3.0/4.0/5.0/5.1/6.1/7.1 in their A/B/C/D variants) to a
+    USB-style FL|FR|FC|LFE|... bitmap, with `UseChannelDescriptions`
+    OR-ing per-channel labels and `UseChannelBitmap` returning the
+    raw bitmap unchanged.
+  - `Track::chapter_track_ref()` / `Track::timecode_track_ref()` /
+    `Track::track_refs_of_kind()` accessors surface chap / tmcd /
+    arbitrary `tref` relationships as resolved 1-based track-ids.
+  - `reference` module with `parse_rdrf` plus `ReferenceMovie` /
+    `DataReference` types; demuxer parses `moov/rmra`/`rmda` and
+    surfaces them on `MovDemuxer::reference_movies`. Reference-only
+    movies (rmra without an in-file mdat or trak) are rejected with
+    a clear `Unsupported` error pointing at the alias chain.
+  - Fragmented MP4 detection: top-level `moof` and `moov/mvex` both
+    refuse open with `Unsupported("...; use oxideav-mp4 for
+    fragmented streams")`.
+  - `cslg` parser (v0 / v1) at both `trak` and `stbl` scope, plus
+    cross-validation of the parsed range against the `ctts` table —
+    a contradiction (`ctts` deltas outside `cslg [least, greatest]`)
+    rejects the file.
+  - Standalone `Error::Unsupported` variant (mirrors
+    `oxideav_core::Error::unsupported`).
+  - 10 new unit tests + 8 new integration tests
+    (`synth_chan_round3.rs`, `synth_reference_and_fragments.rs`).
 - Round 2 — Apple-specific atoms + edit lists + composition timing.
   - `src/lib.rs` (was missing in round 1) declaring the public module
     surface and re-exporting the parsed types.

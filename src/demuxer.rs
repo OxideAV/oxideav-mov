@@ -12,13 +12,15 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::atom::{
-    read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CTTS, DREF, EDTS, ELST,
-    ENOF, FREE, FTYP, GMHD, HDLR, ILST, KEYS, MDAT, MDHD, MDIA, META, MINF, MOOV, MVHD, PROF, SKIP,
-    SMHD, STBL, STCO, STSC, STSD, STSS, STSZ, STTS, TAPT, TKHD, TRAK, TREF, VMHD, WIDE,
+    read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DREF, EDTS,
+    ELST, ENOF, FREE, FTYP, GMHD, HDLR, ILST, KEYS, MDAT, MDHD, MDIA, META, MINF, MOOF, MOOV, MVEX,
+    MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SKIP, SMHD, STBL, STCO, STSC, STSD,
+    STSS, STSZ, STTS, TAPT, TKHD, TRAK, TREF, VMHD, WIDE,
 };
 use crate::edit::{parse_elst, EditList};
 use crate::header::{parse_ftyp, parse_hdlr, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd};
-use crate::media_meta::{parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
+use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
+use crate::reference::{parse_rdrf, ReferenceMovie};
 use crate::sample_table::{
     parse_co64, parse_ctts, parse_stco, parse_stsc, parse_stss, parse_stsz, parse_stts,
     SampleEntry, SampleTable,
@@ -45,6 +47,12 @@ pub struct MovDemuxer {
     /// Movie-level Apple `meta` key-value pairs (when the file
     /// carries an Apple-shaped `meta` atom at moov scope).
     pub meta: Vec<MetaKeyValue>,
+    /// Apple "reference movies" parsed from the optional `moov/rmra`
+    /// container. When non-empty AND the file lacks an in-file `mdat`,
+    /// `open()` fails with an `Unsupported` error; otherwise we keep
+    /// the parsed alias list around so callers that treat `rmra` as
+    /// purely informational can still inspect it.
+    pub reference_movies: Vec<ReferenceMovie>,
     /// True iff the first non-skip top-level atom after `ftyp` is
     /// `moov`, indicating the file is laid out for streaming
     /// ("faststart").
@@ -82,6 +90,8 @@ impl MovDemuxer {
         let mut mvhd: Option<Mvhd> = None;
         let mut tracks: Vec<Track> = Vec::new();
         let mut movie_meta: Vec<MetaKeyValue> = Vec::new();
+        let mut reference_movies: Vec<ReferenceMovie> = Vec::new();
+        let mut has_mvex = false;
         // Faststart probe: track whether `moov` precedes `mdat` in
         // the top-level atom stream, ignoring `ftyp`, `free`, `skip`,
         // `wide`. Per QTFF "Movie Atom" — moov-first allows streaming
@@ -121,10 +131,23 @@ impl MovDemuxer {
                         &mut mvhd,
                         &mut tracks,
                         &mut movie_meta,
+                        &mut reference_movies,
+                        &mut has_mvex,
                     )?;
                 }
                 t if t == &MDAT => {
                     seen_mdat = true;
+                }
+                t if t == &MOOF => {
+                    // Fragmented MP4 — QTFF doesn't define `moof`; this is
+                    // ISO BMFF §8.16. We refuse rather than silently
+                    // produce a partial decode. The hint points at our
+                    // sibling crate (oxideav-mp4) which is the right home
+                    // for fragmented streams.
+                    return Err(unsupported_error(
+                        "MOV: fragmented MP4 ('moof') is unsupported by the QuickTime demuxer; \
+                         use oxideav-mp4 for fragmented streams",
+                    ));
                 }
                 t if t == &FREE || t == &SKIP || t == &WIDE => {
                     // free-space atoms — skip
@@ -140,7 +163,27 @@ impl MovDemuxer {
         if mvhd.is_none() {
             return Err(Error::invalid("MOV: no moov/mvhd found"));
         }
+        if has_mvex {
+            // `mvex` inside `moov` declares the file as fragmented (ISO
+            // BMFF §8.16.1) — even when `moof` boxes haven't been seen
+            // yet at top-level walk. Reject for the same reason as
+            // top-level `moof`.
+            return Err(unsupported_error(
+                "MOV: 'mvex' indicates a fragmented MP4; use oxideav-mp4 for fragmented streams",
+            ));
+        }
         if tracks.is_empty() {
+            // A reference-movie file (`moov/rmra`) is permitted to have
+            // no tracks: its tracks live in the *referenced* file. Surface
+            // a more specific error so callers can fall back to alias
+            // resolution rather than think the input is corrupt.
+            if !reference_movies.is_empty() {
+                return Err(unsupported_error(format!(
+                    "MOV: reference-movie container with {n} alternate(s); resolving \
+                     external alias references is not supported",
+                    n = reference_movies.len(),
+                )));
+            }
             return Err(Error::invalid("MOV: moov contains no tracks"));
         }
 
@@ -170,6 +213,7 @@ impl MovDemuxer {
             mvhd,
             tracks,
             meta: movie_meta,
+            reference_movies,
             faststart: seen_moov_before_mdat,
             samples,
             next: 0,
@@ -216,6 +260,20 @@ impl MovDemuxer {
     /// Whether more samples are available.
     pub fn remaining(&self) -> usize {
         self.samples.len().saturating_sub(self.next)
+    }
+}
+
+/// Build an "unsupported" error in a way that works under both the
+/// `registry` (uses `oxideav_core::Error::unsupported`) and standalone
+/// (uses our local `Error::Unsupported`) builds.
+fn unsupported_error(msg: impl Into<String>) -> Error {
+    #[cfg(feature = "registry")]
+    {
+        Error::unsupported(msg)
+    }
+    #[cfg(not(feature = "registry"))]
+    {
+        Error::unsupported(msg)
     }
 }
 
@@ -289,6 +347,7 @@ fn build_streams(tracks: &[Track], resolver: &dyn CodecResolver) -> Vec<StreamIn
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_moov<R: Read + Seek + ?Sized>(
     r: &mut R,
     hdr: &AtomHeader,
@@ -296,6 +355,8 @@ fn parse_moov<R: Read + Seek + ?Sized>(
     mvhd: &mut Option<Mvhd>,
     tracks: &mut Vec<Track>,
     meta: &mut Vec<MetaKeyValue>,
+    reference_movies: &mut Vec<ReferenceMovie>,
+    has_mvex: &mut bool,
 ) -> Result<()> {
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
     walk_children(r, Some(body_end), |r, child| {
@@ -313,10 +374,80 @@ fn parse_moov<R: Read + Seek + ?Sized>(
                     *meta = kv;
                 }
             }
+            t if t == &RMRA => {
+                *reference_movies = parse_rmra(r, child)?;
+            }
+            t if t == &MVEX => {
+                // Fragment header — defer the rejection to `open_with`
+                // so we can also surface info about which fragmented
+                // pieces (mehd/trex) are present, useful for diagnostics.
+                *has_mvex = true;
+            }
             _ => {}
         }
         Ok(())
     })
+}
+
+/// Parse the `moov/rmra` container — a list of `rmda` descriptors,
+/// each carrying a data reference plus optional qualifiers.
+fn parse_rmra<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Vec<ReferenceMovie>> {
+    let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
+    r.seek(SeekFrom::Start(hdr.payload_offset))?;
+    let mut out = Vec::new();
+    walk_children(r, Some(body_end), |r, child| {
+        if child.fourcc == RMDA {
+            out.push(parse_rmda(r, child)?);
+        }
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+fn parse_rmda<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<ReferenceMovie> {
+    let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
+    r.seek(SeekFrom::Start(hdr.payload_offset))?;
+    let mut out = ReferenceMovie::default();
+    walk_children(r, Some(body_end), |r, child| {
+        let payload = read_payload(r, child)?;
+        match &child.fourcc {
+            t if t == &RDRF => out.data_ref = Some(parse_rdrf(&payload)?),
+            t if t == &RMDR && payload.len() >= 8 => {
+                out.min_data_rate = Some(u32::from_be_bytes([
+                    payload[4], payload[5], payload[6], payload[7],
+                ]));
+            }
+            t if t == &RMQU && payload.len() >= 4 => {
+                // `rmqu` is documented as just `[quality:4]` — no
+                // FullBox prefix — but real-world writers emit both
+                // shapes. We accept either by reading the trailing
+                // 4 bytes when the payload is long enough.
+                let off = if payload.len() >= 8 { 4 } else { 0 };
+                out.quality = Some(u32::from_be_bytes([
+                    payload[off],
+                    payload[off + 1],
+                    payload[off + 2],
+                    payload[off + 3],
+                ]));
+            }
+            t if t == &RMCS && payload.len() >= 8 => {
+                out.cpu_speed = Some(u32::from_be_bytes([
+                    payload[4], payload[5], payload[6], payload[7],
+                ]));
+            }
+            t if t == &RMVC => {
+                out.version_check = Some(payload.clone());
+            }
+            t if t == &RMCD && payload.len() >= 8 => {
+                let mut fc = [0u8; 4];
+                fc.copy_from_slice(&payload[4..8]);
+                out.codec_check = Some(fc);
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+    Ok(out)
 }
 
 fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Track> {
@@ -342,6 +473,10 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
             t if t == &TAPT => {
                 track.tapt = Some(parse_tapt(r, child)?);
             }
+            t if t == &CSLG => {
+                let body = read_payload(r, child)?;
+                track.cslg = Some(parse_cslg(&body)?);
+            }
             t if t == &META => {
                 if let Some(kv) = parse_meta_atom(r, child)? {
                     track.meta = kv;
@@ -351,6 +486,30 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
         }
         Ok(())
     })?;
+    // Cross-validate cslg against ctts when both are present. The ISO
+    // BMFF guarantees ctts deltas fall inside [least, greatest] (§8.6.1.4);
+    // a mismatch is suspicious so we surface it as `InvalidData`.
+    if let Some(c) = track.cslg {
+        if !track.sample_table.ctts.is_empty() {
+            let mut min = i64::MAX;
+            let mut max = i64::MIN;
+            for e in &track.sample_table.ctts {
+                let v = e.composition_offset as i64;
+                if v < min {
+                    min = v;
+                }
+                if v > max {
+                    max = v;
+                }
+            }
+            if min < c.least_decode_to_display_delta || max > c.greatest_decode_to_display_delta {
+                return Err(Error::invalid(format!(
+                    "MOV: ctts range [{min}, {max}] outside cslg [{}, {}]",
+                    c.least_decode_to_display_delta, c.greatest_decode_to_display_delta,
+                )));
+            }
+        }
+    }
     Ok(track)
 }
 
@@ -562,6 +721,10 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
             t if t == &CTTS => {
                 let body = read_payload(r, child)?;
                 table.ctts = parse_ctts(&body)?;
+            }
+            t if t == &CSLG => {
+                let body = read_payload(r, child)?;
+                track.cslg = Some(parse_cslg(&body)?);
             }
             _ => {}
         }

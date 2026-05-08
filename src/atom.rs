@@ -274,6 +274,26 @@ pub const META: [u8; 4] = fourcc("meta");
 pub const KEYS: [u8; 4] = fourcc("keys");
 pub const ILST: [u8; 4] = fourcc("ilst");
 
+// Round-3: Reference-movie atoms (Apple QTFF "Reference Movies", p. 39+).
+pub const RMRA: [u8; 4] = fourcc("rmra"); // reference movie list (top of moov)
+pub const RMDA: [u8; 4] = fourcc("rmda"); // single reference movie descriptor
+pub const RDRF: [u8; 4] = fourcc("rdrf"); // data reference (alias / URL)
+pub const RMDR: [u8; 4] = fourcc("rmdr"); // data rate qualifier
+pub const RMQU: [u8; 4] = fourcc("rmqu"); // quality qualifier
+pub const RMCS: [u8; 4] = fourcc("rmcs"); // CPU speed qualifier
+pub const RMVC: [u8; 4] = fourcc("rmvc"); // version-check qualifier
+pub const RMCD: [u8; 4] = fourcc("rmcd"); // codec qualifier
+
+// Round-3: Fragmented-MP4 atoms (ISO BMFF §8.16; we recognise + reject).
+pub const MVEX: [u8; 4] = fourcc("mvex"); // movie-extends header inside moov
+pub const TREX: [u8; 4] = fourcc("trex"); // track-extends defaults inside mvex
+pub const MEHD: [u8; 4] = fourcc("mehd"); // movie-extends header
+pub const MOOF: [u8; 4] = fourcc("moof"); // movie fragment (top-level)
+pub const TRAF: [u8; 4] = fourcc("traf"); // track fragment inside moof
+
+// Round-3: Composition-shift-least-greatest atom.
+pub const CSLG: [u8; 4] = fourcc("cslg");
+
 #[cfg(test)]
 mod tests {
     use super::*;
