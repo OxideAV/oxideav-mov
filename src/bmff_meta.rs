@@ -30,6 +30,7 @@
 //! still let callers walk its primary item.
 
 use crate::atom::{fourcc, read_payload, walk_children, AtomHeader};
+use crate::iprp::{parse_iprp, ItemProperties, IPRP};
 use std::io::{Read, Seek, SeekFrom};
 
 #[cfg(feature = "registry")]
@@ -140,6 +141,10 @@ pub struct BmffMeta {
     pub bxml: Vec<u8>,
     /// `iref` typed references between items.
     pub references: Vec<ItemReference>,
+    /// `iprp` item-properties container (HEIF / ISO BMFF §8.11.14).
+    /// `None` when the file lacks an `iprp` (legacy MPEG-7 metadata,
+    /// reference-movie containers, …).
+    pub properties: Option<ItemProperties>,
 }
 
 impl BmffMeta {
@@ -157,6 +162,71 @@ impl BmffMeta {
     /// are present).
     pub fn primary_item_info(&self) -> Option<&ItemInfoEntry> {
         self.primary_item.and_then(|id| self.find_item(id))
+    }
+
+    /// Items the given `item_id` derives from (`dimg` references). For
+    /// a `grid` derived item this returns the contributing tile items
+    /// in row-major sweep order; for an `iovl` derived item this is
+    /// the layer list in stacking order.
+    pub fn derived_from(&self, item_id: u32) -> Vec<u32> {
+        self.refs_from(item_id, b"dimg")
+    }
+
+    /// Items the given `item_id` is an auxiliary plane *for* (`auxl`).
+    /// Typically the colour item that an alpha or depth plane attaches
+    /// to.
+    pub fn auxiliary_for(&self, item_id: u32) -> Vec<u32> {
+        self.refs_from(item_id, b"auxl")
+    }
+
+    /// Items the given `item_id` is a thumbnail *of* (`thmb`).
+    pub fn thumbnail_of(&self, item_id: u32) -> Vec<u32> {
+        self.refs_from(item_id, b"thmb")
+    }
+
+    /// Items the given metadata `item_id` describes (`cdsc`). Used by
+    /// HEIF's Exif / XMP item linkage.
+    pub fn describes(&self, item_id: u32) -> Vec<u32> {
+        self.refs_from(item_id, b"cdsc")
+    }
+
+    /// Inverse-direction lookup: which items list `target_id` as a
+    /// `thmb` source? In practice this returns the thumbnail items
+    /// pointing *at* the master.
+    pub fn thumbnails_of_master(&self, target_id: u32) -> Vec<u32> {
+        self.refs_to(target_id, b"thmb")
+    }
+
+    /// Inverse-direction lookup: which items list `target_id` as a
+    /// `cdsc` target? Returns the metadata items (Exif / XMP / ...)
+    /// describing this image.
+    pub fn metadata_describing(&self, target_id: u32) -> Vec<u32> {
+        self.refs_to(target_id, b"cdsc")
+    }
+
+    /// Generic helper: every `to_item_id` reachable from `from_id`
+    /// through a reference of the given kind.
+    pub fn refs_from(&self, from_id: u32, kind: &[u8; 4]) -> Vec<u32> {
+        let mut out = Vec::new();
+        for r in &self.references {
+            if r.from_item_id == from_id && &r.kind == kind {
+                out.extend_from_slice(&r.to_item_ids);
+            }
+        }
+        out
+    }
+
+    /// Inverse direction of [`Self::refs_from`]: every `from_item_id`
+    /// that lists `to_id` as a target through a reference of the
+    /// given kind.
+    pub fn refs_to(&self, to_id: u32, kind: &[u8; 4]) -> Vec<u32> {
+        let mut out = Vec::new();
+        for r in &self.references {
+            if &r.kind == kind && r.to_item_ids.contains(&to_id) {
+                out.push(r.from_item_id);
+            }
+        }
+        out
     }
 }
 
@@ -225,6 +295,10 @@ pub fn parse_bmff_meta<R: Read + Seek + ?Sized>(
             }
             t if t == &IREF => {
                 out.references = parse_iref(r, child)?;
+                found_iso_marker = true;
+            }
+            t if t == &IPRP => {
+                out.properties = Some(parse_iprp(r, child)?);
                 found_iso_marker = true;
             }
             _ => {}

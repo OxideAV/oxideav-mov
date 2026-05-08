@@ -363,9 +363,6 @@ impl MovDemuxer {
             input.seek(SeekFrom::Start(body_end))?;
         }
 
-        if mvhd.is_none() {
-            return Err(Error::invalid("MOV: no moov/mvhd found"));
-        }
         if has_mvex {
             // `mvex` inside `moov` declares the file as fragmented (ISO
             // BMFF §8.16.1) — even when `moof` boxes haven't been seen
@@ -375,11 +372,26 @@ impl MovDemuxer {
                 "MOV: 'mvex' indicates a fragmented MP4; use oxideav-mp4 for fragmented streams",
             ));
         }
+        if mvhd.is_none() {
+            // A bare HEIF/HEIC/AVIF still-image file is allowed to
+            // ship without any `moov` at all — its content is
+            // entirely described by a top-level `meta` box. Accept
+            // such files so callers can walk `file_bmff_meta` to
+            // discover items, properties, and item-data extents.
+            if file_bmff_meta.is_none() {
+                return Err(Error::invalid("MOV: no moov/mvhd found"));
+            }
+        }
         if tracks.is_empty() {
-            // A reference-movie file (`moov/rmra`) is permitted to have
-            // no tracks: its tracks live in the *referenced* file. Surface
-            // a more specific error so callers can fall back to alias
-            // resolution rather than think the input is corrupt.
+            // Three valid "no tracks" shapes:
+            //   * reference-movie file (`moov/rmra`) — tracks live in
+            //     the referenced file (best surfaced as Unsupported so
+            //     callers can fall back to alias resolution),
+            //   * meta-only HEIF/HEIC/AVIF still-image files — the
+            //     image data lives in `meta`/`iloc`, not in tracks,
+            //   * any future shape that carries `mvhd` purely for
+            //     timebase reasons but no media tracks (rare; we
+            //     accept it silently when a `meta` is present).
             if !reference_movies.is_empty() {
                 return Err(unsupported_error(format!(
                     "MOV: reference-movie container with {n} alternate(s); resolving \
@@ -387,7 +399,12 @@ impl MovDemuxer {
                     n = reference_movies.len(),
                 )));
             }
-            return Err(Error::invalid("MOV: moov contains no tracks"));
+            if file_bmff_meta.is_none() && movie_bmff_meta.is_none() {
+                return Err(Error::invalid("MOV: moov contains no tracks"));
+            }
+            // Otherwise: meta-only file, fall through. `samples` is
+            // empty and `next_packet` will return `Eof` immediately;
+            // callers consume `file_bmff_meta` / `bmff_meta` instead.
         }
 
         // Resolve codec ids per-track using the provided resolver

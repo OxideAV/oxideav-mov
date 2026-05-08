@@ -17,6 +17,7 @@ pub mod demuxer;
 pub mod edit;
 pub mod gmhd;
 pub mod header;
+pub mod iprp;
 pub mod media_meta;
 pub mod reference;
 pub mod sample_table;
@@ -43,6 +44,10 @@ pub use demuxer::{MovDemuxer, MAX_ALIAS_DEPTH};
 pub use edit::{Edit, EditList};
 pub use gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, Tcmi, TextHeader};
 pub use header::{Ftyp, Hdlr, Mdhd, Mvhd, Tkhd, TrackRotation};
+pub use iprp::{
+    parse_iprp, AuxC, Imir, Irot, Ispe, ItemProperties, ItemProperty, ItemPropertyAssociation,
+    Pixi, PropertyAssociation,
+};
 pub use media_meta::{
     channel_mask_for_layout_tag, Chan, ChanDescription, Clap, ColorParameters, ColorParametersKind,
     Cslg, MetaKeyValue, Pasp, Tapt,

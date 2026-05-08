@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 8 — HEIF/HEIC item-properties container (`iprp`/`ipco`/`ipma`),
+  meta-only files (no `moov` tracks), and `iref` typed-reference
+  resolver helpers (`derived_from`, `auxiliary_for`, `thumbnail_of`,
+  `describes`, plus inverse-direction `thumbnails_of_master` and
+  `metadata_describing` lookups).
+  - New `iprp` module with `ItemProperties { properties, associations }`.
+    `parse_iprp` walks `ipco` (a flat array of property boxes) and
+    every sibling `ipma` (FullBox v0/v1, both 8-bit and 16-bit
+    association indices via the flags `&1` discriminator).
+  - Strongly-typed property variants: `Colr`, `Pasp`, `Clap`, `Pixi`,
+    `Ispe`, `Irot`, `Imir`, `AuxC`, plus `Other { fourcc, payload }`
+    fall-through for any property box we don't model natively
+    (`hvcC`, `av1C`, `lsel`, `clli`, `mdcv`, `cclv`, …). The fall-
+    through path lets callers parse codec-config records via the
+    appropriate codec crate without us pulling them as deps.
+  - `ItemProperties::resolve(item_id) -> Vec<&ItemProperty>` resolves
+    `ipma` 1-based property indices into `ipco` entries; out-of-range
+    indices are silently skipped (forward-compatible).
+  - Convenience helpers `ispe_for`, `colr_for`, `auxc_for`,
+    `orientation_for(item_id) -> (Option<Irot>, Option<Imir>)`.
+  - `BmffMeta::properties: Option<ItemProperties>` surfaced alongside
+    the round-7 fields.
+  - `BmffMeta` typed-reference helpers: `derived_from(id)` (`dimg`),
+    `auxiliary_for(id)` (`auxl`), `thumbnail_of(id)` (`thmb`),
+    `describes(id)` (`cdsc`); inverse `thumbnails_of_master(id)`,
+    `metadata_describing(id)`; plus generic `refs_from(id, kind)` /
+    `refs_to(id, kind)`.
+  - `MovDemuxer::open` now succeeds on **meta-only HEIF/HEIC/AVIF
+    still-image files** that ship without any `moov`. The previous
+    `"MOV: no moov/mvhd found"` and `"MOV: moov contains no tracks"`
+    errors are now relaxed when a top-level (`file_bmff_meta`) or
+    movie-scope (`bmff_meta`) `meta` box is present. `mvhd` and
+    `tracks` are surfaced as `None` / empty respectively, and
+    `next_packet` returns `Eof` immediately so callers consume the
+    item directory instead of the sample queue.
+  - 13 new tests (8 `iprp` unit tests + 5 round-8 integration tests:
+    moov-scope iprp resolution, meta-only HEIF open, `iref` resolver
+    helpers, empty-meta open, ipma v1 16-bit indices). 148 tests
+    total (was 135).
+  - Public types added: `ItemProperties`, `ItemProperty`,
+    `ItemPropertyAssociation`, `PropertyAssociation`, `Ispe`, `Pixi`,
+    `Irot`, `Imir`, `AuxC`, `parse_iprp`.
+
 - Round 7 — ISO BMFF §8.11 `meta` box parsing (HEIF/HEIC/MIAF/AVIF
   surface), multi-hop `rmra/url ` alias-chain following with cycle
   detection, and the QTFF text-sample style trailers
