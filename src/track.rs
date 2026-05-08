@@ -9,6 +9,7 @@
 //! [`SampleDescription::extra`] for downstream codec crates.
 
 use crate::edit::EditList;
+use crate::gmhd::Gmhd;
 use crate::header::{Hdlr, Mdhd, Tkhd};
 use crate::media_meta::{
     parse_chan, parse_clap, parse_colr, parse_pasp, Chan, Clap, ColorParameters, Cslg,
@@ -153,6 +154,10 @@ pub struct Track {
     /// surfacing the parsed list lets callers detect external-alias
     /// tracks without having to walk the atom tree themselves).
     pub data_references: Vec<DataReference>,
+    /// Parsed `gmhd` (base-media information header) extension atoms
+    /// — `gmin`, `text`, `tmcd/tcmi` (round 5). `None` when the track
+    /// uses a typed media header (`vmhd`/`smhd`) instead.
+    pub gmhd: Option<Gmhd>,
 }
 
 impl Track {
@@ -170,6 +175,22 @@ impl Track {
     /// True for tracks whose hdlr carries `soun`.
     pub fn is_audio(&self) -> bool {
         self.hdlr.is_audio()
+    }
+
+    /// True for QuickTime `text` tracks (chapter lists, simple
+    /// overlays). See [`Hdlr::is_text`].
+    pub fn is_text(&self) -> bool {
+        self.hdlr.is_text()
+    }
+
+    /// True for ISO BMFF subtitle / caption tracks (`subt` / `sbtl`).
+    pub fn is_subtitle(&self) -> bool {
+        self.hdlr.is_subtitle()
+    }
+
+    /// True for `tmcd` time-code tracks.
+    pub fn is_timecode(&self) -> bool {
+        self.hdlr.is_timecode()
     }
 
     /// First sample description's data-format FourCC. The QTFF

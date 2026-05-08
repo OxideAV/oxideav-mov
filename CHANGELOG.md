@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 5 — chapter-track resolution, per-MediaType `gmhd` extension parsing, and v1 `mvhd` integration coverage.
+  - `chapter` module with `ChapterEntry { start_time, duration, title }`,
+    `ChapterList { track_index, time_scale, entries }`, and a
+    `decode_text_sample` helper. The Apple text-sample shape
+    (`[u16 BE size][text bytes]` plus optional `encd/styl/hlit/hclr`
+    extension trailers, which we ignore) decodes to a best-effort
+    UTF-8 string; invalid UTF-8 falls back to a Mac-Roman → ASCII
+    expansion (bytes ≥ 0x80 → U+FFFD).
+  - `MovDemuxer::chapters_for(primary_track_index)` resolves the
+    `tref/chap` reference into a fully-populated `ChapterList`. Single-
+    hop: rejects self-cycles and chained chapter references with
+    `InvalidData`; missing chapter track-id surfaces a
+    `chapter track-id N not present in moov` error.
+  - `gmhd` module with parsers for the per-MediaType base-media
+    information sub-atoms: `gmin` (graphics_mode + opcolor + balance),
+    `text` (9-element 16.16 / 2.30 transformation matrix used by text
+    overlays), and `tmcd > tcmi` (font/face/size + bg/fg colors +
+    optional Pascal-counted font name). All three slots populate a
+    single `Gmhd` aggregate stored on `Track::gmhd`.
+  - `Hdlr::is_text` / `is_subtitle` / `is_timecode` and matching
+    `Track::is_text` / `is_subtitle` / `is_timecode` accessors,
+    classifying `text` (chapter / overlay), `subt`/`sbtl` (BMFF
+    subtitle), and `tmcd` (time-code) handler subtypes.
+  - 11 new unit tests (`chapter::*`, `gmhd::*`) plus 5 new integration
+    tests (`synth_chapters_and_gmhd.rs`) covering chapter resolution
+    happy-path, no-tref → `Ok(None)`, self-cycle rejection, dangling
+    track-id rejection, and a v1-`mvhd` 64-bit-duration round-trip.
 - Round 4 — `udta` user-data subtree, `dinf/dref` data-reference parsing, and `tkhd` matrix rotation classification.
   - `user_data` module with `parse_udta`, `UserDataEntry`, and
     `UserDataKind` (InternationalText / PlainUtf8 / Unknown).

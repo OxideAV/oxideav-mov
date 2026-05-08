@@ -11,8 +11,10 @@
 //! 2001-03-01) — primarily Chapters 1–3.
 
 pub mod atom;
+pub mod chapter;
 pub mod demuxer;
 pub mod edit;
+pub mod gmhd;
 pub mod header;
 pub mod media_meta;
 pub mod reference;
@@ -26,8 +28,10 @@ pub mod registry;
 #[cfg(not(feature = "registry"))]
 pub mod standalone;
 
+pub use chapter::{decode_text_sample, ChapterEntry, ChapterList};
 pub use demuxer::MovDemuxer;
 pub use edit::{Edit, EditList};
+pub use gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, Tcmi, TextHeader};
 pub use header::{Ftyp, Hdlr, Mdhd, Mvhd, Tkhd, TrackRotation};
 pub use media_meta::{
     channel_mask_for_layout_tag, Chan, ChanDescription, Clap, ColorParameters, ColorParametersKind,

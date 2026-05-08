@@ -13,11 +13,13 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DINF, DREF,
-    EDTS, ELST, ENOF, FREE, FTYP, GMHD, HDLR, ILST, KEYS, MDAT, MDHD, MDIA, META, MINF, MOOF, MOOV,
-    MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SKIP, SMHD, STBL, STCO, STSC,
-    STSD, STSS, STSZ, STTS, TAPT, TKHD, TRAK, TREF, UDTA, VMHD, WIDE,
+    EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, MDAT, MDHD, MDIA, META, MINF, MOOF,
+    MOOV, MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SKIP, SMHD, STBL, STCO,
+    STSC, STSD, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
 };
+use crate::chapter::{decode_text_sample, ChapterEntry, ChapterList};
 use crate::edit::{parse_elst, EditList};
+use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
 use crate::header::{parse_ftyp, parse_hdlr, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd};
 use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
 use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
@@ -249,6 +251,80 @@ impl MovDemuxer {
             return Err(Error::invalid("MOV: input too small to be a QTFF file"));
         }
         Ok(())
+    }
+
+    /// Resolve the chapter list for the primary track at
+    /// `primary_track_index` (a 0-based offset into [`Self::tracks`]).
+    ///
+    /// Returns `Ok(None)` when the primary track has no `tref/chap`
+    /// reference (no chapters declared). Returns `Err(InvalidData)`
+    /// when the chapter-track-id points at a track that doesn't exist
+    /// in the file, or when a primary track names itself (a cycle that
+    /// QTFF p. 51 forbids); we follow exactly one alias hop and refuse
+    /// deeper chains. The chapter track's samples are read from the
+    /// underlying input — the demuxer's sample cursor is preserved
+    /// across the call.
+    pub fn chapters_for(&mut self, primary_track_index: usize) -> Result<Option<ChapterList>> {
+        let chap_track_id = match self.tracks.get(primary_track_index) {
+            Some(t) => match t.chapter_track_ref() {
+                Some(id) => id,
+                None => return Ok(None),
+            },
+            None => return Err(Error::invalid("MOV: chapter primary index out of range")),
+        };
+        // Refuse self-reference.
+        if let Some(primary) = self.tracks.get(primary_track_index) {
+            if primary.tkhd.track_id == chap_track_id {
+                return Err(Error::invalid(
+                    "MOV: chapter track-id points at the primary track (cycle)",
+                ));
+            }
+        }
+        // Resolve track-id → track-index.
+        let chap_index = self
+            .tracks
+            .iter()
+            .position(|t| t.tkhd.track_id == chap_track_id)
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV: chapter track-id {chap_track_id} not present in moov"
+                ))
+            })?;
+        // The chapter target should itself not chain to another chapter
+        // track — that would be an alias chain we explicitly forbid for
+        // round 5.
+        if self.tracks[chap_index].chapter_track_ref().is_some() {
+            return Err(Error::invalid(
+                "MOV: chapter track itself declares a chapter reference (alias chain)",
+            ));
+        }
+        let time_scale = self.tracks[chap_index].mdhd.time_scale;
+        // Walk the chapter track's samples in DTS order, reading each
+        // sample's bytes and decoding as Apple text.
+        let mut entries =
+            Vec::with_capacity(self.tracks[chap_index].sample_table.sample_count() as usize);
+        // Snapshot the iter-able sample list so we don't borrow `self`
+        // mutably while reading the input.
+        let samples: Vec<SampleEntry> = self.tracks[chap_index]
+            .sample_table
+            .iter_samples()
+            .collect::<Result<Vec<_>>>()?;
+        for s in samples {
+            self.input.seek(SeekFrom::Start(s.offset))?;
+            let mut buf = vec![0u8; s.size as usize];
+            self.input.read_exact(&mut buf)?;
+            let title = decode_text_sample(&buf)?;
+            entries.push(ChapterEntry {
+                start_time: s.dts,
+                duration: s.duration,
+                title,
+            });
+        }
+        Ok(Some(ChapterList {
+            track_index: chap_index as u32,
+            time_scale,
+            entries,
+        }))
     }
 
     /// Read the next sample's bytes from the input. Returns
@@ -681,12 +757,15 @@ fn parse_minf<R: Read + Seek + ?Sized>(
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
     walk_children(r, Some(body_end), |r, child| {
         match &child.fourcc {
-            t if t == &VMHD || t == &SMHD || t == &GMHD => {
-                // Per-MediaType media-information header. The handler
-                // type already classifies the track for us; the header
-                // body's only payload-affecting field is `gmhd`'s
-                // `tmcd`/`text` extension which round-4 still
-                // captures only structurally.
+            t if t == &VMHD || t == &SMHD => {
+                // Typed per-MediaType media-information header. The
+                // handler type already classifies the track for us;
+                // the body has no payload-affecting fields beyond what
+                // round 1 already surfaces via `Track::is_video` /
+                // `Track::is_audio`.
+            }
+            t if t == &GMHD => {
+                track.gmhd = Some(parse_gmhd(r, child)?);
             }
             t if t == &DINF => {
                 parse_dinf(r, child, track)?;
@@ -698,6 +777,42 @@ fn parse_minf<R: Read + Seek + ?Sized>(
         }
         Ok(())
     })
+}
+
+/// Parse a `gmhd` container — walks the immediate children and
+/// extracts `gmin`, `text`, and `tmcd/tcmi` payloads into a [`Gmhd`].
+fn parse_gmhd<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Gmhd> {
+    let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
+    r.seek(SeekFrom::Start(hdr.payload_offset))?;
+    let mut out = Gmhd::default();
+    walk_children(r, Some(body_end), |r, child| {
+        match &child.fourcc {
+            t if t == &GMIN => {
+                let body = read_payload(r, child)?;
+                out.gmin = Some(parse_gmin(&body)?);
+            }
+            t if t == &TEXT => {
+                let body = read_payload(r, child)?;
+                out.text = Some(parse_text_header(&body)?);
+            }
+            t if t == &TMCD => {
+                // `tmcd` inside `gmhd` is a container that wraps a
+                // single `tcmi` child with the actual fields.
+                let inner_end = child.payload_offset + child.payload_len().unwrap_or(0);
+                r.seek(SeekFrom::Start(child.payload_offset))?;
+                walk_children(r, Some(inner_end), |r, inner| {
+                    if &inner.fourcc == b"tcmi" {
+                        let body = read_payload(r, inner)?;
+                        out.tcmi = Some(parse_tcmi(&body)?);
+                    }
+                    Ok(())
+                })?;
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+    Ok(out)
 }
 
 fn parse_dinf<R: Read + Seek + ?Sized>(

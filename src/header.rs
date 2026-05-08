@@ -396,6 +396,22 @@ impl Hdlr {
     pub fn is_audio(&self) -> bool {
         self.component_subtype == *b"soun"
     }
+    /// Apple QuickTime text track (`text` subtype). Used by chapter
+    /// tracks (per QTFF p. 51, "Chapter Lists") and subtitle / caption
+    /// overlays. Distinct from ISO BMFF `subt` / `sbtl` / `text` which
+    /// are timed-text variants `is_subtitle()` recognises separately.
+    pub fn is_text(&self) -> bool {
+        self.component_subtype == *b"text"
+    }
+    /// ISO BMFF subtitle/caption media: `subt` (general subtitle),
+    /// `sbtl` (caption / closed-caption), `text` (BMFF timed text).
+    pub fn is_subtitle(&self) -> bool {
+        matches!(&self.component_subtype, b"subt" | b"sbtl")
+    }
+    /// QuickTime time-code track (`tmcd` subtype, QTFF p. 116).
+    pub fn is_timecode(&self) -> bool {
+        self.component_subtype == *b"tmcd"
+    }
 }
 
 /// Parse an `hdlr` payload.
