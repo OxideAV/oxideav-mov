@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 6 — alias-chain following (one hop), `tmcd` sample-description
+  decode inside `stsd`, and `encd` text-encoding-override surfacing on
+  chapter samples.
+  - `MovDemuxer::open_with_aliases(input, opener)` and
+    `open_with_aliases_resolver(input, opener, resolver)` follow a
+    single `rmra/url ` reference hop when the input is a reference-
+    only `.mov` (no inline tracks). Self-contained inputs pass through
+    untouched (the opener is never invoked). Two-hop chains and
+    unreachable URLs surface as `Unsupported` with an "alias chain
+    exhausted" / inner-target error verbatim.
+  - `MovDemuxer::probe_reference_movies(&mut dyn ReadSeek)` static
+    helper exposes the parsed `rmra/rmda` list without committing to
+    a full demuxer construction; lets callers introspect aliases
+    before deciding whether to follow them.
+  - `timecode` module with `Tmcd { flags, time_scale, frame_duration,
+    number_of_frames, source_name }` plus convenience predicates
+    (`is_drop_frame`, `is_24_hour_max`, `is_negatives_ok`,
+    `is_counter`) and `TMCD_FLAG_*` constants. `parse_stsd` populates
+    `SampleDescription::tmcd` for tracks whose handler is `tmcd` and
+    whose entry FourCC is `tmcd`. The trailing source-reference
+    user-data `name` atom (or `udta`-wrapped `name`) round-trips into
+    `Tmcd::source_name`. Distinct from the round-5 `tmcd > tcmi` shape
+    inside `gmhd` (which carries display-style fields, not timing).
+  - `chapter::decode_text_sample_full` returns `(title, encoding_id)`
+    by scanning for a trailing `encd` extension atom on Apple text
+    samples (`[size:4]['encd'][text_encoding_id:u32]`, also accepts a
+    FullBox-prefixed shape). `ChapterEntry::text_encoding` exposes
+    the raw Mac `TextEncoding` constant — round 6 surfaces it without
+    a built-in encoding-id-to-encoding-name table since the mapping
+    table lives in CoreFoundation `TextCommon.h`.
+  - 8 new unit tests (`chapter::encd_*`, `timecode::*`) plus 7 new
+    integration tests (`synth_round6.rs`) covering tmcd-in-stsd
+    decode, `encd` round-trip, alias-chain happy path, self-contained
+    pass-through, exhausted-alias rejection, two-hop refusal, and the
+    static `probe_reference_movies` helper.
 - Round 5 — chapter-track resolution, per-MediaType `gmhd` extension parsing, and v1 `mvhd` integration coverage.
   - `chapter` module with `ChapterEntry { start_time, duration, title }`,
     `ChapterList { track_index, time_scale, entries }`, and a

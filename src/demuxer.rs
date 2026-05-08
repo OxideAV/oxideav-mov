@@ -17,7 +17,7 @@ use crate::atom::{
     MOOV, MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SKIP, SMHD, STBL, STCO,
     STSC, STSD, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
 };
-use crate::chapter::{decode_text_sample, ChapterEntry, ChapterList};
+use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
 use crate::edit::{parse_elst, EditList};
 use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
 use crate::header::{parse_ftyp, parse_hdlr, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd};
@@ -81,6 +81,132 @@ impl MovDemuxer {
         // helper uses the fully-mutable `input` — easiest is to
         // delegate to the resolver-aware ctor with a null resolver.
         Self::open_with(input, &NULL_RESOLVER)
+    }
+
+    /// Open a QuickTime file, transparently following one `rmra/url `
+    /// alias hop when the input file is a *reference movie*: a `.mov`
+    /// whose `moov` carries only an `rmra` list and no inline tracks
+    /// (QTFF "Reference Movies" §). The `opener` callback is invoked
+    /// with each `url ` alias in order; the first URL it can open is
+    /// re-parsed as a regular QuickTime file, and the resulting
+    /// demuxer is returned.
+    ///
+    /// Round 6 limits itself to a *single hop*: if the alias-target
+    /// is itself another reference movie (no tracks, only rmra) we
+    /// surface an `Unsupported` error rather than chase the chain
+    /// further. This matches QuickTime's own behaviour of refusing
+    /// excessive indirection.
+    ///
+    /// Non-`url ` data references (`alis` / `rsrc`) are skipped — the
+    /// opener never receives them. Returns `Unsupported` when:
+    ///   * no alias has a usable `url ` reference, or
+    ///   * the opener errors on every URL it sees, or
+    ///   * the resolved alias target is itself a reference-only file.
+    ///
+    /// `opener` returns its own error type via [`std::io::Error`]; an
+    /// I/O failure on a single URL is treated the same as "URL not
+    /// reachable" — the resolver moves on to the next alternate
+    /// rather than fail the whole open.
+    pub fn open_with_aliases<F>(input: Box<dyn ReadSeek>, opener: F) -> Result<Self>
+    where
+        F: FnMut(&str) -> std::io::Result<Box<dyn ReadSeek>>,
+    {
+        Self::open_with_aliases_resolver(input, opener, &NULL_RESOLVER)
+    }
+
+    /// Same as [`open_with_aliases`] but additionally takes a
+    /// [`CodecResolverShim`] applied to the resolved alias target.
+    pub fn open_with_aliases_resolver<F>(
+        mut input: Box<dyn ReadSeek>,
+        mut opener: F,
+        resolver: &dyn CodecResolverShim,
+    ) -> Result<Self>
+    where
+        F: FnMut(&str) -> std::io::Result<Box<dyn ReadSeek>>,
+    {
+        // Try to parse the input directly. The common case is a
+        // self-contained file with an inline track — opening succeeds
+        // immediately and we never touch the opener.
+        input.seek(SeekFrom::Start(0))?;
+        let refs = match Self::probe_reference_movies(input.as_mut()) {
+            Ok(v) => v,
+            Err(e) => {
+                // The input is not even a recognisable QuickTime
+                // container; bubble up the error as-is.
+                return Err(e);
+            }
+        };
+        // Fast path: there are tracks (or we couldn't tell) — let the
+        // regular ctor handle it. We discriminate by attempting the
+        // open() call; a reference-only file will surface Unsupported
+        // and we recover by walking aliases.
+        input.seek(SeekFrom::Start(0))?;
+        match Self::open_with(input, resolver) {
+            Ok(d) => Ok(d),
+            Err(_e) if !refs.is_empty() => {
+                // Walk the aliases — first usable URL wins.
+                for r in &refs {
+                    let url = match r.data_ref.as_ref() {
+                        Some(crate::reference::DataReference::Url(s)) => s.as_str(),
+                        _ => continue,
+                    };
+                    let next = match opener(url) {
+                        Ok(b) => b,
+                        Err(_) => continue,
+                    };
+                    // One hop only — refuse a target that's also a
+                    // pure reference-only file. Any error from the
+                    // resolved target's open is surfaced verbatim so
+                    // callers can distinguish "alias chain too deep"
+                    // from "alias target is malformed".
+                    return Self::open_with(next, resolver);
+                }
+                Err(unsupported_error(format!(
+                    "MOV: alias chain exhausted ({} alternate(s) tried, none reachable)",
+                    refs.len()
+                )))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Walk the input's top-level atoms looking for `moov/rmra` and
+    /// return the parsed reference-movie list. Returns an empty vec
+    /// when no `rmra` is present (the common case). Used by
+    /// [`open_with_aliases`] to discover alternates without committing
+    /// to a full demuxer construction. The reader's cursor is reset to
+    /// the start on entry; on exit the cursor position is unspecified.
+    pub fn probe_reference_movies(input: &mut dyn ReadSeek) -> Result<Vec<ReferenceMovie>> {
+        input.seek(SeekFrom::Start(0))?;
+        let total_len = input.seek(SeekFrom::End(0))?;
+        input.seek(SeekFrom::Start(0))?;
+        let mut refs = Vec::new();
+        loop {
+            let pos = input.stream_position()?;
+            if pos >= total_len {
+                break;
+            }
+            let hdr = match read_atom_header(input)? {
+                Some(h) => h,
+                None => break,
+            };
+            let body_end = hdr
+                .total_size
+                .map(|t| hdr.payload_offset + (t - hdr.header_len))
+                .unwrap_or(total_len);
+            if hdr.fourcc == MOOV {
+                input.seek(SeekFrom::Start(hdr.payload_offset))?;
+                walk_children(input, Some(body_end), |r, child| {
+                    if child.fourcc == RMRA {
+                        refs = parse_rmra(r, child)?;
+                    }
+                    Ok(())
+                })?;
+                break; // moov walked; no need to continue scanning.
+            }
+            input.seek(SeekFrom::Start(body_end))?;
+        }
+        Ok(refs)
     }
 
     /// Parse the container, using `resolver` to map sample-description
@@ -313,11 +439,12 @@ impl MovDemuxer {
             self.input.seek(SeekFrom::Start(s.offset))?;
             let mut buf = vec![0u8; s.size as usize];
             self.input.read_exact(&mut buf)?;
-            let title = decode_text_sample(&buf)?;
+            let (title, text_encoding) = decode_text_sample_full(&buf)?;
             entries.push(ChapterEntry {
                 start_time: s.dts,
                 duration: s.duration,
                 title,
+                text_encoding,
             });
         }
         Ok(Some(ChapterList {

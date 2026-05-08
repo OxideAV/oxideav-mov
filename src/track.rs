@@ -17,6 +17,7 @@ use crate::media_meta::{
 };
 use crate::reference::DataReference;
 use crate::sample_table::SampleTable;
+use crate::timecode::{parse_tmcd_sample_description, Tmcd};
 use crate::user_data::UserDataEntry;
 
 #[cfg(feature = "registry")]
@@ -117,6 +118,12 @@ pub struct SampleDescription {
     // ─────── Round-2 audio extension atoms ───────
     /// `chan` — Apple Core Audio channel layout (raw fields surfaced).
     pub chan: Option<Chan>,
+
+    // ─────── Round-6 timecode extension ───────
+    /// Parsed `tmcd` sample-description body — populated only when the
+    /// track's handler is a time-code track (`hdlr.is_timecode()`) and
+    /// the entry's format FourCC is `tmcd`. See [`Tmcd`].
+    pub tmcd: Option<Tmcd>,
 }
 
 /// One track's accumulated state.
@@ -295,6 +302,19 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
             entry.height = u16::from_be_bytes([body[26], body[27]]);
             entry.extra = body[70..].to_vec();
             scan_video_extensions(&mut entry)?;
+        } else if hdlr.is_timecode() && &format == b"tmcd" && body.len() >= 20 {
+            // Time-code sample description (QTFF p. 106). Distinct from
+            // the `tmcd` container inside `gmhd` (round 5, see
+            // `Gmhd::tcmi`) which wraps display-style fields. The
+            // `tmcd` *inside stsd* carries:
+            //   reserved:u32  flags:u32
+            //   time_scale:u32  frame_duration:u32
+            //   number_of_frames:u8  reserved:24-bit
+            //   [optional source-reference user data atom]
+            entry.tmcd = Some(parse_tmcd_sample_description(body)?);
+            // Keep the trailing source-reference bytes in `extra` so
+            // future rounds can also surface ftab/style atoms.
+            entry.extra = body[20..].to_vec();
         } else if hdlr.is_audio() && body.len() >= 20 {
             // Sound sample description v0 (QTFF p. 100):
             //   ver:2 rev:2 vendor:4 channels:2 sample_size:2

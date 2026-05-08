@@ -19,6 +19,7 @@ pub mod header;
 pub mod media_meta;
 pub mod reference;
 pub mod sample_table;
+pub mod timecode;
 pub mod track;
 pub mod user_data;
 
@@ -28,7 +29,7 @@ pub mod registry;
 #[cfg(not(feature = "registry"))]
 pub mod standalone;
 
-pub use chapter::{decode_text_sample, ChapterEntry, ChapterList};
+pub use chapter::{decode_text_sample, decode_text_sample_full, ChapterEntry, ChapterList};
 pub use demuxer::MovDemuxer;
 pub use edit::{Edit, EditList};
 pub use gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, Tcmi, TextHeader};
@@ -39,5 +40,9 @@ pub use media_meta::{
 };
 pub use reference::{parse_dref, DataReference, ReferenceMovie};
 pub use sample_table::{SampleEntry, SampleTable};
+pub use timecode::{
+    parse_tmcd_sample_description, Tmcd, TMCD_FLAG_24_HOUR, TMCD_FLAG_COUNTER,
+    TMCD_FLAG_DROP_FRAME, TMCD_FLAG_NEGATIVES_OK,
+};
 pub use track::{SampleDescription, Track, TrackRef, TrackRefKind};
 pub use user_data::{iso_language_tag, parse_udta, UserDataEntry, UserDataKind};
