@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 16 — long-deferred `iloc` resolver gaps: recursive
+  `construction_method == 2` (item_offset) walker with cycle
+  detection, per-extent `extent_index` surfacing on `index_size > 0`,
+  and HEIF `base` `iref` typed reference for pre-derived coded image
+  surfaces.
+  - `MovDemuxer::resolve_item_bytes(item_id) -> Result<Vec<u8>>` —
+    recursive resolver that walks all three iloc construction methods
+    (0 file extents / 1 idat / 2 item_offset) transparently. The
+    cm=2 path sub-slices the source item's bytes per extent and uses
+    the `iref iloc` reference list to pick the source item (or
+    `extent_index` when `index_size > 0`). Cycle detection: a
+    `HashSet<u32>` of visited item ids is threaded through the
+    recursion; re-entry on a previously visited id aborts the resolve
+    with `Error::invalid("MOV: iloc cycle through item N")`.
+  - `ItemExtent::index: Option<u64>` (was `index: u64` with `0 ==
+    absent`) — the per-extent `extent_index` field per ISO/IEC
+    14496-12 §8.11.3 is now `Some(idx)` when the parent `iloc`
+    carries `index_size > 0` and `None` otherwise. Shape-breaking
+    field re-type; the only in-tree consumers are the cm=2 source-
+    item picker and the `derived` synth-test fixtures (all updated).
+  - `BmffMeta::base_image_for(item_id) -> Option<u32>` +
+    `MovDemuxer::base_image_for(item_id)` — returns the base coded
+    image id for a derived item per HEIF §6.4.7 (`base` iref). Used
+    by HEIF authoring flows that pre-render an HDR variant alongside
+    an SDR base.
+  - `BmffMeta::typed_references() -> Vec<ItemReferenceType>` +
+    `ItemReferenceType::{Base, Other}` — typed projection over
+    `ItemReference` rows. Promotes `base` to its own variant (with
+    `from_id` / `to_ids`) and surfaces every other reference kind
+    through `Other { kind, from_id, to_ids }` with the FourCC
+    preserved verbatim.
+  - 8 new tests (3 cm=2 recursive resolver + cycle detection /
+    self-cycle, 2 index_size>0 + cm=2 extent-index source picking,
+    3 base iref + typed_references projection).
+
 - Round 15 — HEIF transformative-property dimensional math on the
   `Identity` layout, HDR mastering metadata (`clli` / `mdcv` / `cclv`)
   surfaced on the layout itself, and HEIF tone-mapping property

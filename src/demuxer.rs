@@ -714,8 +714,179 @@ impl MovDemuxer {
                 }
                 Some(out)
             }
-            _ => None,
+            // construction_method == 2 (item_offset). Recursive
+            // resolve via the public entry point so cycle detection
+            // and depth-limiting kick in.
+            _ => self.resolve_item_bytes(item_id).ok(),
         }
+    }
+
+    /// Resolve an item's bytes per ISO/IEC 14496-12 §8.11.3, including
+    /// the `construction_method == 2` (item_offset) path which slices
+    /// the bytes out of *another* item's resolved payload.
+    ///
+    /// Behaviour by `construction_method`:
+    ///
+    /// * `0` (file_offset) — concatenate the `(base_offset + offset,
+    ///   length)` slices read directly from the input.
+    /// * `1` (idat_offset) — slice the file's `meta/idat` payload at
+    ///   `(base_offset + offset, length)` per extent.
+    /// * `2` (item_offset) — recursively resolve the source item
+    ///   (the **first** item in the file's `iref iloc` reference
+    ///   targets, or the `extent_index`-selected one when
+    ///   `index_size > 0`), then sub-slice the resulting bytes at
+    ///   `(base_offset + offset, length)` per extent.
+    ///
+    /// Cycle detection: a `HashSet<u32>` of visited item ids is
+    /// threaded through the recursion. A re-entry on a previously
+    /// visited id aborts the resolve with [`Error::invalid`] rather
+    /// than walking a self-referencing chain forever.
+    ///
+    /// Returns the concatenated payload bytes. Errors:
+    ///
+    /// * `Error::invalid("MOV: iloc cycle through items …")` on a
+    ///   visited-set hit (item references itself transitively).
+    /// * `Error::invalid("MOV: iloc item N has no entry")` when the
+    ///   id isn't present in the file's `iloc` table.
+    /// * `Error::invalid("MOV: iloc construction_method=2 source item
+    ///   missing")` when cm=2 needs a source-item reference (via
+    ///   `iref iloc` or extent_index) and the file lacks it.
+    /// * I/O errors propagated from the underlying reader.
+    pub fn resolve_item_bytes(&mut self, item_id: u32) -> Result<Vec<u8>> {
+        let mut visited = std::collections::HashSet::new();
+        self.resolve_item_bytes_inner(item_id, &mut visited)
+    }
+
+    fn resolve_item_bytes_inner(
+        &mut self,
+        item_id: u32,
+        visited: &mut std::collections::HashSet<u32>,
+    ) -> Result<Vec<u8>> {
+        if !visited.insert(item_id) {
+            return Err(Error::invalid(format!(
+                "MOV: iloc cycle through item {item_id}"
+            )));
+        }
+        let fm = self
+            .file_bmff_meta
+            .as_ref()
+            .ok_or_else(|| Error::invalid("MOV: iloc resolve called without meta box"))?;
+        let loc = fm
+            .find_location(item_id)
+            .ok_or_else(|| Error::invalid(format!("MOV: iloc item {item_id} has no entry")))?
+            .clone();
+        match loc.construction_method {
+            0 => {
+                let mut total = 0usize;
+                for e in &loc.extents {
+                    total = total
+                        .checked_add(e.length as usize)
+                        .ok_or_else(|| Error::invalid("MOV: iloc extent total overflow"))?;
+                }
+                let mut out = Vec::with_capacity(total);
+                for e in &loc.extents {
+                    let off = loc.base_offset.saturating_add(e.offset);
+                    self.input.seek(SeekFrom::Start(off))?;
+                    let mut chunk = vec![0u8; e.length as usize];
+                    self.input.read_exact(&mut chunk)?;
+                    out.extend_from_slice(&chunk);
+                }
+                Ok(out)
+            }
+            1 => {
+                let fm = self.file_bmff_meta.as_ref().ok_or_else(|| {
+                    Error::invalid("MOV: iloc cm=1 resolve lost meta-box reference")
+                })?;
+                crate::bmff_meta::idat_bytes_concat(fm, item_id).ok_or_else(|| {
+                    Error::invalid(format!(
+                        "MOV: iloc cm=1 idat resolve failed for item {item_id}"
+                    ))
+                })
+            }
+            2 => {
+                // construction_method == 2: each extent is
+                // `(extent_index?, offset, length)` *into another
+                // item's* resolved payload.
+                //
+                // Source-item selection per §8.11.3: when the iloc's
+                // index_size > 0 the per-extent `extent_index` is a
+                // 1-based index into the `iref iloc` reference list
+                // for this item (the source-item table). When
+                // index_size == 0 the source is the single target of
+                // the same `iref iloc` reference (HEIF authoring
+                // tools that emit a single iloc-iref + many extents
+                // all sub-slicing it).
+                let iref_targets: Vec<u32> = fm.refs_from(item_id, b"iloc");
+                let mut total = 0usize;
+                for e in &loc.extents {
+                    total = total
+                        .checked_add(e.length as usize)
+                        .ok_or_else(|| Error::invalid("MOV: iloc cm=2 extent total overflow"))?;
+                }
+                // Materialise each source-item resolution we need so
+                // we don't recurse repeatedly for the same target.
+                use std::collections::HashMap;
+                let mut resolved_sources: HashMap<u32, Vec<u8>> = HashMap::new();
+                let mut out = Vec::with_capacity(total);
+                for e in &loc.extents {
+                    let source_id = match e.index {
+                        Some(idx) if idx > 0 => {
+                            let i = (idx - 1) as usize;
+                            *iref_targets.get(i).ok_or_else(|| {
+                                Error::invalid(format!(
+                                    "MOV: iloc cm=2 extent_index {idx} out of range for item {item_id}"
+                                ))
+                            })?
+                        }
+                        _ => {
+                            // No per-extent index → take the single
+                            // (or first) iref iloc target.
+                            *iref_targets.first().ok_or_else(|| {
+                                Error::invalid(format!(
+                                    "MOV: iloc cm=2 source item missing for item {item_id}"
+                                ))
+                            })?
+                        }
+                    };
+                    if let std::collections::hash_map::Entry::Vacant(slot) =
+                        resolved_sources.entry(source_id)
+                    {
+                        let bytes = self.resolve_item_bytes_inner(source_id, visited)?;
+                        slot.insert(bytes);
+                    }
+                    let src = &resolved_sources[&source_id];
+                    let start = loc.base_offset.saturating_add(e.offset) as usize;
+                    let end = if e.length == 0 {
+                        src.len()
+                    } else {
+                        start
+                            .checked_add(e.length as usize)
+                            .ok_or_else(|| Error::invalid("MOV: iloc cm=2 sub-slice overflow"))?
+                    };
+                    if end > src.len() {
+                        return Err(Error::invalid(format!(
+                            "MOV: iloc cm=2 sub-slice out of range \
+                             (item {item_id} → src {source_id}, end={end}, len={})",
+                            src.len()
+                        )));
+                    }
+                    out.extend_from_slice(&src[start..end]);
+                }
+                Ok(out)
+            }
+            other => Err(Error::invalid(format!(
+                "MOV: iloc unknown construction_method {other}"
+            ))),
+        }
+    }
+
+    /// Pre-derived coded image base item (HEIF §6.4.7). Returns the
+    /// base coded image's id when this item carries a `base` `iref`
+    /// reference, otherwise `None`. Convenience alias for
+    /// `self.file_bmff_meta.base_image_for(item_id)` that elides the
+    /// `Option<&BmffMeta>` unwrap callers would otherwise have to do.
+    pub fn base_image_for(&self, item_id: u32) -> Option<u32> {
+        self.file_bmff_meta.as_ref()?.base_image_for(item_id)
     }
 
     /// Read the next sample's bytes from the input. Returns

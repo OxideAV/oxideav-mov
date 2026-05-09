@@ -36,7 +36,7 @@ pub mod standalone;
 pub use bmff_meta::{
     file_extents_for_item, idat_bytes_concat, idat_bytes_for_item, item_data, parse_bmff_meta,
     primary_item_data, BmffMeta, DataLocation, ItemDataLocation, ItemExtent, ItemInfoEntry,
-    ItemLocation, ItemReference,
+    ItemLocation, ItemReference, ItemReferenceType,
 };
 pub use chapter::{
     decode_text_sample, decode_text_sample_full, parse_text_sample_styles, ChapterEntry,

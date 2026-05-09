@@ -59,10 +59,15 @@ pub const DREF: [u8; 4] = fourcc("dref");
 /// extent's data.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ItemExtent {
-    /// 1-based item-reference index (`extent_index`); used only when
-    /// `construction_method == 2` (item_offset). Value `0` means
-    /// "not present" (we carry it that way regardless of `index_size`).
-    pub index: u64,
+    /// Per-extent `extent_index` field; populated when the parent
+    /// `iloc` carries `index_size > 0` AND the box version permits
+    /// indexed extents (v1 / v2). `None` when the box's `index_size`
+    /// is `0` (no per-extent index field on the wire). The index is
+    /// a 1-based item-reference index used to disambiguate fragments
+    /// when the source item carries multiple distinct payloads
+    /// (HEIF tile-bag sidecars, fragmented item data); see ISO/IEC
+    /// 14496-12 §8.11.3.
+    pub index: Option<u64>,
     /// Absolute offset from the data origin (file / `idat` / item).
     pub offset: u64,
     /// Length in bytes; `0` means "until end of source".
@@ -118,6 +123,34 @@ pub struct ItemReference {
     pub kind: [u8; 4],
     pub from_item_id: u32,
     pub to_item_ids: Vec<u32>,
+}
+
+/// Typed projection of an [`ItemReference`] — surfaces the well-known
+/// reference kinds defined by ISO/IEC 14496-12 §8.11.12 and ISO/IEC
+/// 23008-12 (HEIF) so callers can pattern-match on intent rather than
+/// FourCC bytes.
+///
+/// `Other { kind }` is the catch-all for reference types we don't
+/// special-case yet (`auxl`, `cdsc`, `dimg`, `thmb`, `iloc`, `fdel`,
+/// …); the kind FourCC is preserved verbatim so callers can match on
+/// it without losing information. The variant-specific helpers on
+/// [`BmffMeta`] (`derived_from`, `auxiliary_for`, `thumbnail_of`,
+/// `describes`, `base_image_for`) are the recommended access path; the
+/// typed enum exists for callers that walk every reference once and
+/// branch on intent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ItemReferenceType {
+    /// `base` — pre-derived coded image (HEIF §6.4.7). The reference
+    /// points from a derived (typically pre-rendered) item to the base
+    /// coded image it was authored from.
+    Base { from_id: u32, to_ids: Vec<u32> },
+    /// Catch-all: any reference kind not promoted to its own variant.
+    /// `kind` is the FourCC verbatim from the on-disk box.
+    Other {
+        kind: [u8; 4],
+        from_id: u32,
+        to_ids: Vec<u32>,
+    },
 }
 
 /// Parsed ISO BMFF §8.11 `meta` box surface. All fields are optional;
@@ -198,6 +231,45 @@ impl BmffMeta {
     /// HEIF's Exif / XMP item linkage.
     pub fn describes(&self, item_id: u32) -> Vec<u32> {
         self.refs_from(item_id, b"cdsc")
+    }
+
+    /// Project every parsed `iref` row into an [`ItemReferenceType`]
+    /// — the typed catalogue of reference kinds ISO/IEC 14496-12
+    /// §8.11.12 + ISO/IEC 23008-12 define. Reference kinds without a
+    /// dedicated variant (most of them) fall through to
+    /// [`ItemReferenceType::Other`] with the original FourCC preserved.
+    pub fn typed_references(&self) -> Vec<ItemReferenceType> {
+        self.references
+            .iter()
+            .map(|r| match &r.kind {
+                b"base" => ItemReferenceType::Base {
+                    from_id: r.from_item_id,
+                    to_ids: r.to_item_ids.clone(),
+                },
+                _ => ItemReferenceType::Other {
+                    kind: r.kind,
+                    from_id: r.from_item_id,
+                    to_ids: r.to_item_ids.clone(),
+                },
+            })
+            .collect()
+    }
+
+    /// Pre-derived coded image base item, per ISO/IEC 23008-12 §6.4.7.
+    ///
+    /// A `base` `iref` from a derived (typically pre-rendered HDR or
+    /// SDR variant) item to the base coded image declares the source
+    /// from which the derivation was authored. For HEIF authoring
+    /// flows that pre-render an HDR variant alongside an SDR base,
+    /// `base_image_for(hdr_item)` returns the SDR base item id so
+    /// callers can present both alternates without re-deriving.
+    ///
+    /// HEIF allows multiple `base` references per derived item; this
+    /// helper returns the first one. Use [`Self::refs_from`] with
+    /// `b"base"` to enumerate the full list. Returns `None` when no
+    /// `base` reference points away from `item_id`.
+    pub fn base_image_for(&self, item_id: u32) -> Option<u32> {
+        self.refs_from(item_id, b"base").into_iter().next()
     }
 
     /// Inverse-direction lookup: which items list `target_id` as a
@@ -533,9 +605,9 @@ fn parse_iloc(body: &[u8]) -> Result<Vec<ItemLocation>> {
         let mut extents = Vec::with_capacity(extent_count as usize);
         for _ in 0..extent_count {
             let index = if (version == 1 || version == 2) && index_size > 0 {
-                read_iloc_uint(body, &mut p, index_size)?
+                Some(read_iloc_uint(body, &mut p, index_size)?)
             } else {
-                0
+                None
             };
             let offset = read_iloc_uint(body, &mut p, offset_size)?;
             let length = read_iloc_uint(body, &mut p, length_size)?;

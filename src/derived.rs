@@ -1391,7 +1391,7 @@ mod tests {
             data_reference_index: 0,
             base_offset: 0,
             extents: vec![ItemExtent {
-                index: 0,
+                index: None,
                 offset: 0,
                 length: payload_len,
             }],
@@ -1530,7 +1530,7 @@ mod tests {
             data_reference_index: 0,
             base_offset: 0,
             extents: vec![ItemExtent {
-                index: 0,
+                index: None,
                 offset: 0,
                 length: payload_len,
             }],
@@ -1780,7 +1780,7 @@ mod tests {
             data_reference_index: 0,
             base_offset: 0,
             extents: vec![ItemExtent {
-                index: 0,
+                index: None,
                 offset: 0,
                 length: payload_len,
             }],
