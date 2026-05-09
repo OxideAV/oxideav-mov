@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 15 — HEIF transformative-property dimensional math on the
+  `Identity` layout, HDR mastering metadata (`clli` / `mdcv` / `cclv`)
+  surfaced on the layout itself, and HEIF tone-mapping property
+  extraction (`amve`) plus a new `ImageLayout::ToneMap` variant for
+  `tmap`-typed derivations.
+  - `derived::ImageLayout::output_extent(&BmffMeta) -> Option<(u32, u32)>`
+    + `derived::compute_post_transform_extent(base_w, base_h,
+    &TransformChain)` — compose a `TransformChain` over a base
+    `(w, h)` per HEIF §6.5.9 / §6.5.10 / §6.5.12 (clap shrinks to
+    `(width_n / width_d, height_n / height_d)`; irot 90°/270° swaps
+    axes; imir preserves dims). `Grid` / `Overlay` return
+    `(canvas_w, canvas_h)`; `ToneMap` defers to the base item's
+    extent.
+  - `ImageLayout::Identity { …, clli: Option<Clli>, mdcv: Option<Mdcv>,
+    cclv: Option<Cclv>, amve: Option<Amve> }` — extended Identity
+    variant. The four HDR helper structs are populated from the
+    inner item's `iprp` row alongside r13's `pixi` / `colr` so callers
+    don't have to re-walk `iprp` themselves. Shape-breaking field
+    addition; the only consumer in this crate is the demuxer's own
+    resolver.
+  - `iprp::Amve { ambient_illuminance, ambient_light_x,
+    ambient_light_y }` — typed Ambient Viewing Environment property
+    (HEIF Amd.1 / SMPTE ST 2108-1). `ambient_illuminance` is in
+    0.0001 lux units; chromaticity values are in CIE-1931 ×50000 same
+    as `mdcv`.
+  - `iprp::ItemProperty::Amve(Amve)` + `ItemProperties::amve(item_id)`
+    + `parse_amve_payload` — typed dispatch and accessor mirroring
+    the r14 `clli` / `mdcv` / `cclv` surface. The parser accepts both
+    the bare 8-byte and FullBox-prefixed 12-byte on-disk shapes.
+  - `derived::TmapPayload { bytes: Vec<u8> }` +
+    `derived::parse_tmap_payload` + `ImageLayout::ToneMap { item_id,
+    base, params }` — `tmap` derived-image surface. The `tmap` item's
+    single `dimg` target identifies the HDR base image being
+    tone-mapped; the algorithm payload bytes are surfaced verbatim
+    (the HEIF Amd.1 algorithm catalogue is broad and caller-driven —
+    callers that target one specific algorithm can re-parse them
+    against their own decoder).
+  - `MovDemuxer::primary_image_layout_with_input` now also dispatches
+    `tmap` primaries (mdat-resident algorithm payloads supported via
+    the same construction-method resolver as grid/iovl).
+  - 22 new tests (4 amve unit-parser + 8 transform-extent helpers +
+    2 grid/identity output-extent + 2 HDR-on-Identity surface + 2
+    tmap layout dispatch + 2 round-trip + 2 sanity).
+
 - Round 14 — HEIF auxiliary-plane resolver surfacing `alpha_for` on
   the `Identity` layout, plus typed extraction of HDR mastering
   metadata (`clli` / `mdcv` / `cclv`) from `iprp`.

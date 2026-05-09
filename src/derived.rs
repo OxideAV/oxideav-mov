@@ -52,7 +52,7 @@
 //! payload against the file's own iref topology.
 
 use crate::bmff_meta::{idat_bytes_concat, BmffMeta, ItemDataLocation};
-use crate::iprp::{ColrInfo, ItemProperty, PixiInfo};
+use crate::iprp::{Amve, Cclv, Clli, ColrInfo, ItemProperty, Mdcv, PixiInfo};
 use crate::media_meta::Clap;
 
 #[cfg(feature = "registry")]
@@ -478,6 +478,46 @@ impl TransformOp {
 /// any kind the iden item doesn't override.
 pub type TransformChain = Vec<TransformOp>;
 
+/// Tone-mapping (`tmap`) derived-image algorithm payload.
+///
+/// Per HEIF Amendment 1 (`tmap` derivation, ISO/IEC 23008-12 §6.6.x)
+/// the `tmap` item's body carries the algorithm parameters describing
+/// how the renderer should map the linked base image's HDR colour
+/// space into the (typically SDR) output colour space. The base
+/// image item id is *not* in the body — it's resolved from the
+/// `tmap` item's single `dimg` `iref` target, mirroring how `iden`
+/// surfaces its inner item.
+///
+/// HEIF leaves the algorithm catalogue open-ended (matrix transforms,
+/// LUTs, gain-map metadata, etc.); the planner surfaces the body
+/// bytes verbatim so callers that target one specific tone-mapping
+/// algorithm can re-parse them with their own decoder. A future
+/// revision may add typed wrappers per algorithm — keeping the
+/// fall-through here means we don't have to ship a lossy decode for
+/// the algorithms we don't model yet.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TmapPayload {
+    /// Verbatim body bytes of the `tmap` derivation item.
+    pub bytes: Vec<u8>,
+}
+
+impl TmapPayload {
+    /// Wrap a raw `tmap` body. The function is total — `tmap` is a
+    /// derivation marker whose body is algorithm-defined, so we don't
+    /// validate beyond preserving the bytes.
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+}
+
+/// Parse a `tmap` derived-image body. The bytes are surfaced verbatim
+/// in [`TmapPayload::bytes`] — the algorithm catalogue HEIF Amd.1
+/// permits is broad and caller-driven, so the planner does not type-
+/// dispatch the body. Always returns `Ok` (the body is opaque).
+pub fn parse_tmap_payload(body: &[u8]) -> Result<TmapPayload> {
+    Ok(TmapPayload::from_bytes(body.to_vec()))
+}
+
 /// Resolved composition plan for a HEIF primary image.
 ///
 /// Returned by [`crate::MovDemuxer::primary_image_layout`] when the
@@ -536,6 +576,24 @@ pub enum ImageLayout {
         /// alpha samples to be associated with the colour image
         /// `target_id` references.
         alpha_for: Option<u32>,
+        /// First `clli` (Content Light Level Information) attached to
+        /// the inner item; `None` when absent. Surfaced on the layout
+        /// so HDR-aware callers don't have to re-walk `iprp` once they
+        /// have the layout plan.
+        clli: Option<Clli>,
+        /// First `mdcv` (Mastering Display Colour Volume) attached to
+        /// the inner item; `None` when absent. Companion to `clli` for
+        /// SMPTE ST 2086 mastering metadata.
+        mdcv: Option<Mdcv>,
+        /// First `cclv` (Content Colour Volume) attached to the inner
+        /// item; `None` when absent. Per-content rather than
+        /// per-display volume, see HEVC SEI 144.
+        cclv: Option<Cclv>,
+        /// First `amve` (Ambient Viewing Environment) attached to the
+        /// inner item; `None` when absent. Carries the ambient lighting
+        /// of the intended viewing environment per HEIF Amd.1 / SMPTE
+        /// ST 2108-1 — pairs with `clli` / `mdcv` for HDR tone-mapping.
+        amve: Option<Amve>,
     },
     /// Primary item is a `grid` derived image. Tile items live in
     /// `layout.tiles` in row-major order; decode each one and blit at
@@ -545,6 +603,115 @@ pub enum ImageLayout {
     /// layer item and composite over the canvas in the order
     /// `layout.layers` lists.
     Overlay(OverlayLayout),
+    /// Primary item is a `tmap` (Tone-Mapping derived image; HEIF
+    /// Amd.1 / §6.6.x). The base item id (the colour image being
+    /// tone-mapped) comes from the tmap's single `dimg` target, and
+    /// `params` carries the tone-mapping algorithm payload bytes
+    /// verbatim — the tone-mapping algorithm catalogue is broad and
+    /// caller-driven, so the planner surfaces the bytes rather than a
+    /// further-typed enum.
+    ToneMap {
+        /// The tmap derivation item itself (so callers can re-resolve
+        /// it via [`crate::BmffMeta::find_item`]).
+        item_id: u32,
+        /// Item id of the base image being tone-mapped (the tmap's
+        /// single `dimg` target).
+        base: u32,
+        /// Algorithm parameters carried in the tmap item's payload
+        /// (excluding the dimg-resolved base reference, which is
+        /// already in `base`).
+        params: TmapPayload,
+    },
+}
+
+impl ImageLayout {
+    /// Compute the post-transform output extent of an [`ImageLayout`].
+    ///
+    /// * [`ImageLayout::Identity`] — looks up the inner item's `ispe`
+    ///   in `meta`, then walks the layout's [`TransformChain`]
+    ///   composing each step's effect on `(w, h)` per HEIF
+    ///   §6.5.9 (clap), §6.5.10 (irot), §6.5.12 (imir). Returns
+    ///   `None` when the inner item has no `ispe` association (the
+    ///   demuxer can't compute the post-transform extent without a
+    ///   declared base extent), or when a `clap` step is malformed
+    ///   (zero denominator, zero crop, etc.).
+    /// * [`ImageLayout::Grid`] — `(canvas_w, canvas_h)`.
+    /// * [`ImageLayout::Overlay`] — `(canvas_w, canvas_h)`.
+    /// * [`ImageLayout::ToneMap`] — defers to the *base* item's
+    ///   layout extent (tone mapping doesn't change spatial extent).
+    ///   Returns `None` when the base item has no resolvable layout.
+    pub fn output_extent(&self, meta: &BmffMeta) -> Option<(u32, u32)> {
+        match self {
+            ImageLayout::Identity {
+                item_id, transform, ..
+            } => {
+                let props = meta.properties.as_ref()?;
+                let ispe = props.ispe_for(*item_id)?;
+                compute_post_transform_extent(ispe.width, ispe.height, transform)
+            }
+            ImageLayout::Grid(g) => Some((g.canvas_w, g.canvas_h)),
+            ImageLayout::Overlay(o) => Some((o.canvas_w, o.canvas_h)),
+            ImageLayout::ToneMap { base, .. } => {
+                let inner = image_layout_for(meta, *base)?;
+                inner.output_extent(meta)
+            }
+        }
+    }
+}
+
+/// Compose a [`TransformChain`] over a base `(w, h)` to compute the
+/// post-transform output extent — used by
+/// [`ImageLayout::output_extent`] but also exposed for callers that
+/// already have a chain + base dimensions (e.g. when validating a
+/// renderer's input buffers).
+///
+/// Per HEIF §6.5 the chain is applied left-to-right in spec order
+/// (`clap` → `irot` → `imir`); each step transforms the running
+/// `(w, h)`:
+///
+/// * `Clap` — output dims are the rounded `(width_n / width_d,
+///   height_n / height_d)`. The crop offset doesn't affect the
+///   output extent (only the pixel selection inside the source). A
+///   zero denominator or zero-area crop returns `None`.
+/// * `Irot { steps }` — `steps & 3` is `0`/`2` ⇒ `(w, h)` unchanged;
+///   `1`/`3` ⇒ swap `(w, h)` (90° / 270° rotation transposes the
+///   axes per §6.5.10).
+/// * `Imir { axis }` — dimensions unchanged (axis-flip preserves
+///   extent per §6.5.12).
+///
+/// Returns the final `(w, h)` post-chain, or `None` when the chain
+/// has a malformed `clap` step.
+pub fn compute_post_transform_extent(
+    base_w: u32,
+    base_h: u32,
+    chain: &TransformChain,
+) -> Option<(u32, u32)> {
+    let (mut w, mut h) = (base_w, base_h);
+    for op in chain {
+        match op {
+            TransformOp::Clap(c) => {
+                if c.clean_aperture_width_d == 0 || c.clean_aperture_height_d == 0 {
+                    return None;
+                }
+                let cw = c.clean_aperture_width_n / c.clean_aperture_width_d;
+                let ch = c.clean_aperture_height_n / c.clean_aperture_height_d;
+                if cw == 0 || ch == 0 {
+                    return None;
+                }
+                w = cw;
+                h = ch;
+            }
+            TransformOp::Irot { steps } => {
+                if (steps & 1) == 1 {
+                    std::mem::swap(&mut w, &mut h);
+                }
+            }
+            TransformOp::Imir { .. } => {
+                // axis-flip preserves dimensions per HEIF §6.5.12.
+            }
+        }
+    }
+    Some((w, h))
 }
 
 /// Build the transformative-property chain for an item by walking the
@@ -628,6 +795,11 @@ fn merge_transform_chains(outer: &TransformChain, inner: &TransformChain) -> Tra
 /// the (optional) `iden_item_id`'s transformative cascade with the
 /// inner item's own transformative properties + `pixi` + `colr` +
 /// (when this item is an alpha auxiliary plane) the `alpha_for` target.
+///
+/// Also surfaces the inner item's HDR mastering / tone-mapping helper
+/// properties (`clli`, `mdcv`, `cclv`, `amve`) so HDR-aware callers
+/// don't have to re-walk `iprp` once they have the layout plan
+/// (mirrors r13's surface for `pixi` / `colr`).
 fn identity_layout_for(
     meta: &BmffMeta,
     inner_item_id: u32,
@@ -639,9 +811,16 @@ fn identity_layout_for(
         None => TransformChain::new(),
     };
     let transform = merge_transform_chains(&outer_chain, &inner_chain);
-    let (pixi, color_profile) = match meta.properties.as_ref() {
-        Some(p) => (p.pixi(inner_item_id), p.color_profile(inner_item_id)),
-        None => (None, None),
+    let (pixi, color_profile, clli, mdcv, cclv, amve) = match meta.properties.as_ref() {
+        Some(p) => (
+            p.pixi(inner_item_id),
+            p.color_profile(inner_item_id),
+            p.clli(inner_item_id),
+            p.mdcv(inner_item_id),
+            p.cclv(inner_item_id),
+            p.amve(inner_item_id),
+        ),
+        None => (None, None, None, None, None, None),
     };
     let alpha_for = alpha_target_for(meta, inner_item_id);
     ImageLayout::Identity {
@@ -650,6 +829,10 @@ fn identity_layout_for(
         pixi,
         color_profile,
         alpha_for,
+        clli,
+        mdcv,
+        cclv,
+        amve,
     }
 }
 
@@ -958,6 +1141,22 @@ pub fn image_layout_for(meta: &BmffMeta, item_id: u32) -> Option<ImageLayout> {
             targets
                 .first()
                 .map(|inner| identity_layout_for(meta, *inner, Some(item_id)))
+        }
+        b"tmap" => {
+            // Per HEIF Amd.1 §6.6.x: a tmap item carries an algorithm
+            // payload + a single dimg target identifying the base HDR
+            // image being tone-mapped. Use the idat-resident body
+            // (typical authoring shape); construction_method == 0
+            // (mdat-resident) is left to the explicit
+            // `MovDemuxer::primary_image_layout_with_input` path.
+            let base = *meta.derived_from(item_id).first()?;
+            let raw = idat_bytes_concat(meta, item_id).unwrap_or_default();
+            let params = TmapPayload::from_bytes(raw);
+            Some(ImageLayout::ToneMap {
+                item_id,
+                base,
+                params,
+            })
         }
         // Any other item_type (hvc1, av01, j2k1, …) is a coded image
         // taken as-is. v0/v1 infe rows have a zero item_type — also
@@ -1464,6 +1663,7 @@ mod tests {
                 pixi,
                 color_profile,
                 alpha_for,
+                ..
             }) => {
                 assert_eq!(item_id, 9);
                 assert!(transform.is_empty());
@@ -1496,6 +1696,7 @@ mod tests {
                 pixi,
                 color_profile,
                 alpha_for,
+                ..
             }) => {
                 assert_eq!(item_id, 5);
                 assert!(transform.is_empty());
@@ -1835,6 +2036,7 @@ mod tests {
                 pixi,
                 color_profile,
                 alpha_for,
+                ..
             } => {
                 assert_eq!(item_id, 9, "Identity surfaces inner item id");
                 assert_eq!(
@@ -2010,6 +2212,7 @@ mod tests {
                 pixi,
                 color_profile,
                 alpha_for,
+                ..
             } => {
                 assert_eq!(item_id, 9);
                 assert!(transform.is_empty());

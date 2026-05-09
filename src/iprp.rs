@@ -57,6 +57,7 @@ pub const CLAP: [u8; 4] = fourcc("clap");
 pub const CLLI: [u8; 4] = fourcc("clli");
 pub const MDCV: [u8; 4] = fourcc("mdcv");
 pub const CCLV: [u8; 4] = fourcc("cclv");
+pub const AMVE: [u8; 4] = fourcc("amve");
 
 /// `ispe` — ImageSpatialExtentsProperty (HEIF §6.5.3.1). Carries the
 /// pixel extent of the *encoded* picture (the consumer-visible size
@@ -272,6 +273,37 @@ pub struct Cclv {
     pub avg_luminance: Option<u32>,
 }
 
+/// `amve` — Ambient Viewing Environment (ISO/IEC 23008-12 / HEIF
+/// Amendment 1; SMPTE ST 2108-1 derived). Carries the ambient lighting
+/// of the *intended viewing environment* the content was authored for —
+/// renderers can use it together with `clli` / `mdcv` to drive a
+/// display-side tone-mapping pipeline.
+///
+/// On-disk shape (8 bytes after the FullBox header — 12 bytes total):
+///
+/// ```text
+/// FullBox header              4 bytes (version=0, flags=0)
+/// ambient_illuminance         u32 BE   0.0001 lux units (10000 = 1 lx)
+/// ambient_light_x             u16 BE   CIE-1931 x × 50000
+/// ambient_light_y             u16 BE   CIE-1931 y × 50000
+/// ```
+///
+/// Per the SMPTE ST 2108-1 underpinning, `ambient_light_x` /
+/// `ambient_light_y` use the same 0.00002 step (×50000) the `mdcv`
+/// chromaticity fields do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Amve {
+    /// Ambient illuminance in 0.0001 lux units (i.e. divide by 10000
+    /// to get lx). Typical living-room values are 5–100 lx
+    /// (50000–1000000 in the on-disk representation).
+    pub ambient_illuminance: u32,
+    /// CIE-1931 x chromaticity of the ambient light × 50000
+    /// (divide by 50000 to get the 0..1 chromaticity).
+    pub ambient_light_x: u16,
+    /// CIE-1931 y chromaticity of the ambient light × 50000.
+    pub ambient_light_y: u16,
+}
+
 /// One property entry inside `ipco`.
 ///
 /// `Other` is a fall-through for any box type we don't model
@@ -292,6 +324,7 @@ pub enum ItemProperty {
     Clli(Clli),
     Mdcv(Mdcv),
     Cclv(Cclv),
+    Amve(Amve),
     Other { fourcc: [u8; 4], payload: Vec<u8> },
 }
 
@@ -310,6 +343,7 @@ impl ItemProperty {
             ItemProperty::Clli(_) => CLLI,
             ItemProperty::Mdcv(_) => MDCV,
             ItemProperty::Cclv(_) => CCLV,
+            ItemProperty::Amve(_) => AMVE,
             ItemProperty::Other { fourcc, .. } => *fourcc,
         }
     }
@@ -478,6 +512,17 @@ impl ItemProperties {
         for p in self.resolve(item_id) {
             if let ItemProperty::Cclv(c) = p {
                 return Some(*c);
+            }
+        }
+        None
+    }
+
+    /// First `amve` (Ambient Viewing Environment) attached to the item.
+    /// `None` when no `amve` association exists.
+    pub fn amve(&self, item_id: u32) -> Option<Amve> {
+        for p in self.resolve(item_id) {
+            if let ItemProperty::Amve(a) = p {
+                return Some(*a);
             }
         }
         None
@@ -759,6 +804,7 @@ fn parse_property_box<R: Read + Seek + ?Sized>(
         t if t == &CLLI => ItemProperty::Clli(parse_clli_payload(&body)?),
         t if t == &MDCV => ItemProperty::Mdcv(parse_mdcv_payload(&body)?),
         t if t == &CCLV => ItemProperty::Cclv(parse_cclv_payload(&body)?),
+        t if t == &AMVE => ItemProperty::Amve(parse_amve_payload(&body)?),
         _ => ItemProperty::Other {
             fourcc: hdr.fourcc,
             payload: body,
@@ -1037,6 +1083,43 @@ pub fn parse_cclv_payload(body: &[u8]) -> Result<Cclv> {
         min_luminance,
         max_luminance,
         avg_luminance,
+    })
+}
+
+/// Parse an `amve` (AmbientViewingEnvironment) payload.
+///
+/// On-disk shape per ISO/IEC 23008-12 Amendment 1 (HEIF 2nd edition;
+/// SMPTE ST 2108-1 derived):
+///
+/// ```text
+/// FullBox header              4 bytes (version=0, flags=0)
+/// ambient_illuminance         u32 BE   0.0001 lux units
+/// ambient_light_x             u16 BE   CIE-1931 x × 50000
+/// ambient_light_y             u16 BE   CIE-1931 y × 50000
+/// ```
+///
+/// Total body = **12 bytes** with the FullBox prefix; `8` bytes for
+/// the bare property body without a FullBox prefix is also accepted
+/// (matches the relaxed acceptance in `parse_clli_payload` /
+/// `parse_mdcv_payload` for authoring tools that omit the FullBox).
+///
+/// Returns `Err(InvalidData)` when the body is shorter than 8 bytes
+/// (bare) or 12 bytes (FullBox-prefixed).
+pub fn parse_amve_payload(body: &[u8]) -> Result<Amve> {
+    let p: &[u8] = match body.len() {
+        8 => body,
+        12 => &body[4..],
+        _ => {
+            return Err(Error::invalid(format!(
+                "MOV: amve payload must be 8 or 12 bytes, got {}",
+                body.len()
+            )))
+        }
+    };
+    Ok(Amve {
+        ambient_illuminance: u32::from_be_bytes([p[0], p[1], p[2], p[3]]),
+        ambient_light_x: u16::from_be_bytes([p[4], p[5]]),
+        ambient_light_y: u16::from_be_bytes([p[6], p[7]]),
     })
 }
 
@@ -1587,5 +1670,60 @@ mod tests {
         let p = run_parse(&build_iprp(&ipco, &ipma));
         let r = p.resolve_strict(1, &[]).unwrap();
         assert_eq!(r.len(), 2);
+    }
+
+    fn sample_amve_body_fullbox() -> Vec<u8> {
+        // FullBox-prefixed amve body (12 bytes).
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+                                                  // 31415 lux × 10000 = 314_150_000.
+        p.extend_from_slice(&314_150_000u32.to_be_bytes());
+        // D65 chromaticity ×50000: x=15635, y=16450.
+        p.extend_from_slice(&15635u16.to_be_bytes());
+        p.extend_from_slice(&16450u16.to_be_bytes());
+        p
+    }
+
+    #[test]
+    fn parse_amve_payload_returns_illuminance_and_chromaticity_in_fullbox_form() {
+        let body = sample_amve_body_fullbox();
+        assert_eq!(body.len(), 12);
+        let amve = parse_amve_payload(&body).unwrap();
+        assert_eq!(amve.ambient_illuminance, 314_150_000);
+        assert_eq!(amve.ambient_light_x, 15635);
+        assert_eq!(amve.ambient_light_y, 16450);
+    }
+
+    #[test]
+    fn parse_amve_payload_accepts_bare_8_byte_form() {
+        let mut p = Vec::new();
+        p.extend_from_slice(&100_000u32.to_be_bytes());
+        p.extend_from_slice(&15635u16.to_be_bytes());
+        p.extend_from_slice(&16450u16.to_be_bytes());
+        assert_eq!(p.len(), 8);
+        let amve = parse_amve_payload(&p).unwrap();
+        assert_eq!(amve.ambient_illuminance, 100_000);
+        assert_eq!(amve.ambient_light_x, 15635);
+    }
+
+    #[test]
+    fn parse_amve_payload_rejects_wrong_size() {
+        assert!(parse_amve_payload(&[0u8; 7]).is_err());
+        assert!(parse_amve_payload(&[0u8; 11]).is_err());
+        assert!(parse_amve_payload(&[0u8; 13]).is_err());
+    }
+
+    #[test]
+    fn iprp_amve_accessor_returns_typed_struct_for_associated_item() {
+        let ipco = build_ipco(&[
+            (b"ispe", &ispe_body(64, 64)),
+            (b"amve", &sample_amve_body_fullbox()),
+        ]);
+        let ipma = build_ipma_v0(&[(1, &[(1, false), (2, false)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        let info = p.amve(1).expect("amve surfaced");
+        assert_eq!(info.ambient_illuminance, 314_150_000);
+        assert_eq!(info.ambient_light_x, 15635);
+        assert_eq!(info.ambient_light_y, 16450);
     }
 }

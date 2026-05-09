@@ -201,6 +201,7 @@ fn iden_layout_carries_transform_chain_with_iden_irot_and_inner_clap() {
             pixi,
             color_profile,
             alpha_for,
+            ..
         } => {
             assert_eq!(item_id, 9, "Identity surfaces inner item id");
             assert_eq!(
@@ -262,6 +263,7 @@ fn bare_hvc1_layout_surfaces_pixi_and_colr_directly() {
             pixi,
             color_profile,
             alpha_for,
+            ..
         } => {
             assert_eq!(item_id, 1);
             assert!(transform.is_empty(), "no transformative properties");

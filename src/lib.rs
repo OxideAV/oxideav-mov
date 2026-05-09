@@ -45,18 +45,20 @@ pub use chapter::{
 };
 pub use demuxer::{open_file_url, MovDemuxer, MAX_ALIAS_DEPTH};
 pub use derived::{
-    build_grid_layout, build_overlay_layout, image_layout_for, parse_grid, parse_overlay,
-    parse_overlay_with_source_count, plan_grid_layout, plan_overlay_layout,
-    primary_image_layout_for, Grid, GridTilePlacement, ImageGridLayout, ImageLayout, IspeMismatch,
-    Overlay, OverlayLayer, OverlayLayout, TransformChain, TransformOp,
+    build_grid_layout, build_overlay_layout, compute_post_transform_extent, image_layout_for,
+    parse_grid, parse_overlay, parse_overlay_with_source_count, parse_tmap_payload,
+    plan_grid_layout, plan_overlay_layout, primary_image_layout_for, Grid, GridTilePlacement,
+    ImageGridLayout, ImageLayout, IspeMismatch, Overlay, OverlayLayer, OverlayLayout, TmapPayload,
+    TransformChain, TransformOp,
 };
 pub use edit::{Edit, EditList};
 pub use gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, Tcmi, TextHeader};
 pub use header::{BrandClass, Ftyp, Hdlr, Mdhd, Mvhd, Tkhd, TrackRotation};
 pub use iprp::{
-    parse_auxc_payload, parse_cclv_payload, parse_clli_payload, parse_colr_payload, parse_iprp,
-    parse_mdcv_payload, AuxC, Cclv, Clli, ColrInfo, Imir, Irot, Ispe, ItemProperties, ItemProperty,
-    ItemPropertyAssociation, Mdcv, Pixi, PixiInfo, PropertyAssociation,
+    parse_amve_payload, parse_auxc_payload, parse_cclv_payload, parse_clli_payload,
+    parse_colr_payload, parse_iprp, parse_mdcv_payload, Amve, AuxC, Cclv, Clli, ColrInfo, Imir,
+    Irot, Ispe, ItemProperties, ItemProperty, ItemPropertyAssociation, Mdcv, Pixi, PixiInfo,
+    PropertyAssociation,
 };
 pub use media_meta::{
     channel_mask_for_layout_tag, Chan, ChanDescription, Clap, ColorParameters, ColorParametersKind,

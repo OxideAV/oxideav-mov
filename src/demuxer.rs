@@ -659,6 +659,21 @@ impl MovDemuxer {
                 // identically to the pure-meta resolver.
                 crate::derived::image_layout_for(fm, pid)
             }
+            b"tmap" => {
+                // Tone-mapping derivation: payload bytes may live in
+                // mdat (construction_method == 0). Resolve via the same
+                // path as grid/iovl, then surface a ToneMap variant
+                // identical in shape to what `image_layout_for` would
+                // produce on the idat path.
+                let bytes = self.read_derivation_payload_bytes(pid).unwrap_or_default();
+                let fm = self.file_bmff_meta.as_ref()?;
+                let base = *fm.derived_from(pid).first()?;
+                Some(crate::derived::ImageLayout::ToneMap {
+                    item_id: pid,
+                    base,
+                    params: crate::derived::TmapPayload::from_bytes(bytes),
+                })
+            }
             _ => {
                 let fm = self.file_bmff_meta.as_ref()?;
                 crate::derived::image_layout_for(fm, pid)
