@@ -547,6 +547,10 @@ impl MovDemuxer {
     /// * the input has no top-level `meta` box (it isn't a HEIF / MIAF
     ///   / AVIF / JPEG-XL file), or
     /// * the `meta` box has no `pitm`, or
+    /// * the primary item is a `grid` / `iovl` whose payload lives in
+    ///   `mdat` (`construction_method == 0`); use
+    ///   [`Self::primary_image_layout_with_input`] for the mdat path,
+    ///   or
     /// * the primary item isn't a recognised image-derivation
     ///   (`grid` / `iovl` / `iden`) or coded image type (`hvc1`,
     ///   `av01`, `j2k1`, …) — surfaced as `None` rather than an
@@ -568,6 +572,94 @@ impl MovDemuxer {
     pub fn primary_image_layout(&self) -> Option<crate::derived::ImageLayout> {
         let fm = self.file_bmff_meta.as_ref()?;
         crate::derived::primary_image_layout_for(fm)
+    }
+
+    /// Same as [`Self::primary_image_layout`] but also resolves
+    /// `construction_method == 0` (mdat-resident) `grid` / `iovl`
+    /// derivation payloads by reading the file extents from the input.
+    ///
+    /// HEIF derived-image payloads are tiny fixed records (8 / 12
+    /// bytes for `grid`, 12+ bytes for `iovl`); authoring tools
+    /// overwhelmingly inline them in the meta box's `idat`, but the
+    /// spec (ISO/IEC 14496-12 §8.11.3) permits placing them at any
+    /// `construction_method == 0` extent — typically inside `mdat`.
+    /// The pure-meta resolver [`Self::primary_image_layout`] returns
+    /// `None` for that path because it has no input handle; this
+    /// version takes `&mut self` so it can issue the seek+read for
+    /// the file extents.
+    ///
+    /// Returns `None` for the same not-a-HEIF-file reasons as
+    /// [`Self::primary_image_layout`] AND on a clean
+    /// `construction_method == 2` (item_offset) primary item, which
+    /// requires resolving an indirection through another item — a
+    /// shape we leave to the caller's own resolver.
+    pub fn primary_image_layout_with_input(&mut self) -> Option<crate::derived::ImageLayout> {
+        let pid = self.file_bmff_meta.as_ref()?.primary_item?;
+        let info = self.file_bmff_meta.as_ref()?.find_item(pid)?;
+        let item_type = info.item_type;
+        match &item_type {
+            b"grid" => {
+                let bytes = self.read_derivation_payload_bytes(pid)?;
+                let fm = self.file_bmff_meta.as_ref()?;
+                match crate::derived::build_grid_layout(fm, pid, &bytes) {
+                    Ok(g) => Some(crate::derived::ImageLayout::Grid(g)),
+                    Err(_) => None,
+                }
+            }
+            b"iovl" => {
+                let bytes = self.read_derivation_payload_bytes(pid)?;
+                let fm = self.file_bmff_meta.as_ref()?;
+                match crate::derived::build_overlay_layout(fm, pid, &bytes) {
+                    Ok(o) => Some(crate::derived::ImageLayout::Overlay(o)),
+                    Err(_) => None,
+                }
+            }
+            b"iden" => {
+                let fm = self.file_bmff_meta.as_ref()?;
+                let targets = fm.derived_from(pid);
+                targets
+                    .first()
+                    .map(|id| crate::derived::ImageLayout::Identity { item_id: *id })
+            }
+            _ => Some(crate::derived::ImageLayout::Identity { item_id: pid }),
+        }
+    }
+
+    /// Resolve a derivation item's payload bytes by inspecting its
+    /// `iloc` `construction_method`:
+    ///
+    /// * `1` (idat) — concatenate the matching `idat` slices.
+    /// * `0` (file extents) — seek to each extent in the input and
+    ///   read its bytes.
+    /// * any other (`2` / future) — `None` (caller's problem).
+    fn read_derivation_payload_bytes(&mut self, item_id: u32) -> Option<Vec<u8>> {
+        let fm = self.file_bmff_meta.as_ref()?;
+        let loc = fm.find_location(item_id)?;
+        match loc.construction_method {
+            1 => crate::bmff_meta::idat_bytes_concat(fm, item_id),
+            0 => {
+                // Snapshot the extents (so we can drop the borrow on
+                // self.file_bmff_meta before issuing the read).
+                let extents: Vec<(u64, u64)> = loc
+                    .extents
+                    .iter()
+                    .map(|e| (loc.base_offset + e.offset, e.length))
+                    .collect();
+                let mut total = 0usize;
+                for &(_, len) in &extents {
+                    total = total.checked_add(len as usize)?;
+                }
+                let mut out = Vec::with_capacity(total);
+                for (off, len) in extents {
+                    self.input.seek(SeekFrom::Start(off)).ok()?;
+                    let mut chunk = vec![0u8; len as usize];
+                    self.input.read_exact(&mut chunk).ok()?;
+                    out.extend_from_slice(&chunk);
+                }
+                Some(out)
+            }
+            _ => None,
+        }
     }
 
     /// Read the next sample's bytes from the input. Returns

@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 12 — HEIF derivation payloads resolved from `mdat`
+  (`construction_method == 0`) and per-tile / per-layer `ispe`
+  validation surfaced on the layout plan.
+  - `MovDemuxer::primary_image_layout_with_input(&mut self) ->
+    Option<ImageLayout>` — extends the round-11 pure-meta resolver to
+    also handle `grid` / `iovl` payloads stored at file offsets
+    (typical home: `mdat`). The pure-meta `primary_image_layout()`
+    stays idat-only; the new variant takes `&mut self` so it can seek
+    and read the file extents the `iloc` declares.
+  - `derived::build_grid_layout(meta, item_id, payload_bytes)` and
+    `build_overlay_layout(meta, item_id, payload_bytes)` — pure
+    helpers that take pre-resolved derivation bytes (the path the
+    mdat resolver uses internally). The `plan_*_layout` shortcuts
+    keep working for the idat-only case.
+  - `derived::IspeMismatch { item_id, expected_w, expected_h,
+    actual_w, actual_h }` — surfaced in
+    `ImageGridLayout::tile_size_warnings` for tiles whose `ispe`
+    disagrees with the canonical first-tile extent (HEIF §6.6.2.3.3
+    forbids the mismatch; we don't fail the plan, we let validators
+    detect it). Also surfaced in `OverlayLayout::layer_size_warnings`
+    for `iovl` layers that lack an `ispe` association.
+  - `GridTilePlacement` gains `w`, `h` fields carrying the per-tile-
+    declared `ispe` extent (== canonical for spec-compliant files;
+    deviant per-tile `ispe` is preserved in the per-slot `(w, h)` and
+    flagged via `tile_size_warnings`).
+  - `OverlayLayer` gains `w`, `h` fields carrying the layer item's
+    `ispe`; `(0, 0)` when the layer has no `ispe` association (also
+    surfaced as a warning).
+  - 8 new tests (5 unit + 3 round-12 integration). Total now 248
+    (was 240).
+  - Public surface added: `IspeMismatch`, `build_grid_layout`,
+    `build_overlay_layout`, `MovDemuxer::primary_image_layout_with_input`.
+    Per-round-11 the `Round 11` types are still `[Unreleased]`, so
+    the field additions to `GridTilePlacement` / `OverlayLayer` /
+    `ImageGridLayout` / `OverlayLayout` are not breaking releases.
+
 - Round 11 — HEIF colour-profile typed extraction (`colr` →
   `ColrInfo`) and HEIF composition-plan helpers
   (`primary_image_layout()` → `ImageLayout::{Identity, Grid,

@@ -45,9 +45,10 @@ pub use chapter::{
 };
 pub use demuxer::{open_file_url, MovDemuxer, MAX_ALIAS_DEPTH};
 pub use derived::{
-    image_layout_for, parse_grid, parse_overlay, parse_overlay_with_source_count, plan_grid_layout,
-    plan_overlay_layout, primary_image_layout_for, Grid, GridTilePlacement, ImageGridLayout,
-    ImageLayout, Overlay, OverlayLayer, OverlayLayout,
+    build_grid_layout, build_overlay_layout, image_layout_for, parse_grid, parse_overlay,
+    parse_overlay_with_source_count, plan_grid_layout, plan_overlay_layout,
+    primary_image_layout_for, Grid, GridTilePlacement, ImageGridLayout, ImageLayout, IspeMismatch,
+    Overlay, OverlayLayer, OverlayLayout,
 };
 pub use edit::{Edit, EditList};
 pub use gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, Tcmi, TextHeader};
