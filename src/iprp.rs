@@ -237,6 +237,52 @@ impl ItemProperties {
         }
         (rot, mir)
     }
+
+    /// HEIF-strict resolver: same as [`Self::resolve`] but returns
+    /// the offending fourcc on the first essential-bit-set
+    /// association whose target property the renderer doesn't
+    /// recognise (any `ItemProperty::Other`). Per HEIF §7.4.6.6 a
+    /// reader that doesn't understand an essential property MUST
+    /// reject the item; this helper lets callers opt in to that
+    /// stricter behaviour. Returns `Ok(resolved_props)` on success.
+    ///
+    /// `recognised` lets the caller widen the "known" set beyond what
+    /// this crate understands natively — for instance, an HEVC
+    /// decoder caller can mark `hvcC` as recognised so an essential
+    /// `hvcC` doesn't trip the gate. Pass an empty slice to use only
+    /// the property variants this crate models natively.
+    pub fn resolve_strict(
+        &self,
+        item_id: u32,
+        recognised: &[[u8; 4]],
+    ) -> std::result::Result<Vec<&ItemProperty>, [u8; 4]> {
+        let row = match self.associations_for(item_id) {
+            Some(r) => r,
+            None => return Ok(Vec::new()),
+        };
+        let mut out = Vec::with_capacity(row.associations.len());
+        for a in &row.associations {
+            if a.index == 0 {
+                continue;
+            }
+            let p = match self.properties.get((a.index as usize) - 1) {
+                Some(p) => p,
+                None => continue, // out-of-range, same as resolve()
+            };
+            // Surface the essential-bit gate only for `Other` (the
+            // properties we don't model natively). Any property variant
+            // we do model is by definition "recognised".
+            if a.essential {
+                if let ItemProperty::Other { fourcc, .. } = p {
+                    if !recognised.contains(fourcc) {
+                        return Err(*fourcc);
+                    }
+                }
+            }
+            out.push(p);
+        }
+        Ok(out)
+    }
 }
 
 /// Parse the body of an `iprp` container.
@@ -656,5 +702,48 @@ mod tests {
         let row = p.associations_for(1).unwrap();
         assert!(row.associations.is_empty());
         assert!(p.resolve(1).is_empty());
+    }
+
+    #[test]
+    fn resolve_strict_accepts_natively_modelled_essentials() {
+        // `ispe` is essential and natively modelled; resolve_strict
+        // succeeds with no extra recognised list.
+        let ipco = build_ipco(&[(b"ispe", &ispe_body(64, 64))]);
+        let ipma = build_ipma_v0(&[(1, &[(1, true)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        let r = p.resolve_strict(1, &[]).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].fourcc(), ISPE);
+    }
+
+    #[test]
+    fn resolve_strict_rejects_unrecognised_essential_other() {
+        // hvcC is an `Other` (we don't natively decode it). When
+        // marked essential and not in the recognised list, the strict
+        // resolver returns the offending fourcc.
+        let ipco = build_ipco(&[
+            (b"ispe", &ispe_body(64, 64)),
+            (b"hvcC", &[1u8, 2, 3, 4][..]),
+        ]);
+        let ipma = build_ipma_v0(&[(1, &[(1, false), (2, true)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        match p.resolve_strict(1, &[]) {
+            Err(fc) => assert_eq!(fc, *b"hvcC"),
+            Ok(_) => panic!("expected essential-bit failure"),
+        }
+        // Allow-list lets the caller pass essential `hvcC` through.
+        let r = p.resolve_strict(1, &[*b"hvcC"]).unwrap();
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn resolve_strict_tolerates_non_essential_unknown_other() {
+        // Non-essential unknown Other passes through silently — it's
+        // the spec's "skip if you don't understand" path.
+        let ipco = build_ipco(&[(b"ispe", &ispe_body(64, 64)), (b"xyzZ", &[0u8; 8][..])]);
+        let ipma = build_ipma_v0(&[(1, &[(1, true), (2, false)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        let r = p.resolve_strict(1, &[]).unwrap();
+        assert_eq!(r.len(), 2);
     }
 }

@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 10 — Windows `file://` shape rules, meta-scope `dinf/dref`
+  external file-reference resolution, HEIF `iden` / `iovl` / `grid`
+  pixel renderers, and HEIF-strict `ipma` essential-bit enforcement.
+  - `open_file_url` now decodes Windows `file:///C:/path` and the
+    legacy `file:///C|/path` shapes (RFC 8089 Appendix E.2) into
+    `C:\path` on Windows targets, with case-insensitive drive
+    letters and forward-slash → backslash flipping. The Unix shape
+    behaviour is unchanged. The conversion rule lives in a pure
+    helper (`normalise_path_for_windows`) so the round-9 Unix CI
+    keeps the Windows rule under continuous coverage even though the
+    live opener path is `cfg(windows)`-gated.
+  - `BmffMeta::data_references: Vec<DataReference>` parsed from a
+    meta-scope `dinf/dref` (ISO/IEC 14496-12 §8.7) — populated from
+    `url ` / `urn ` / `alis` / `rsrc` entries and the `flags & 1 ==
+    1` self-ref shape. `BmffMeta::data_location(idx) ->
+    DataLocation` and `BmffMeta::data_location_for_item(item_id)`
+    resolve an `iloc` row's `data_reference_index` to one of
+    `SameFile` / `External(&DataReference)` / `Unresolved`, surfacing
+    HEIF/MIAF tile-bag-in-sidecar shapes to callers without forcing
+    them to walk the atom tree by hand.
+  - New `render` module with pure-Rust pixel renderers operating on
+    a tightly-packed RGBA8 surface (`Rgba8Canvas`):
+    - `render_iden(source, properties)` applies a HEIF `iden`
+      derivation per §6.6.2.1 + §6.3, walking the resolved property
+      list in spec order (`clap` crop → `irot` 90°-step CCW
+      rotation → `imir` mirror).
+    - `render_iovl(overlay, layers)` composes a layered canvas per
+      §6.6.2.2.3 with straight-alpha Porter-Duff "source over
+      destination" blending; honours negative offsets by clipping
+      (per the spec's "Pixel locations with a negative offset value
+      are not included" wording).
+    - `render_grid(grid, tiles)` tiles row-major into the canvas
+      per §6.6.2.3, trimming overshoot on the right / bottom.
+    - `ispe_dimensions` convenience extracts the first `Ispe`
+      dimensions from a property list.
+  - `ItemProperties::resolve_strict(item_id, recognised)` —
+    HEIF-strict resolver for the `ipma` essential-bit (§7.4.6.6):
+    returns `Err(fourcc)` on the first essential-bit-set
+    association whose target property is an `Other` not in the
+    caller's recognised allow-list. Permits opt-in strict
+    rejection for HEIF readers that need it without breaking the
+    permissive `resolve` default.
+  - 39 new tests (29 unit + 10 round-10 integration). Total now
+    211 (was 172).
+  - Public types added: `Rgba8Canvas`, `DataLocation`. New helpers:
+    `render_iden`, `render_iovl`, `render_grid`, `ispe_dimensions`,
+    `BmffMeta::data_location`, `BmffMeta::data_location_for_item`,
+    `ItemProperties::resolve_strict`.
+
 - Round 9 — HEIF derived-image payloads (`grid` / `iovl`),
   `pitm`-aware primary-item-bytes convenience helper, and a built-in
   `file://` URL opener for reference-movie alias chains.

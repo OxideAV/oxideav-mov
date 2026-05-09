@@ -21,6 +21,7 @@ pub mod header;
 pub mod iprp;
 pub mod media_meta;
 pub mod reference;
+pub mod render;
 pub mod sample_table;
 pub mod timecode;
 pub mod track;
@@ -34,8 +35,8 @@ pub mod standalone;
 
 pub use bmff_meta::{
     file_extents_for_item, idat_bytes_concat, idat_bytes_for_item, item_data, parse_bmff_meta,
-    primary_item_data, BmffMeta, ItemDataLocation, ItemExtent, ItemInfoEntry, ItemLocation,
-    ItemReference,
+    primary_item_data, BmffMeta, DataLocation, ItemDataLocation, ItemExtent, ItemInfoEntry,
+    ItemLocation, ItemReference,
 };
 pub use chapter::{
     decode_text_sample, decode_text_sample_full, parse_text_sample_styles, ChapterEntry,
@@ -56,6 +57,7 @@ pub use media_meta::{
     Cslg, MetaKeyValue, Pasp, Tapt,
 };
 pub use reference::{parse_dref, DataReference, ReferenceMovie};
+pub use render::{ispe_dimensions, render_grid, render_iden, render_iovl, Rgba8Canvas};
 pub use sample_table::{SampleEntry, SampleTable};
 pub use timecode::{
     parse_tmcd_sample_description, Tmcd, TMCD_FLAG_24_HOUR, TMCD_FLAG_COUNTER,

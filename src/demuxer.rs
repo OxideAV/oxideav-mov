@@ -594,14 +594,19 @@ fn unsupported_error(msg: impl Into<String>) -> Error {
 /// percent-encoded path components are forwarded verbatim — we don't
 /// re-encode after decoding.
 ///
-/// **Platform note**: this round's parser handles the Unix shape
-/// (`file:///abs/path` / `file://localhost/abs/path`) only. Windows
-/// `file:///C:/path` URLs land in the filesystem with an extra
-/// leading `/` because the parser doesn't strip drive-letter
-/// prefixes; callers on Windows that need authoritative `file://`
-/// resolution should bring their own opener that goes through
-/// `url::Url::to_file_path` or equivalent. A follow-up round can
-/// teach this parser the Windows shape if the corpus needs it.
+/// **Platform notes**:
+///
+/// * Unix: `file:///abs/path` and `file://localhost/abs/path` resolve
+///   directly to the absolute filesystem path.
+/// * Windows: `file:///C:/path` and `file:///C|/path` (legacy bar
+///   shape) resolve to `C:\path` — the parser strips the leading `/`
+///   that the URL form requires before the drive letter and
+///   normalises forward slashes inside the path component to
+///   backslashes. UNC shapes (`file://server/share/path`) are
+///   rejected because they would silently cross network boundaries
+///   the user didn't authorise; bring your own opener for those.
+///   Drive letters are recognised case-insensitively (`a..z` /
+///   `A..Z`).
 ///
 /// Wire this in via:
 ///
@@ -636,6 +641,12 @@ pub fn open_file_url(url: &str) -> std::io::Result<Box<dyn ReadSeek>> {
 /// Any URL with a non-empty, non-`localhost` host is rejected so
 /// callers don't accidentally read from a network mount that the user
 /// didn't authorise.
+///
+/// On Windows the leading `/` before a drive letter is stripped:
+/// `file:///C:/Users/foo` becomes `C:\Users\foo`. The legacy bar
+/// shape `file:///C|/Users/foo` is also accepted (the `|` is replaced
+/// by `:`). Forward slashes inside the path are converted to
+/// backslashes.
 fn file_url_to_path(url: &str) -> Option<std::path::PathBuf> {
     // Lowercase scheme match (URL schemes are case-insensitive per
     // RFC 3986 §3.1).
@@ -669,7 +680,54 @@ fn file_url_to_path(url: &str) -> Option<std::path::PathBuf> {
     // spaces or special characters).
     let decoded = percent_decode_to_bytes(path_str)?;
     let s = String::from_utf8(decoded).ok()?;
-    Some(std::path::PathBuf::from(s))
+    Some(std::path::PathBuf::from(normalise_path_for_target_os(&s)))
+}
+
+/// Per-target-OS path normalisation. On Windows, `file:///C:/foo`
+/// arrives at this layer as `/C:/foo`; we strip the leading `/`
+/// before the drive letter, accept the legacy `|` drive-letter
+/// separator (RFC 8089 Appendix E.2), and flip forward slashes to
+/// backslashes so the resulting `PathBuf` opens cleanly through the
+/// Windows path APIs. On non-Windows targets the input is returned
+/// unchanged.
+fn normalise_path_for_target_os(s: &str) -> String {
+    if cfg!(windows) {
+        normalise_path_for_windows(s)
+    } else {
+        s.to_string()
+    }
+}
+
+/// Pure helper exposed for cross-platform testing of the Windows
+/// path-conversion rules even when the test host is Unix. The Unix
+/// build never calls this on the live `file://` path, but it keeps
+/// the rules verifiable in CI without requiring a Windows runner.
+fn normalise_path_for_windows(s: &str) -> String {
+    let bytes = s.as_bytes();
+    // Detect a leading `/X:` or `/X|` shape (drive letter at pos 1,
+    // separator at pos 2). When present, strip the leading `/` and
+    // (later) replace `|` with `:`. The drive letter can be either
+    // case.
+    let mut start = 0usize;
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() {
+        let sep = bytes[2];
+        if sep == b':' || sep == b'|' {
+            start = 1;
+        }
+    }
+    let mut out = String::with_capacity(s.len() - start);
+    for (i, ch) in s[start..].chars().enumerate() {
+        // Flip the legacy `|` to `:` when it sits in the drive-
+        // letter slot (index 1 of the trimmed string).
+        if i == 1 && ch == '|' {
+            out.push(':');
+        } else if ch == '/' {
+            out.push('\\');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// Minimal RFC 3986 percent-decoder for the `file://` opener — accepts
@@ -1542,5 +1600,71 @@ mod tests {
             ext: None,
         };
         assert_eq!(probe(&pd), 0);
+    }
+
+    // ─── Windows file:// shape: portable rule unit-tests ───
+    //
+    // These exercise the pure helper that performs the path-conversion
+    // step. They run on every host (including Unix CI), so the rules
+    // are kept under continuous coverage even though the live opener
+    // path is gated by `cfg(windows)`.
+
+    #[test]
+    fn windows_path_strips_leading_slash_before_drive() {
+        // file:///C:/Users/foo → /C:/Users/foo  →  C:\Users\foo
+        assert_eq!(
+            normalise_path_for_windows("/C:/Users/foo"),
+            "C:\\Users\\foo"
+        );
+    }
+
+    #[test]
+    fn windows_path_accepts_legacy_bar_drive_letter() {
+        // file:///C|/Users/foo (RFC 8089 Appendix E.2) → C:\Users\foo
+        assert_eq!(
+            normalise_path_for_windows("/C|/Users/foo"),
+            "C:\\Users\\foo"
+        );
+    }
+
+    #[test]
+    fn windows_path_lowercase_drive_letter_accepted() {
+        assert_eq!(
+            normalise_path_for_windows("/d:/data/x.mov"),
+            "d:\\data\\x.mov"
+        );
+    }
+
+    #[test]
+    fn windows_path_without_drive_letter_keeps_leading_slash() {
+        // No drive letter → no leading-slash strip; just slash flip.
+        assert_eq!(
+            normalise_path_for_windows("/no-drive/path"),
+            "\\no-drive\\path"
+        );
+    }
+
+    #[test]
+    fn windows_path_relative_input_unchanged_except_separators() {
+        // Legacy `file:rel/path` shape — no leading `/`, no drive
+        // letter; just slash flip.
+        assert_eq!(normalise_path_for_windows("rel/path"), "rel\\path");
+    }
+
+    #[test]
+    fn file_url_to_path_unix_shapes_unchanged() {
+        // The Unix-build path-rendering must keep working byte-identical.
+        let p = file_url_to_path("file:///etc/hosts").unwrap();
+        if cfg!(windows) {
+            assert_eq!(p.to_string_lossy(), "\\etc\\hosts");
+        } else {
+            assert_eq!(p.to_string_lossy(), "/etc/hosts");
+        }
+        let p2 = file_url_to_path("file://localhost/etc/hosts").unwrap();
+        if cfg!(windows) {
+            assert_eq!(p2.to_string_lossy(), "\\etc\\hosts");
+        } else {
+            assert_eq!(p2.to_string_lossy(), "/etc/hosts");
+        }
     }
 }

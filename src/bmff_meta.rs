@@ -31,6 +31,7 @@
 
 use crate::atom::{fourcc, read_payload, walk_children, AtomHeader};
 use crate::iprp::{parse_iprp, ItemProperties, IPRP};
+use crate::reference::{parse_dref, DataReference};
 use std::io::{Read, Seek, SeekFrom};
 
 #[cfg(feature = "registry")]
@@ -50,6 +51,8 @@ pub const XML_: [u8; 4] = fourcc("xml ");
 pub const BXML: [u8; 4] = fourcc("bxml");
 pub const HDLR: [u8; 4] = fourcc("hdlr");
 pub const IPRO: [u8; 4] = fourcc("ipro");
+pub const DINF: [u8; 4] = fourcc("dinf");
+pub const DREF: [u8; 4] = fourcc("dref");
 
 /// One extent inside an [`ItemLocation`]. Items may be split across
 /// multiple extents; the resource is the concatenation of every
@@ -145,6 +148,13 @@ pub struct BmffMeta {
     /// `None` when the file lacks an `iprp` (legacy MPEG-7 metadata,
     /// reference-movie containers, …).
     pub properties: Option<ItemProperties>,
+    /// `dinf/dref` data-reference table at meta scope (ISO/IEC
+    /// 14496-12 §8.7). When an `iloc` row carries a non-zero
+    /// `data_reference_index`, that index is a 1-based offset into
+    /// this list and identifies *where* the item's bytes live (the
+    /// containing file or an external file referenced by `url ` /
+    /// `urn ` / `alis`). Empty when the meta box has no `dinf`.
+    pub data_references: Vec<DataReference>,
 }
 
 impl BmffMeta {
@@ -228,6 +238,71 @@ impl BmffMeta {
         }
         out
     }
+
+    /// Resolve the `data_reference_index` an [`ItemLocation`] carries
+    /// against the meta-scope `dref` table.
+    ///
+    /// The index field on `iloc` rows is 1-based (per ISO/IEC
+    /// 14496-12 §8.7.2) and `0` means "the data is in the same file
+    /// as this metadata". This helper translates the raw index into
+    /// one of three concrete shapes via [`DataLocation`]: `SameFile`,
+    /// `External(&DataReference)`, or `Unresolved` when the index
+    /// points past the table (a malformed file the spec requires us
+    /// to surface defensively rather than silently fall through to
+    /// "same file").
+    pub fn data_location(&self, data_reference_index: u16) -> DataLocation<'_> {
+        if data_reference_index == 0 {
+            return DataLocation::SameFile;
+        }
+        let idx = data_reference_index as usize;
+        // 1-based index into data_references.
+        match self.data_references.get(idx - 1) {
+            Some(DataReference::SelfRef) => DataLocation::SameFile,
+            Some(other) => DataLocation::External(other),
+            None => DataLocation::Unresolved,
+        }
+    }
+
+    /// Resolve an item to its data location ([`DataLocation`]).
+    /// Returns `None` when the item id is unknown.
+    pub fn data_location_for_item(&self, item_id: u32) -> Option<DataLocation<'_>> {
+        let loc = self.find_location(item_id)?;
+        Some(self.data_location(loc.data_reference_index))
+    }
+}
+
+/// Resolved meta-scope data-reference target for an [`ItemLocation`].
+///
+/// The two interesting shapes the corpus puts on the wire are:
+///
+/// * `SameFile` — the bytes live in the file the `meta` box lives in.
+///   Either `data_reference_index == 0` or the table entry was a
+///   `DataReference::SelfRef` (HEIF authoring tools sometimes write a
+///   self-ref `url `/`urn ` entry instead of leaving the index 0).
+///   Callers proceed with their existing in-file resolver.
+/// * `External(&DataReference)` — the bytes live in an external file
+///   pointed at by a `url `, `urn `, `alis`, or `rsrc` data reference.
+///   Callers must open the external file (e.g. via [`open_file_url`])
+///   and apply the item's extents to *that* file's bytes. This is the
+///   shape MIAF / HEIF "tile-bag-in-sidecar" files use to share large
+///   tile collections across many primary-image files.
+///
+/// `Unresolved` is the malformed-file path: the `data_reference_index`
+/// points past the `dref` table. The spec doesn't define recovery
+/// behaviour, so we surface the broken state rather than silently
+/// degrade to `SameFile`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DataLocation<'a> {
+    /// Bytes are in the same file as the metadata.
+    SameFile,
+    /// Bytes live in a sidecar pointed at by this data reference.
+    /// Most commonly a `DataReference::Url` carrying a `file://`,
+    /// `http://`, or relative path.
+    External(&'a DataReference),
+    /// `data_reference_index` overshot the `dref` table — broken
+    /// metadata. The numeric index is preserved on [`ItemLocation`]
+    /// so callers can log or accept the file at their own risk.
+    Unresolved,
 }
 
 /// Try to parse the body of an ISO BMFF `meta` box at the reader's
@@ -299,6 +374,10 @@ pub fn parse_bmff_meta<R: Read + Seek + ?Sized>(
             }
             t if t == &IPRP => {
                 out.properties = Some(parse_iprp(r, child)?);
+                found_iso_marker = true;
+            }
+            t if t == &DINF => {
+                out.data_references = parse_meta_dinf(r, child)?;
                 found_iso_marker = true;
             }
             _ => {}
@@ -719,6 +798,27 @@ fn parse_iref<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Ve
     Ok(refs)
 }
 
+/// Walk a meta-scope `dinf` container looking for a single `dref`
+/// child and parse it into the `DataReference` list. Returns an
+/// empty list when the `dinf` carries no `dref` (legal: §8.7.1
+/// requires only the box's existence, not its `dref` child).
+fn parse_meta_dinf<R: Read + Seek + ?Sized>(
+    r: &mut R,
+    hdr: &AtomHeader,
+) -> Result<Vec<DataReference>> {
+    let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
+    r.seek(SeekFrom::Start(hdr.payload_offset))?;
+    let mut out = Vec::new();
+    walk_children(r, Some(body_end), |r, child| {
+        if child.fourcc == DREF {
+            let body = read_payload(r, child)?;
+            out = parse_dref(&body)?;
+        }
+        Ok(())
+    })?;
+    Ok(out)
+}
+
 /// Returns the absolute byte ranges for an item's data inside the
 /// container file (construction_method == 0). Returns `None` when the
 /// item uses any other construction method (idat / item_offset) or the
@@ -1065,5 +1165,115 @@ mod tests {
         p.push(0);
         p.extend_from_slice(&0u16.to_be_bytes());
         assert!(parse_iloc(&p).is_err());
+    }
+
+    /// Build a meta-scope `dinf/dref` carrying one external `url `
+    /// reference pointing at a sidecar tile bag.
+    fn build_dinf_with_external_url(url: &[u8]) -> Vec<u8> {
+        let mut child = Vec::new();
+        let mut url_with_nul = url.to_vec();
+        url_with_nul.push(0);
+        let size = (12 + url_with_nul.len()) as u32;
+        child.extend_from_slice(&size.to_be_bytes());
+        child.extend_from_slice(b"url ");
+        child.push(0); // ver
+        child.extend_from_slice(&[0, 0, 0]); // flags = 0 (external)
+        child.extend_from_slice(&url_with_nul);
+
+        let mut dref = Vec::new();
+        dref.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+        dref.extend_from_slice(&1u32.to_be_bytes()); // entry_count
+        dref.extend_from_slice(&child);
+
+        let mut dinf = Vec::new();
+        push_atom(&mut dinf, b"dref", &dref);
+        dinf
+    }
+
+    #[test]
+    fn meta_dinf_dref_external_url_decoded() {
+        let dinf = build_dinf_with_external_url(b"file:///srv/bag.heic");
+        let body = build_meta_atom_payload(vec![(b"hdlr", hdlr_pict()), (b"dinf", dinf)]);
+        let mut wrapped = Vec::new();
+        push_atom(&mut wrapped, b"meta", &body);
+        let mut c = Cursor::new(wrapped);
+        let hdr = read_atom_header(&mut c).unwrap().unwrap();
+        let meta = parse_bmff_meta(&mut c, &hdr).unwrap().unwrap();
+        assert_eq!(meta.data_references.len(), 1);
+        match &meta.data_references[0] {
+            DataReference::Url(s) => assert_eq!(s, "file:///srv/bag.heic"),
+            other => panic!("expected Url, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn data_location_for_item_resolves_external_dref() {
+        // Build: hdlr + dinf(dref=external url) + iinf(item 7 hvc1) +
+        // iloc v1 with dref_index=1 pointing at the external bag.
+        let dinf = build_dinf_with_external_url(b"file:///srv/bag.heic");
+        let iinf = iinf_v0_with_one_v2_infe(7, b"hvc1", "primary");
+        // iloc v1: offset 0x100, length 64, dref_index=1, ctor=0
+        let mut iloc = Vec::new();
+        iloc.push(1); // version
+        iloc.extend_from_slice(&[0, 0, 0]); // flags
+        iloc.push(0x44); // offset_size=4, length_size=4
+        iloc.push(0x00); // base_offset_size=0, index_size=0
+        iloc.extend_from_slice(&1u16.to_be_bytes()); // item_count
+        iloc.extend_from_slice(&7u16.to_be_bytes()); // item_id
+        iloc.extend_from_slice(&0u16.to_be_bytes()); // construction_method=0
+        iloc.extend_from_slice(&1u16.to_be_bytes()); // dref_index = 1
+        iloc.extend_from_slice(&1u16.to_be_bytes()); // extent_count
+        iloc.extend_from_slice(&0x100u32.to_be_bytes());
+        iloc.extend_from_slice(&64u32.to_be_bytes());
+
+        let body = build_meta_atom_payload(vec![
+            (b"hdlr", hdlr_pict()),
+            (b"dinf", dinf),
+            (b"iinf", iinf),
+            (b"iloc", iloc),
+        ]);
+        let mut wrapped = Vec::new();
+        push_atom(&mut wrapped, b"meta", &body);
+        let mut c = Cursor::new(wrapped);
+        let hdr = read_atom_header(&mut c).unwrap().unwrap();
+        let meta = parse_bmff_meta(&mut c, &hdr).unwrap().unwrap();
+
+        assert_eq!(meta.locations[0].data_reference_index, 1);
+        match meta.data_location_for_item(7).unwrap() {
+            DataLocation::External(DataReference::Url(s)) => {
+                assert_eq!(s, "file:///srv/bag.heic")
+            }
+            other => panic!("expected External(Url), got {other:?}"),
+        }
+        // Direct same-file resolution for index 0.
+        assert_eq!(meta.data_location(0), DataLocation::SameFile);
+        // Out-of-range index → Unresolved.
+        assert_eq!(meta.data_location(99), DataLocation::Unresolved);
+    }
+
+    #[test]
+    fn data_location_for_item_self_ref_resolves_same_file() {
+        // dinf with a self-ref `url ` entry (flags=0x000001) → the
+        // helper still surfaces SameFile so callers don't open the
+        // sidecar opener for nothing.
+        let mut child = Vec::new();
+        child.extend_from_slice(&12u32.to_be_bytes()); // size
+        child.extend_from_slice(b"url ");
+        child.push(0); // ver
+        child.extend_from_slice(&[0, 0, 1]); // flags=0x000001 (self-ref)
+        let mut dref = Vec::new();
+        dref.extend_from_slice(&0u32.to_be_bytes());
+        dref.extend_from_slice(&1u32.to_be_bytes());
+        dref.extend_from_slice(&child);
+        let mut dinf = Vec::new();
+        push_atom(&mut dinf, b"dref", &dref);
+
+        let body = build_meta_atom_payload(vec![(b"hdlr", hdlr_pict()), (b"dinf", dinf)]);
+        let mut wrapped = Vec::new();
+        push_atom(&mut wrapped, b"meta", &body);
+        let mut c = Cursor::new(wrapped);
+        let hdr = read_atom_header(&mut c).unwrap().unwrap();
+        let meta = parse_bmff_meta(&mut c, &hdr).unwrap().unwrap();
+        assert_eq!(meta.data_location(1), DataLocation::SameFile);
     }
 }
