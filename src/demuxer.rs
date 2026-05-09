@@ -541,6 +541,35 @@ impl MovDemuxer {
         }))
     }
 
+    /// Resolve the file's primary HEIF image into an [`ImageLayout`]
+    /// composition plan. Returns `None` when:
+    ///
+    /// * the input has no top-level `meta` box (it isn't a HEIF / MIAF
+    ///   / AVIF / JPEG-XL file), or
+    /// * the `meta` box has no `pitm`, or
+    /// * the primary item isn't a recognised image-derivation
+    ///   (`grid` / `iovl` / `iden`) or coded image type (`hvc1`,
+    ///   `av01`, `j2k1`, …) — surfaced as `None` rather than an
+    ///   error so callers that probe-and-fall-through don't have to
+    ///   pattern-match on `InvalidData`.
+    ///
+    /// On the `Grid` / `Overlay` paths the per-tile / per-layer
+    /// placement is computed once from the file's `iref dimg` and
+    /// `iprp ispe` tables; on the `Identity` path the inner item id
+    /// is surfaced directly so the caller can decode it through its
+    /// usual codec path (`oxideav-h265`, `oxideav-av1`, …) and apply
+    /// the iden item's transformative properties via
+    /// [`crate::render_iden`].
+    ///
+    /// The lookup uses [`Self::file_bmff_meta`] (the top-level `meta`
+    /// box). HEIF files store their primary image graph there;
+    /// `moov/meta` (held in [`Self::bmff_meta`]) is the QTFF / movie-
+    /// scope shape and is not consulted by this helper.
+    pub fn primary_image_layout(&self) -> Option<crate::derived::ImageLayout> {
+        let fm = self.file_bmff_meta.as_ref()?;
+        crate::derived::primary_image_layout_for(fm)
+    }
+
     /// Read the next sample's bytes from the input. Returns
     /// `(stream_index, sample, data)`.
     pub fn read_next(&mut self) -> Result<(u32, SampleEntry, Vec<u8>)> {

@@ -32,7 +32,9 @@
 //! - docs/image/heif/heif-fixtures-and-traces.md §4.1.
 
 use crate::atom::{fourcc, read_payload, walk_children, AtomHeader};
-use crate::media_meta::{parse_clap, parse_colr, parse_pasp, Clap, ColorParameters, Pasp};
+use crate::media_meta::{
+    parse_clap, parse_colr, parse_pasp, Clap, ColorParameters, ColorParametersKind, Pasp,
+};
 use std::io::{Read, Seek, SeekFrom};
 
 #[cfg(feature = "registry")]
@@ -213,6 +215,23 @@ impl ItemProperties {
         None
     }
 
+    /// HEIF colour-profile accessor: returns the first [`ColrInfo`]
+    /// attached to `item_id`, walking the item's `ipma` row in order.
+    ///
+    /// Equivalent to [`Self::colr_for`] but reshapes the result into
+    /// the HEIF-canonical [`ColrInfo`] enum so callers don't have to
+    /// match on the QTFF-flavoured `ColorParametersKind` (which also
+    /// surfaces the Apple-only `nclc` shape and a forensic `Other`
+    /// fall-through). Returns `None` when the item has no `colr`
+    /// associated, or when its `colr` is the QTFF `nclc` Apple
+    /// variant — `nclc` is not a valid HEIF colour profile per
+    /// ISO/IEC 14496-12 §12.1.5 (HEIF mandates `nclx` / `rICC` /
+    /// `prof`).
+    pub fn color_profile(&self, item_id: u32) -> Option<ColrInfo> {
+        let cp = self.colr_for(item_id)?;
+        ColrInfo::from_color_parameters(cp)
+    }
+
     /// First `auxC` attached to the item.
     pub fn auxc_for(&self, item_id: u32) -> Option<&AuxC> {
         for p in self.resolve(item_id) {
@@ -282,6 +301,163 @@ impl ItemProperties {
             out.push(p);
         }
         Ok(out)
+    }
+}
+
+/// HEIF-canonical ColourInformationBox (`colr`) extraction.
+///
+/// Per ISO/IEC 14496-12 §12.1.5 the box body is a 4-byte
+/// `colour_type` tag followed by a tag-specific record:
+///
+/// * `nclx` — three u16 indices (`colour_primaries`,
+///   `transfer_characteristics`, `matrix_coefficients`) plus a 1-byte
+///   field whose top bit is `full_range_flag`. 7-byte body.
+/// * `rICC` — restricted ICC profile bytes. The "restricted" rule per
+///   ISO 15076-1 limits the profile to a small, on-device-renderable
+///   subset; we do not enforce it (we surface the bytes verbatim).
+/// * `prof` — full / unrestricted ICC profile bytes.
+///
+/// HEIF (ISO/IEC 23008-12 §6.5.5) excludes the QTFF `nclc` Apple shape
+/// from the legal `colour_type` set; consequently
+/// [`parse_colr_payload`] rejects `nclc` with `Err(InvalidData)`. For
+/// QTFF-flavoured tracks the existing
+/// [`crate::media_meta::ColorParameters`] surface is the right choice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ColrInfo {
+    /// On-the-wire colour-volume tag (HEIF §6.5.5.1.1). Indices match
+    /// ISO/IEC 23001-8 (CICP). Common values:
+    ///
+    /// * `primaries == 1` → BT.709
+    /// * `primaries == 9` → BT.2020
+    /// * `primaries == 12` → Display P3 (CICP-12)
+    /// * `transfer == 13` → sRGB
+    /// * `transfer == 16` → SMPTE ST 2084 (PQ)
+    /// * `transfer == 18` → ARIB STD-B67 (HLG)
+    /// * `matrix == 0` → Identity (RGB)
+    /// * `matrix == 1` → BT.709
+    /// * `matrix == 5` → BT.601
+    /// * `matrix == 9` → BT.2020 NC
+    Nclx {
+        primaries: u16,
+        transfer: u16,
+        matrix: u16,
+        full_range: bool,
+    },
+    /// `rICC` — restricted ICC profile bytes, surfaced verbatim. The
+    /// restricted-profile rule (ISO 15076-1) is enforced by the
+    /// downstream colour engine, not by the parser.
+    RestrictedIcc(Vec<u8>),
+    /// `prof` — full / unrestricted ICC profile bytes.
+    UnrestrictedIcc(Vec<u8>),
+}
+
+impl ColrInfo {
+    /// 4-byte CICP tag identifying the on-disk variant: `b"nclx"`,
+    /// `b"rICC"`, or `b"prof"`.
+    pub fn colour_type(&self) -> [u8; 4] {
+        match self {
+            ColrInfo::Nclx { .. } => *b"nclx",
+            ColrInfo::RestrictedIcc(_) => *b"rICC",
+            ColrInfo::UnrestrictedIcc(_) => *b"prof",
+        }
+    }
+
+    /// True when the variant carries an embedded ICC profile blob
+    /// (either restricted `rICC` or unrestricted `prof`).
+    pub fn is_icc(&self) -> bool {
+        matches!(
+            self,
+            ColrInfo::RestrictedIcc(_) | ColrInfo::UnrestrictedIcc(_)
+        )
+    }
+
+    /// Borrow the ICC profile bytes when the variant is `rICC` /
+    /// `prof`; `None` for `nclx`.
+    pub fn icc_bytes(&self) -> Option<&[u8]> {
+        match self {
+            ColrInfo::RestrictedIcc(b) | ColrInfo::UnrestrictedIcc(b) => Some(b),
+            ColrInfo::Nclx { .. } => None,
+        }
+    }
+
+    /// Convert a parsed `ColorParameters` (the QTFF/ISO-merged surface
+    /// the demuxer surfaces in `ipco`) into the HEIF-canonical
+    /// `ColrInfo`. Returns `None` for the Apple `nclc` shape (HEIF
+    /// forbids it) or any forensic `Other` fall-through.
+    pub fn from_color_parameters(cp: &ColorParameters) -> Option<Self> {
+        match &cp.kind {
+            ColorParametersKind::Nclx {
+                primaries,
+                transfer,
+                matrix,
+                full_range,
+            } => Some(ColrInfo::Nclx {
+                primaries: *primaries,
+                transfer: *transfer,
+                matrix: *matrix,
+                full_range: *full_range,
+            }),
+            ColorParametersKind::Icc { kind, profile } => match kind {
+                b"rICC" => Some(ColrInfo::RestrictedIcc(profile.clone())),
+                b"prof" => Some(ColrInfo::UnrestrictedIcc(profile.clone())),
+                _ => None,
+            },
+            ColorParametersKind::Nclc { .. } | ColorParametersKind::Other { .. } => None,
+        }
+    }
+}
+
+/// Parse a HEIF `colr` box payload into the canonical [`ColrInfo`].
+///
+/// Per ISO/IEC 14496-12 §12.1.5 the leading 4 bytes are a `colour_type`
+/// tag selecting the body shape. HEIF (ISO/IEC 23008-12 §6.5.5.1)
+/// admits three tags:
+///
+/// * `nclx` — 7 bytes after the tag: three u16 indices then one byte
+///   whose top bit is `full_range_flag` (the remaining 7 bits are
+///   reserved and MUST be zero, but the parser does not enforce
+///   reserved-bit zeroing — many encoders leave them undefined).
+/// * `rICC` — restricted ICC profile bytes (variable length).
+/// * `prof` — full / unrestricted ICC profile bytes (variable length).
+///
+/// Returns `Err(InvalidData)` when:
+///
+/// * the body is shorter than 4 bytes (no tag),
+/// * the tag is `nclx` and the body has < 7 trailing bytes,
+/// * the tag is `nclc` (the Apple QTFF shape, forbidden by HEIF
+///   §6.5.5.1 Note 1 — callers wanting Apple `nclc` should use
+///   [`crate::media_meta::parse_colr`] instead),
+/// * the tag is anything else (forward-compatible authoring should
+///   stick to the documented set).
+pub fn parse_colr_payload(payload: &[u8]) -> Result<ColrInfo> {
+    if payload.len() < 4 {
+        return Err(Error::invalid("HEIF: colr payload < 4 bytes (no tag)"));
+    }
+    let tag = &payload[..4];
+    let body = &payload[4..];
+    match tag {
+        b"nclx" => {
+            if body.len() < 7 {
+                return Err(Error::invalid(
+                    "HEIF: colr nclx body < 7 bytes (need 3×u16 indices + 1 flag byte)",
+                ));
+            }
+            Ok(ColrInfo::Nclx {
+                primaries: u16::from_be_bytes([body[0], body[1]]),
+                transfer: u16::from_be_bytes([body[2], body[3]]),
+                matrix: u16::from_be_bytes([body[4], body[5]]),
+                full_range: (body[6] & 0x80) != 0,
+            })
+        }
+        b"rICC" => Ok(ColrInfo::RestrictedIcc(body.to_vec())),
+        b"prof" => Ok(ColrInfo::UnrestrictedIcc(body.to_vec())),
+        b"nclc" => Err(Error::invalid(
+            "HEIF: colr 'nclc' tag is the QTFF Apple shape, not legal in HEIF (use ISO 'nclx')",
+        )),
+        other => Err(Error::invalid(format!(
+            "HEIF: colr unknown colour_type tag {:?}",
+            std::str::from_utf8(other).unwrap_or("<non-utf8>")
+        ))),
     }
 }
 
@@ -734,6 +910,178 @@ mod tests {
         // Allow-list lets the caller pass essential `hvcC` through.
         let r = p.resolve_strict(1, &[*b"hvcC"]).unwrap();
         assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn parse_colr_payload_nclx_bt709_srgb_bt601() {
+        // Round-11 fixture: BT.709 primaries (1), sRGB transfer (13),
+        // BT.601 matrix (5), full_range_flag = 0.
+        let mut p = Vec::new();
+        p.extend_from_slice(b"nclx");
+        p.extend_from_slice(&1u16.to_be_bytes()); // primaries = BT.709
+        p.extend_from_slice(&13u16.to_be_bytes()); // transfer = sRGB
+        p.extend_from_slice(&5u16.to_be_bytes()); // matrix = BT.601
+        p.push(0x00); // full_range = false
+        let info = parse_colr_payload(&p).unwrap();
+        match info {
+            ColrInfo::Nclx {
+                primaries,
+                transfer,
+                matrix,
+                full_range,
+            } => {
+                assert_eq!(primaries, 1);
+                assert_eq!(transfer, 13);
+                assert_eq!(matrix, 5);
+                assert!(!full_range);
+            }
+            other => panic!("expected Nclx, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_colr_payload_nclx_full_range_flag_decodes() {
+        let mut p = Vec::new();
+        p.extend_from_slice(b"nclx");
+        p.extend_from_slice(&9u16.to_be_bytes()); // primaries = BT.2020
+        p.extend_from_slice(&16u16.to_be_bytes()); // transfer = PQ
+        p.extend_from_slice(&9u16.to_be_bytes()); // matrix = BT.2020 NC
+        p.push(0x80); // full_range_flag = 1
+        let info = parse_colr_payload(&p).unwrap();
+        match info {
+            ColrInfo::Nclx { full_range, .. } => assert!(full_range),
+            other => panic!("expected Nclx, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_colr_payload_ricc_preserves_bytes_and_length() {
+        // 24-byte synthetic profile body — the parser must surface it
+        // verbatim and report the right colour_type tag.
+        let mut p = Vec::new();
+        p.extend_from_slice(b"rICC");
+        let profile_bytes: Vec<u8> = (0u8..24).collect();
+        p.extend_from_slice(&profile_bytes);
+        let info = parse_colr_payload(&p).unwrap();
+        assert_eq!(info.colour_type(), *b"rICC");
+        assert!(info.is_icc());
+        assert_eq!(info.icc_bytes().unwrap(), &profile_bytes[..]);
+        assert_eq!(info.icc_bytes().unwrap().len(), 24);
+        match info {
+            ColrInfo::RestrictedIcc(b) => assert_eq!(b, profile_bytes),
+            other => panic!("expected RestrictedIcc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_colr_payload_prof_preserves_bytes_and_length() {
+        // 64-byte synthetic profile body — exercise the unrestricted
+        // shape independently of rICC.
+        let mut p = Vec::new();
+        p.extend_from_slice(b"prof");
+        let profile_bytes: Vec<u8> = (0u8..64).collect();
+        p.extend_from_slice(&profile_bytes);
+        let info = parse_colr_payload(&p).unwrap();
+        assert_eq!(info.colour_type(), *b"prof");
+        assert!(info.is_icc());
+        assert_eq!(info.icc_bytes().unwrap().len(), 64);
+        match info {
+            ColrInfo::UnrestrictedIcc(b) => assert_eq!(b, profile_bytes),
+            other => panic!("expected UnrestrictedIcc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_colr_payload_rejects_apple_nclc_for_heif() {
+        let mut p = Vec::new();
+        p.extend_from_slice(b"nclc");
+        p.extend_from_slice(&1u16.to_be_bytes());
+        p.extend_from_slice(&1u16.to_be_bytes());
+        p.extend_from_slice(&1u16.to_be_bytes());
+        assert!(parse_colr_payload(&p).is_err());
+    }
+
+    #[test]
+    fn parse_colr_payload_rejects_unknown_tag() {
+        let mut p = Vec::new();
+        p.extend_from_slice(b"XXXX");
+        p.extend_from_slice(&[0u8; 8]);
+        assert!(parse_colr_payload(&p).is_err());
+    }
+
+    #[test]
+    fn parse_colr_payload_rejects_truncated_nclx() {
+        // nclx tag but body is only 5 bytes (need 7).
+        let mut p = Vec::new();
+        p.extend_from_slice(b"nclx");
+        p.extend_from_slice(&[0u8; 5]);
+        assert!(parse_colr_payload(&p).is_err());
+    }
+
+    #[test]
+    fn color_profile_accessor_returns_nclx_for_associated_item() {
+        // ipco carries [ispe, colr(nclx)]; ipma associates both with
+        // item 1; color_profile(1) returns the nclx colour info.
+        let ipco = build_ipco(&[(b"ispe", &ispe_body(64, 64)), (b"colr", &colr_nclx())]);
+        let ipma = build_ipma_v0(&[(1, &[(1, true), (2, false)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        let info = p.color_profile(1).expect("expected nclx profile");
+        match info {
+            ColrInfo::Nclx {
+                primaries,
+                transfer,
+                matrix,
+                full_range,
+            } => {
+                assert_eq!((primaries, transfer, matrix), (1, 13, 6));
+                assert!(full_range);
+            }
+            other => panic!("expected Nclx, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn color_profile_accessor_returns_none_for_apple_nclc() {
+        // colr 'nclc' is not a HEIF colour profile — the accessor
+        // returns None even though the underlying ipma row points at
+        // a `colr` property.
+        let mut nclc = Vec::new();
+        nclc.extend_from_slice(b"nclc");
+        nclc.extend_from_slice(&1u16.to_be_bytes());
+        nclc.extend_from_slice(&1u16.to_be_bytes());
+        nclc.extend_from_slice(&1u16.to_be_bytes());
+        let ipco = build_ipco(&[(b"colr", &nclc)]);
+        let ipma = build_ipma_v0(&[(1, &[(1, false)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        assert!(p.color_profile(1).is_none());
+    }
+
+    #[test]
+    fn color_profile_accessor_returns_none_when_no_colr() {
+        let ipco = build_ipco(&[(b"ispe", &ispe_body(2, 2))]);
+        let ipma = build_ipma_v0(&[(1, &[(1, false)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        assert!(p.color_profile(1).is_none());
+    }
+
+    #[test]
+    fn color_profile_accessor_returns_icc_for_prof_payload() {
+        // Build a `prof` colr payload (4-byte tag + 16 ICC bytes) and
+        // verify the accessor surfaces it as UnrestrictedIcc.
+        let mut prof = Vec::new();
+        prof.extend_from_slice(b"prof");
+        prof.extend_from_slice(&[0xAB; 16]);
+        let ipco = build_ipco(&[(b"colr", &prof)]);
+        let ipma = build_ipma_v0(&[(1, &[(1, false)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        let info = p.color_profile(1).expect("expected prof profile");
+        match info {
+            ColrInfo::UnrestrictedIcc(b) => {
+                assert_eq!(b.len(), 16);
+                assert!(b.iter().all(|&x| x == 0xAB));
+            }
+            other => panic!("expected UnrestrictedIcc, got {other:?}"),
+        }
     }
 
     #[test]

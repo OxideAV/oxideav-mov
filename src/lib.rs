@@ -44,13 +44,17 @@ pub use chapter::{
     TextSampleStyles,
 };
 pub use demuxer::{open_file_url, MovDemuxer, MAX_ALIAS_DEPTH};
-pub use derived::{parse_grid, parse_overlay, parse_overlay_with_source_count, Grid, Overlay};
+pub use derived::{
+    image_layout_for, parse_grid, parse_overlay, parse_overlay_with_source_count, plan_grid_layout,
+    plan_overlay_layout, primary_image_layout_for, Grid, GridTilePlacement, ImageGridLayout,
+    ImageLayout, Overlay, OverlayLayer, OverlayLayout,
+};
 pub use edit::{Edit, EditList};
 pub use gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, Tcmi, TextHeader};
 pub use header::{Ftyp, Hdlr, Mdhd, Mvhd, Tkhd, TrackRotation};
 pub use iprp::{
-    parse_iprp, AuxC, Imir, Irot, Ispe, ItemProperties, ItemProperty, ItemPropertyAssociation,
-    Pixi, PropertyAssociation,
+    parse_colr_payload, parse_iprp, AuxC, ColrInfo, Imir, Irot, Ispe, ItemProperties, ItemProperty,
+    ItemPropertyAssociation, Pixi, PropertyAssociation,
 };
 pub use media_meta::{
     channel_mask_for_layout_tag, Chan, ChanDescription, Clap, ColorParameters, ColorParametersKind,

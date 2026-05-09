@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 11 — HEIF colour-profile typed extraction (`colr` →
+  `ColrInfo`) and HEIF composition-plan helpers
+  (`primary_image_layout()` → `ImageLayout::{Identity, Grid,
+  Overlay}`).
+  - `iprp::parse_colr_payload(payload) -> ColrInfo` — typed
+    decoder for the ColourInformationBox per ISO/IEC 14496-12
+    §12.1.5. Returns the HEIF-canonical `ColrInfo` enum:
+    - `Nclx { primaries, transfer, matrix, full_range }` — per-CICP
+      indices (ISO/IEC 23001-8) plus the `full_range_flag` bit.
+    - `RestrictedIcc(Vec<u8>)` — `rICC` body bytes preserved
+      verbatim.
+    - `UnrestrictedIcc(Vec<u8>)` — `prof` body bytes preserved
+      verbatim.
+    The Apple QTFF `nclc` shape is rejected with `InvalidData` per
+    HEIF §6.5.5.1 Note 1; QTFF tracks should keep using the
+    existing `media_meta::parse_colr` surface.
+  - `ItemProperties::color_profile(item_id) -> Option<ColrInfo>` —
+    accessor that walks `ipma` for the bound item and reshapes the
+    resolved `colr` into the HEIF-canonical enum (`None` for the
+    Apple `nclc` variant or unrecognised forensic fall-throughs).
+  - `derived::ImageGridLayout { canvas_w, canvas_h, tile_w,
+    tile_h, rows, cols, tiles: Vec<GridTilePlacement> }` — `grid`
+    composition plan; tile placements `(item_id, x, y)` come from
+    walking `dimg` iref + first-tile `ispe` for the shared encoded
+    extent.
+  - `derived::OverlayLayout { canvas_w, canvas_h, canvas_fill_color,
+    layers: Vec<OverlayLayer { item_id, x: i32, y: i32 }> }` —
+    `iovl` composition plan; per-layer `(x, y)` come from the
+    parsed `Overlay::offsets` in `dimg` target order.
+  - `derived::ImageLayout::{Identity { item_id }, Grid(_),
+    Overlay(_)}` — unified composition variant returned by the
+    layout helpers. `iden` is treated as a pass-through to its
+    inner `dimg` target so callers that decode through the regular
+    codec path get the encoded image directly; bare coded items
+    (`hvc1`, `av01`, `j2k1`, …) surface as `Identity { item_id =
+    primary_item_id }`.
+  - `derived::primary_image_layout_for(meta)` and
+    `image_layout_for(meta, id)` planner helpers; the former
+    dispatches off the file's `pitm`. Construction is
+    `idat`-resident-only for `grid` / `iovl` payloads (the typical
+    authoring shape).
+  - `MovDemuxer::primary_image_layout() -> Option<ImageLayout>` —
+    one-shot accessor that resolves the file's primary HEIF image
+    into a composition plan from the top-level `meta` box. Returns
+    `None` when the input has no `meta` (or no `pitm`, or the
+    derivation can't be planned from `idat`).
+  - 29 new tests (20 unit + 9 round-11 integration). Total now
+    240 (was 211).
+  - Public types added: `ColrInfo`, `ImageGridLayout`,
+    `GridTilePlacement`, `OverlayLayout`, `OverlayLayer`,
+    `ImageLayout`. New helpers: `parse_colr_payload`,
+    `ItemProperties::color_profile`, `plan_grid_layout`,
+    `plan_overlay_layout`, `primary_image_layout_for`,
+    `image_layout_for`, `MovDemuxer::primary_image_layout`.
+
 - Round 10 — Windows `file://` shape rules, meta-scope `dinf/dref`
   external file-reference resolution, HEIF `iden` / `iovl` / `grid`
   pixel renderers, and HEIF-strict `ipma` essential-bit enforcement.
