@@ -506,6 +506,13 @@ pub enum ImageLayout {
     /// derivation (when the primary is an `iden`) and the inner
     /// item's own transformative properties; an empty chain when
     /// neither side declares any.
+    ///
+    /// `alpha_for` is `Some(target_id)` when this item is the alpha
+    /// auxiliary plane for `target_id` — i.e. it carries an `auxC`
+    /// property whose URN identifies it as alpha (per
+    /// [`crate::AuxC::is_alpha`]) and an `auxl` iref pointing at the
+    /// colour image item it complements. `None` for ordinary colour
+    /// items that aren't alpha planes.
     Identity {
         /// Item id of the inner coded image (the `iden` `dimg`
         /// target, or the primary item itself when the primary is
@@ -522,6 +529,13 @@ pub enum ImageLayout {
         /// `None` when absent or when the underlying `colr` is the
         /// QTFF-only `nclc` shape (which HEIF forbids).
         color_profile: Option<ColrInfo>,
+        /// `Some(target_id)` when this item is the alpha auxiliary
+        /// plane (per `auxC` URN + `auxl` iref) for `target_id`; `None`
+        /// otherwise. Per HEIF §7.5.1 / MIAF Annex B the alpha auxiliary
+        /// item is itself a normal coded item — decoding it yields the
+        /// alpha samples to be associated with the colour image
+        /// `target_id` references.
+        alpha_for: Option<u32>,
     },
     /// Primary item is a `grid` derived image. Tile items live in
     /// `layout.tiles` in row-major order; decode each one and blit at
@@ -612,7 +626,8 @@ fn merge_transform_chains(outer: &TransformChain, inner: &TransformChain) -> Tra
 
 /// Build an [`ImageLayout::Identity`] for `inner_item_id`, composing
 /// the (optional) `iden_item_id`'s transformative cascade with the
-/// inner item's own transformative properties + `pixi` + `colr`.
+/// inner item's own transformative properties + `pixi` + `colr` +
+/// (when this item is an alpha auxiliary plane) the `alpha_for` target.
 fn identity_layout_for(
     meta: &BmffMeta,
     inner_item_id: u32,
@@ -628,12 +643,43 @@ fn identity_layout_for(
         Some(p) => (p.pixi(inner_item_id), p.color_profile(inner_item_id)),
         None => (None, None),
     };
+    let alpha_for = alpha_target_for(meta, inner_item_id);
     ImageLayout::Identity {
         item_id: inner_item_id,
         transform,
         pixi,
         color_profile,
+        alpha_for,
     }
+}
+
+/// Resolve the colour-image target an `item_id` is an alpha auxiliary
+/// plane for, when applicable. Returns `Some(target_id)` iff:
+///
+/// 1. `item_id` carries an `auxC` property whose URN identifies it as
+///    an alpha plane (per [`crate::AuxC::is_alpha`]), and
+/// 2. an `auxl` iref `(from = item_id, to = [target_id, ...])` is
+///    present (alpha plane → master direction per HEIF §7.5.1).
+///
+/// When (1) holds but no `auxl` iref is found we fall back to looking
+/// at `cdsc` (some HEIF authoring tools use `cdsc` for description
+/// items only — the alpha plane should always carry `auxl` per the
+/// spec, but defensively we accept `cdsc` as an aliasing fallback).
+fn alpha_target_for(meta: &BmffMeta, item_id: u32) -> Option<u32> {
+    let props = meta.properties.as_ref()?;
+    let auxc = props.auxc_for(item_id)?;
+    if !auxc.is_alpha() {
+        return None;
+    }
+    // auxl iref: from = aux item, to = master (HEIF §7.5.1 / §7.4.5).
+    let masters = meta.refs_from(item_id, b"auxl");
+    if let Some(&first) = masters.first() {
+        return Some(first);
+    }
+    // Defensive fallback: a few authoring tools mis-emit `cdsc` for
+    // the alpha→master pairing. Keep it as a forensic alias.
+    let cdsc_masters = meta.refs_from(item_id, b"cdsc");
+    cdsc_masters.first().copied()
 }
 
 /// Build an [`ImageGridLayout`] from an already-resolved `grid`
@@ -1417,11 +1463,13 @@ mod tests {
                 transform,
                 pixi,
                 color_profile,
+                alpha_for,
             }) => {
                 assert_eq!(item_id, 9);
                 assert!(transform.is_empty());
                 assert!(pixi.is_none());
                 assert!(color_profile.is_none());
+                assert!(alpha_for.is_none());
             }
             other => panic!("expected Identity, got {other:?}"),
         }
@@ -1447,11 +1495,13 @@ mod tests {
                 transform,
                 pixi,
                 color_profile,
+                alpha_for,
             }) => {
                 assert_eq!(item_id, 5);
                 assert!(transform.is_empty());
                 assert!(pixi.is_none());
                 assert!(color_profile.is_none());
+                assert!(alpha_for.is_none());
             }
             other => panic!("expected Identity, got {other:?}"),
         }
@@ -1784,6 +1834,7 @@ mod tests {
                 transform,
                 pixi,
                 color_profile,
+                alpha_for,
             } => {
                 assert_eq!(item_id, 9, "Identity surfaces inner item id");
                 assert_eq!(
@@ -1796,6 +1847,7 @@ mod tests {
                 );
                 assert!(pixi.is_none(), "no pixi associated");
                 assert!(color_profile.is_none(), "no colr associated");
+                assert!(alpha_for.is_none(), "not an alpha auxiliary item");
             }
             other => panic!("expected Identity, got {other:?}"),
         }
@@ -1957,6 +2009,7 @@ mod tests {
                 transform,
                 pixi,
                 color_profile,
+                alpha_for,
             } => {
                 assert_eq!(item_id, 9);
                 assert!(transform.is_empty());
@@ -1969,6 +2022,7 @@ mod tests {
                         ..
                     }
                 ));
+                assert!(alpha_for.is_none());
             }
             other => panic!("expected Identity, got {other:?}"),
         }

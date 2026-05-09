@@ -54,6 +54,9 @@ pub const AUXC: [u8; 4] = fourcc("auxC");
 pub const COLR: [u8; 4] = fourcc("colr");
 pub const PASP: [u8; 4] = fourcc("pasp");
 pub const CLAP: [u8; 4] = fourcc("clap");
+pub const CLLI: [u8; 4] = fourcc("clli");
+pub const MDCV: [u8; 4] = fourcc("mdcv");
+pub const CCLV: [u8; 4] = fourcc("cclv");
 
 /// `ispe` — ImageSpatialExtentsProperty (HEIF §6.5.3.1). Carries the
 /// pixel extent of the *encoded* picture (the consumer-visible size
@@ -133,12 +136,148 @@ pub struct AuxC {
     pub aux_subtype: Vec<u8>,
 }
 
+impl AuxC {
+    /// Returns `true` when this auxC's URN identifies the auxiliary
+    /// item as an alpha plane.
+    ///
+    /// HEIF / MIAF authoring tools use one of two URNs for alpha:
+    ///
+    /// * `urn:mpeg:hevc:2015:auxid:1` — HEIF §7.5.1 (HEVC alpha plane).
+    /// * `urn:mpeg:mpegB:cicp:systems:auxiliary:alpha` — MIAF / ISO
+    ///   23000-22 (codec-agnostic alpha plane URN).
+    ///
+    /// Both are recognised here; callers asking "is this the alpha
+    /// channel for some image item?" should prefer this helper to
+    /// pattern-matching on the URN literal.
+    pub fn is_alpha(&self) -> bool {
+        matches!(
+            self.aux_type.as_str(),
+            "urn:mpeg:hevc:2015:auxid:1" | "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha"
+        )
+    }
+
+    /// Returns `true` when this auxC's URN identifies the auxiliary
+    /// item as a depth map (HEIF §7.5.2.1).
+    ///
+    /// Recognised URNs:
+    ///
+    /// * `urn:mpeg:hevc:2015:auxid:2` — HEIF HEVC depth.
+    /// * `urn:mpeg:mpegB:cicp:systems:auxiliary:depth` — MIAF
+    ///   codec-agnostic depth URN.
+    pub fn is_depth(&self) -> bool {
+        matches!(
+            self.aux_type.as_str(),
+            "urn:mpeg:hevc:2015:auxid:2" | "urn:mpeg:mpegB:cicp:systems:auxiliary:depth"
+        )
+    }
+}
+
+/// `clli` — Content Light Level Information (ISO/IEC 23008-12 §6.5.x;
+/// CTA-861 / SMPTE ST 2086 derived). Carries the maximum content light
+/// level (MaxCLL) and the maximum frame-average light level (MaxFALL),
+/// both expressed in candela per square metre (cd/m²) as unsigned 16-bit
+/// integers. Sender-side metadata for HDR display tone-mapping.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Clli {
+    /// Maximum content light level (MaxCLL), cd/m².
+    pub max_content_light_level: u16,
+    /// Maximum picture-average light level (MaxFALL), cd/m².
+    pub max_pic_average_light_level: u16,
+}
+
+/// `mdcv` — Mastering Display Colour Volume (ISO/IEC 23008-12 §6.5.x;
+/// SMPTE ST 2086 metadata in HEIF wrapping). Carries the chromaticity
+/// of the three RGB display primaries plus the white point, and the
+/// nominal display luminance range used to master the content. The
+/// chromaticity values are in 0.00002 increments (i.e. divide by
+/// 50 000 for CIE x/y); luminance values are in 0.0001 cd/m² units
+/// (divide by 10 000 for cd/m²).
+///
+/// On-disk layout (40 bytes total):
+///
+/// ```text
+/// display_primaries_x[c]  u16 BE       (c = 0..2; G, B, R order per ST 2086)
+/// display_primaries_y[c]  u16 BE       (c = 0..2)
+/// white_point_x           u16 BE
+/// white_point_y           u16 BE
+/// max_display_luminance   u32 BE       (0.0001 cd/m² steps)
+/// min_display_luminance   u32 BE       (0.0001 cd/m² steps)
+/// ```
+///
+/// `display_primaries[c]` here mirrors the on-disk indexing — i.e.
+/// `display_primaries[0]` is the *green* primary, `[1]` blue, `[2]`
+/// red. Callers wanting CIE-1931 (x, y) values should divide each u16
+/// by 50 000.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Mdcv {
+    /// On-disk-ordered (x, y) chromaticity for each of the three
+    /// display primaries — index 0 = G, 1 = B, 2 = R per SMPTE ST 2086.
+    pub display_primaries: [(u16, u16); 3],
+    /// (x, y) chromaticity of the mastering display's white point.
+    pub white_point: (u16, u16),
+    /// Maximum display luminance, in 0.0001 cd/m² steps.
+    pub max_display_luminance: u32,
+    /// Minimum display luminance, in 0.0001 cd/m² steps.
+    pub min_display_luminance: u32,
+}
+
+/// `cclv` — Content Colour Volume (ISO/IEC 23008-12 §6.5.x).
+///
+/// `cclv` is HEVC SEI 144 transcribed into an `iprp` property and
+/// describes the volume in CIE-1931 xy + nominal luminance space the
+/// *content* is contained in (as opposed to `mdcv`'s display-mastering
+/// volume). The on-disk shape is gated by a one-byte flags field whose
+/// low three bits select which of the three sub-records are present:
+///
+/// ```text
+/// ccv_cancel_flag         u1
+/// ccv_persistence_flag    u1
+/// ccv_primaries_present   u1   --|
+/// ccv_min_luminance_present u1 --|
+/// ccv_max_luminance_present u1 --|-> per-field-presence flags
+/// ccv_avg_luminance_present u1 --|
+/// reserved                u2
+/// // optionally:
+/// ccv_primaries_x[c]      i32 BE   c=0..2 (G,B,R); only when ccv_primaries_present
+/// ccv_primaries_y[c]      i32 BE   c=0..2 (G,B,R); only when ccv_primaries_present
+/// ccv_min_luminance       u32 BE             only when ccv_min_luminance_present
+/// ccv_max_luminance       u32 BE             only when ccv_max_luminance_present
+/// ccv_avg_luminance       u32 BE             only when ccv_avg_luminance_present
+/// ```
+///
+/// We surface the basic shape: the four *_present flags + each optional
+/// sub-record. Absent sub-records are `None`. The signed primaries are
+/// kept signed because HEVC §D.2.39 requires the parser to interpret
+/// them as `i32`; in practice they're constrained to `[-50000, 50000]`
+/// (i.e. CIE-1931 range × 50 000 same as `mdcv`), but we don't enforce
+/// that.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cclv {
+    /// Whether the content cancels any prior CCV signalling.
+    pub cancel_flag: bool,
+    /// Whether the CCV applies to subsequent frames until cancelled
+    /// (`true`) or only the current frame (`false`).
+    pub persistence_flag: bool,
+    /// Content primaries (G/B/R order per HEVC §D.2.39); `None` when
+    /// the `ccv_primaries_present_flag` bit is clear.
+    pub primaries: Option<[(i32, i32); 3]>,
+    /// Minimum content luminance, 0.0001 cd/m² steps; `None` when
+    /// `ccv_min_luminance_value_present_flag` is clear.
+    pub min_luminance: Option<u32>,
+    /// Maximum content luminance, 0.0001 cd/m² steps; `None` when
+    /// `ccv_max_luminance_value_present_flag` is clear.
+    pub max_luminance: Option<u32>,
+    /// Average content luminance, 0.0001 cd/m² steps; `None` when
+    /// `ccv_avg_luminance_value_present_flag` is clear.
+    pub avg_luminance: Option<u32>,
+}
+
 /// One property entry inside `ipco`.
 ///
 /// `Other` is a fall-through for any box type we don't model
-/// natively (typical examples: `hvcC`, `av1C`, `lsel`, `clli`,
-/// `mdcv`, `cclv`). Callers can still match on its fourcc and parse
-/// the raw payload themselves — for instance, `hvcC` is parsed by
+/// natively (typical example: `hvcC`, `av1C`, `lsel`). Callers can
+/// still match on its fourcc and parse the raw payload themselves —
+/// for instance, `hvcC` is parsed by
 /// `oxideav-h265::HEVCDecoderConfigurationRecord` rather than by us.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ItemProperty {
@@ -150,6 +289,9 @@ pub enum ItemProperty {
     Irot(Irot),
     Imir(Imir),
     AuxC(AuxC),
+    Clli(Clli),
+    Mdcv(Mdcv),
+    Cclv(Cclv),
     Other { fourcc: [u8; 4], payload: Vec<u8> },
 }
 
@@ -165,6 +307,9 @@ impl ItemProperty {
             ItemProperty::Irot(_) => IROT,
             ItemProperty::Imir(_) => IMIR,
             ItemProperty::AuxC(_) => AUXC,
+            ItemProperty::Clli(_) => CLLI,
+            ItemProperty::Mdcv(_) => MDCV,
+            ItemProperty::Cclv(_) => CCLV,
             ItemProperty::Other { fourcc, .. } => *fourcc,
         }
     }
@@ -292,6 +437,47 @@ impl ItemProperties {
         for p in self.resolve(item_id) {
             if let ItemProperty::AuxC(a) = p {
                 return Some(a);
+            }
+        }
+        None
+    }
+
+    /// HEIF auxiliary-type accessor: returns the first [`AuxC`]
+    /// attached to `item_id` (the same value as [`Self::auxc_for`],
+    /// but cloned for callers that don't want to keep `&self`
+    /// borrowed across the resolve walk).
+    pub fn auxc(&self, item_id: u32) -> Option<AuxC> {
+        self.auxc_for(item_id).cloned()
+    }
+
+    /// First `clli` (Content Light Level Information) attached to the
+    /// item. `None` when no `clli` association exists.
+    pub fn clli(&self, item_id: u32) -> Option<Clli> {
+        for p in self.resolve(item_id) {
+            if let ItemProperty::Clli(c) = p {
+                return Some(*c);
+            }
+        }
+        None
+    }
+
+    /// First `mdcv` (Mastering Display Colour Volume) attached to the
+    /// item. `None` when no `mdcv` association exists.
+    pub fn mdcv(&self, item_id: u32) -> Option<Mdcv> {
+        for p in self.resolve(item_id) {
+            if let ItemProperty::Mdcv(m) = p {
+                return Some(*m);
+            }
+        }
+        None
+    }
+
+    /// First `cclv` (Content Colour Volume) attached to the item.
+    /// `None` when no `cclv` association exists.
+    pub fn cclv(&self, item_id: u32) -> Option<Cclv> {
+        for p in self.resolve(item_id) {
+            if let ItemProperty::Cclv(c) = p {
+                return Some(*c);
             }
         }
         None
@@ -569,7 +755,10 @@ fn parse_property_box<R: Read + Seek + ?Sized>(
         t if t == &PIXI => ItemProperty::Pixi(parse_pixi(&body)?),
         t if t == &IROT => ItemProperty::Irot(parse_irot(&body)?),
         t if t == &IMIR => ItemProperty::Imir(parse_imir(&body)?),
-        t if t == &AUXC => ItemProperty::AuxC(parse_auxc(&body)?),
+        t if t == &AUXC => ItemProperty::AuxC(parse_auxc_payload(&body)?),
+        t if t == &CLLI => ItemProperty::Clli(parse_clli_payload(&body)?),
+        t if t == &MDCV => ItemProperty::Mdcv(parse_mdcv_payload(&body)?),
+        t if t == &CCLV => ItemProperty::Cclv(parse_cclv_payload(&body)?),
         _ => ItemProperty::Other {
             fourcc: hdr.fourcc,
             payload: body,
@@ -620,9 +809,25 @@ fn parse_imir(body: &[u8]) -> Result<Imir> {
     })
 }
 
-/// `auxC` payload: 4-byte ver+flags, NUL-terminated UTF-8 aux_type,
-/// optional trailing aux_subtype bytes.
-fn parse_auxc(body: &[u8]) -> Result<AuxC> {
+/// Parse an `auxC` (AuxiliaryTypeProperty) payload.
+///
+/// On-disk shape per HEIF §7.5.1:
+///
+/// ```text
+/// FullBox header              4 bytes (version=0, flags=0)
+/// aux_type                    NUL-terminated UTF-8 URN
+/// aux_subtype                 trailing reserved bytes (often empty)
+/// ```
+///
+/// The `aux_type` URN identifies the auxiliary purpose of the item the
+/// caller's `ipma` row associates this property with — most commonly an
+/// alpha plane (`urn:mpeg:hevc:2015:auxid:1` or
+/// `urn:mpeg:mpegB:cicp:systems:auxiliary:alpha`). See [`AuxC::is_alpha`]
+/// + [`AuxC::is_depth`] for typed dispatch.
+///
+/// Returns `Err(InvalidData)` when the payload is shorter than the
+/// 4-byte FullBox header.
+pub fn parse_auxc_payload(body: &[u8]) -> Result<AuxC> {
     if body.len() < 4 {
         return Err(Error::invalid("MOV: auxC payload < 4 bytes"));
     }
@@ -635,6 +840,203 @@ fn parse_auxc(body: &[u8]) -> Result<AuxC> {
     Ok(AuxC {
         aux_type,
         aux_subtype,
+    })
+}
+
+/// Parse a `clli` (ContentLightLevelInformation) payload.
+///
+/// On-disk shape per ISO/IEC 23008-12 §6.5.x (CTA-861.3 derived):
+///
+/// ```text
+/// max_content_light_level         u16 BE   cd/m²
+/// max_pic_average_light_level     u16 BE   cd/m²
+/// ```
+///
+/// `clli` is a *fixed-size* property body — not a FullBox — so callers
+/// should expect a 4-byte payload. Some authoring tools include a
+/// FullBox version+flags prefix (4 bytes) before the payload; this
+/// helper accepts both shapes by checking the body length.
+///
+/// Returns `Err(InvalidData)` when the body is shorter than 4 bytes
+/// (the bare property), or shorter than 8 bytes when the body is
+/// FullBox-prefixed.
+pub fn parse_clli_payload(body: &[u8]) -> Result<Clli> {
+    let p: &[u8] = match body.len() {
+        4 => body,
+        // FullBox-prefixed shape: 4-byte ver+flags then 4-byte body.
+        8 => &body[4..],
+        _ => {
+            return Err(Error::invalid(format!(
+                "MOV: clli payload must be 4 or 8 bytes, got {}",
+                body.len()
+            )))
+        }
+    };
+    Ok(Clli {
+        max_content_light_level: u16::from_be_bytes([p[0], p[1]]),
+        max_pic_average_light_level: u16::from_be_bytes([p[2], p[3]]),
+    })
+}
+
+/// Parse an `mdcv` (MasteringDisplayColourVolume) payload.
+///
+/// On-disk shape per ISO/IEC 23008-12 §6.5.x (SMPTE ST 2086 derived):
+///
+/// ```text
+/// display_primaries_x[c]   u16 BE   c=0..2 (G, B, R per ST 2086)
+/// display_primaries_y[c]   u16 BE   c=0..2
+/// white_point_x            u16 BE
+/// white_point_y            u16 BE
+/// max_display_luminance    u32 BE   0.0001 cd/m² steps
+/// min_display_luminance    u32 BE   0.0001 cd/m² steps
+/// ```
+///
+/// 24 bytes for the six u16 chromaticities + 4 bytes for the white
+/// point + 8 bytes for the luminance pair = **24 bytes total** for the
+/// chromaticities and luminance section. Wait — the actual on-disk
+/// layout is: 6 × u16 (12 bytes) + 2 × u16 (4 bytes) + 2 × u32 (8 bytes)
+/// = **24 bytes**. Like `clli`, callers may also see a 4-byte FullBox
+/// prefix yielding a 28-byte body.
+///
+/// Returns `Err(InvalidData)` when the body is shorter than 24 bytes
+/// (bare property) or 28 bytes (FullBox-prefixed).
+pub fn parse_mdcv_payload(body: &[u8]) -> Result<Mdcv> {
+    let p: &[u8] = match body.len() {
+        24 => body,
+        28 => &body[4..],
+        _ => {
+            return Err(Error::invalid(format!(
+                "MOV: mdcv payload must be 24 or 28 bytes, got {}",
+                body.len()
+            )))
+        }
+    };
+    let mut display_primaries = [(0u16, 0u16); 3];
+    for c in 0..3 {
+        let x = u16::from_be_bytes([p[c * 2], p[c * 2 + 1]]);
+        let y = u16::from_be_bytes([p[6 + c * 2], p[6 + c * 2 + 1]]);
+        display_primaries[c] = (x, y);
+    }
+    let white_point = (
+        u16::from_be_bytes([p[12], p[13]]),
+        u16::from_be_bytes([p[14], p[15]]),
+    );
+    let max_display_luminance = u32::from_be_bytes([p[16], p[17], p[18], p[19]]);
+    let min_display_luminance = u32::from_be_bytes([p[20], p[21], p[22], p[23]]);
+    Ok(Mdcv {
+        display_primaries,
+        white_point,
+        max_display_luminance,
+        min_display_luminance,
+    })
+}
+
+/// Parse a `cclv` (ContentColourVolume) payload.
+///
+/// On-disk shape per ISO/IEC 23008-12 §6.5.x (HEVC SEI 144 derived):
+///
+/// ```text
+/// FullBox header                                 4 bytes (version, flags)
+/// flags byte                                     1 byte:
+///     bit 7 = ccv_cancel_flag
+///     bit 6 = ccv_persistence_flag
+///     bit 5 = ccv_primaries_present_flag
+///     bit 4 = ccv_min_luminance_value_present_flag
+///     bit 3 = ccv_max_luminance_value_present_flag
+///     bit 2 = ccv_avg_luminance_value_present_flag
+///     bit 1..0 = reserved (zero)
+/// // optionally — skipped when the corresponding *_present bit is 0:
+/// ccv_primaries_x[c]      i32 BE  (c = 0..2; G, B, R)
+/// ccv_primaries_y[c]      i32 BE  (c = 0..2)
+/// ccv_min_luminance_value u32 BE
+/// ccv_max_luminance_value u32 BE
+/// ccv_avg_luminance_value u32 BE
+/// ```
+///
+/// Returns `Err(InvalidData)` when the body is shorter than 5 bytes
+/// (the FullBox + flags) or when the present-flags drive a body length
+/// the input doesn't satisfy.
+pub fn parse_cclv_payload(body: &[u8]) -> Result<Cclv> {
+    if body.len() < 5 {
+        return Err(Error::invalid(
+            "MOV: cclv payload < 5 bytes (FullBox + flags)",
+        ));
+    }
+    // Skip the 4-byte FullBox version+flags header.
+    let p = &body[4..];
+    let flags = p[0];
+    let cancel = (flags & 0x80) != 0;
+    let persist = (flags & 0x40) != 0;
+    let prim_present = (flags & 0x20) != 0;
+    let min_present = (flags & 0x10) != 0;
+    let max_present = (flags & 0x08) != 0;
+    let avg_present = (flags & 0x04) != 0;
+    let mut idx = 1usize;
+    let primaries = if prim_present {
+        if p.len() < idx + 24 {
+            return Err(Error::invalid("MOV: cclv primaries truncated"));
+        }
+        let mut prims = [(0i32, 0i32); 3];
+        for c in 0..3 {
+            let x = i32::from_be_bytes([
+                p[idx + c * 4],
+                p[idx + c * 4 + 1],
+                p[idx + c * 4 + 2],
+                p[idx + c * 4 + 3],
+            ]);
+            let y = i32::from_be_bytes([
+                p[idx + 12 + c * 4],
+                p[idx + 12 + c * 4 + 1],
+                p[idx + 12 + c * 4 + 2],
+                p[idx + 12 + c * 4 + 3],
+            ]);
+            prims[c] = (x, y);
+        }
+        idx += 24;
+        Some(prims)
+    } else {
+        None
+    };
+    let read_u32 =
+        |p: &[u8], i: usize| -> u32 { u32::from_be_bytes([p[i], p[i + 1], p[i + 2], p[i + 3]]) };
+    let min_luminance = if min_present {
+        if p.len() < idx + 4 {
+            return Err(Error::invalid("MOV: cclv min_luminance truncated"));
+        }
+        let v = read_u32(p, idx);
+        idx += 4;
+        Some(v)
+    } else {
+        None
+    };
+    let max_luminance = if max_present {
+        if p.len() < idx + 4 {
+            return Err(Error::invalid("MOV: cclv max_luminance truncated"));
+        }
+        let v = read_u32(p, idx);
+        idx += 4;
+        Some(v)
+    } else {
+        None
+    };
+    let avg_luminance = if avg_present {
+        if p.len() < idx + 4 {
+            return Err(Error::invalid("MOV: cclv avg_luminance truncated"));
+        }
+        let v = read_u32(p, idx);
+        // idx += 4; // not needed; trailing bytes are tolerated.
+        let _ = idx;
+        Some(v)
+    } else {
+        None
+    };
+    Ok(Cclv {
+        cancel_flag: cancel,
+        persistence_flag: persist,
+        primaries,
+        min_luminance,
+        max_luminance,
+        avg_luminance,
     })
 }
 

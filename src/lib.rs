@@ -54,8 +54,9 @@ pub use edit::{Edit, EditList};
 pub use gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, Tcmi, TextHeader};
 pub use header::{BrandClass, Ftyp, Hdlr, Mdhd, Mvhd, Tkhd, TrackRotation};
 pub use iprp::{
-    parse_colr_payload, parse_iprp, AuxC, ColrInfo, Imir, Irot, Ispe, ItemProperties, ItemProperty,
-    ItemPropertyAssociation, Pixi, PixiInfo, PropertyAssociation,
+    parse_auxc_payload, parse_cclv_payload, parse_clli_payload, parse_colr_payload, parse_iprp,
+    parse_mdcv_payload, AuxC, Cclv, Clli, ColrInfo, Imir, Irot, Ispe, ItemProperties, ItemProperty,
+    ItemPropertyAssociation, Mdcv, Pixi, PixiInfo, PropertyAssociation,
 };
 pub use media_meta::{
     channel_mask_for_layout_tag, Chan, ChanDescription, Clap, ColorParameters, ColorParametersKind,

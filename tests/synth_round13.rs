@@ -200,6 +200,7 @@ fn iden_layout_carries_transform_chain_with_iden_irot_and_inner_clap() {
             transform,
             pixi,
             color_profile,
+            alpha_for,
         } => {
             assert_eq!(item_id, 9, "Identity surfaces inner item id");
             assert_eq!(
@@ -212,6 +213,7 @@ fn iden_layout_carries_transform_chain_with_iden_irot_and_inner_clap() {
                 vec![8, 8, 8]
             );
             assert!(color_profile.is_none(), "no colr associated");
+            assert!(alpha_for.is_none(), "no alpha auxiliary linkage");
         }
         other => panic!("expected Identity, got {other:?}"),
     }
@@ -259,6 +261,7 @@ fn bare_hvc1_layout_surfaces_pixi_and_colr_directly() {
             transform,
             pixi,
             color_profile,
+            alpha_for,
         } => {
             assert_eq!(item_id, 1);
             assert!(transform.is_empty(), "no transformative properties");
@@ -277,6 +280,7 @@ fn bare_hvc1_layout_surfaces_pixi_and_colr_directly() {
                 }
                 other => panic!("expected Nclx, got {other:?}"),
             }
+            assert!(alpha_for.is_none(), "primary item is not alpha");
         }
         other => panic!("expected Identity, got {other:?}"),
     }

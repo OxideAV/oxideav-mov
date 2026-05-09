@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 14 — HEIF auxiliary-plane resolver surfacing `alpha_for` on
+  the `Identity` layout, plus typed extraction of HDR mastering
+  metadata (`clli` / `mdcv` / `cclv`) from `iprp`.
+  - `iprp::AuxC::is_alpha()` + `is_depth()` — typed dispatch over the
+    auxC URN string. Recognises both the HEIF `urn:mpeg:hevc:2015:auxid:1`
+    (alpha) / `:auxid:2` (depth) URNs and the codec-agnostic MIAF
+    `urn:mpeg:mpegB:cicp:systems:auxiliary:alpha` / `:depth` URNs.
+  - `iprp::Clli { max_content_light_level, max_pic_average_light_level }`,
+    `iprp::Mdcv { display_primaries: [(u16,u16);3], white_point,
+    max_display_luminance, min_display_luminance }`,
+    `iprp::Cclv { cancel_flag, persistence_flag, primaries,
+    min/max/avg_luminance: Option<u32> }` — typed HDR property structs
+    surfaced on `ItemProperty::Clli` / `Mdcv` / `Cclv` (no longer
+    `ItemProperty::Other` fall-throughs).
+  - `iprp::parse_auxc_payload`, `parse_clli_payload`, `parse_mdcv_payload`,
+    `parse_cclv_payload` — public payload parsers callers can drive
+    directly when they have a raw property body. `parse_clli_payload` /
+    `parse_mdcv_payload` accept both the bare and FullBox-prefixed
+    on-disk forms.
+  - `ItemProperties::auxc(item_id)`, `clli(item_id)`, `mdcv(item_id)`,
+    `cclv(item_id)` — typed accessors that walk the item's `ipma` row
+    and return the first match.
+  - `ImageLayout::Identity { ..., alpha_for: Option<u32> }` — the alpha
+    auxiliary plane's master-image item id, resolved from the auxC
+    URN + `auxl` iref (HEIF §7.5.1, MIAF Annex B). `None` when the
+    item isn't an alpha plane or when no `auxl` iref is present.
+    Shape-breaking field addition on the Identity variant.
+  - 20 new tests (4 auxC alpha-plane resolver scenarios + 4 clli +
+    4 mdcv + 5 cclv + 3 standalone parse_auxc_payload).
+
 - Round 13 — HEIF iden transformative-property cascade composed onto
   the `Identity` layout, HEIF `pixi` channel-bit-depth surfaced on the
   layout plan, and MIAF / brand classification on `MovDemuxer`.
