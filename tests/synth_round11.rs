@@ -436,7 +436,7 @@ fn primary_image_layout_bare_hvc1_returns_identity_with_primary_id() {
     let d = MovDemuxer::open(cur).unwrap();
     let layout = d.primary_image_layout().expect("expected ImageLayout");
     match layout {
-        ImageLayout::Identity { item_id } => assert_eq!(item_id, 1),
+        ImageLayout::Identity { item_id, .. } => assert_eq!(item_id, 1),
         other => panic!("expected ImageLayout::Identity, got {other:?}"),
     }
 }
@@ -462,7 +462,7 @@ fn primary_image_layout_iden_returns_identity_with_inner_target() {
     let d = MovDemuxer::open(cur).unwrap();
     let layout = d.primary_image_layout().expect("expected ImageLayout");
     match layout {
-        ImageLayout::Identity { item_id } => assert_eq!(item_id, 9),
+        ImageLayout::Identity { item_id, .. } => assert_eq!(item_id, 9),
         other => panic!("expected ImageLayout::Identity, got {other:?}"),
     }
 }

@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 13 — HEIF iden transformative-property cascade composed onto
+  the `Identity` layout, HEIF `pixi` channel-bit-depth surfaced on the
+  layout plan, and MIAF / brand classification on `MovDemuxer`.
+  - `derived::TransformOp { Clap(Clap), Irot { steps }, Imir { axis } }`
+    + `derived::TransformChain = Vec<TransformOp>` — ordered chain of
+    HEIF transformative properties (HEIF §6.5 / §6.6.2.1) emitted in
+    spec order (`clap` → `irot` → `imir`).
+  - `ImageLayout::Identity { item_id, transform: TransformChain,
+    pixi: Option<PixiInfo>, color_profile: Option<ColrInfo> }` —
+    extended Identity variant. `transform` composes the iden
+    derivation's transformative properties (when the primary item is
+    an `iden`) with the inner item's own — same-kind in both means
+    the iden's wins (the derivation overrides the inner content's
+    intrinsic transform). `pixi` and `color_profile` carry the inner
+    item's `iprp/ipma`-bound values so callers don't have to re-walk
+    `iprp` themselves. Shape-breaking field addition; the only
+    consumer in this crate is the demuxer's own resolver.
+  - `iprp::PixiInfo { channels: Vec<u8> }` + `PixiInfo::num_channels()`
+    + `From<&Pixi> for PixiInfo` — HEIF-canonical Pixel Information
+    accessor reshape.
+  - `iprp::ItemProperties::pixi(item_id) -> Option<PixiInfo>` and the
+    underlying `pixi_for` borrow accessor.
+  - `header::BrandClass` — strongly-typed enum classifying every brand
+    in the HEIF / MIAF / AVIF / ISO BMFF / MPEG-4 / QTFF registries
+    (29 named variants + an `Other([u8; 4])` fall-through). Methods:
+    `BrandClass::classify(&[u8; 4])`, `BrandClass::fourcc()`,
+    `is_heic_family()`, `is_avif_family()`, `is_miaf_family()` (the
+    last folds `mif1`/`mif2`/`MA1A`/`MA1B` plus the HEIC- and AVIF-
+    family brands per HEIF §10 / AVIF §3).
+  - `Ftyp::brand_class()` walks `major_brand` then `compatible_brands`
+    in declaration order, classifying each.
+  - `Ftyp::is_heic()`, `Ftyp::is_avif()`, `Ftyp::is_miaf()` —
+    convenience predicates around `brand_class()`.
+  - `MovDemuxer::brand_class() / is_heic() / is_avif() / is_miaf()` —
+    same accessors lifted onto the demuxer (returning empty / false
+    when the file has no `ftyp`).
+  - 23 new tests (4 unit `pixi` accessors + 5 `BrandClass` /
+    `Ftyp::is_*` accessors + 6 `derived` iden cascade tests + 7
+    `synth_round13` integration tests + 1 round-11/12 test signature
+    update). Total now 271 (was 248).
+
 - Round 12 — HEIF derivation payloads resolved from `mdat`
   (`construction_method == 0`) and per-tile / per-layer `ispe`
   validation surfaced on the layout plan.

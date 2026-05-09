@@ -52,6 +52,8 @@
 //! payload against the file's own iref topology.
 
 use crate::bmff_meta::{idat_bytes_concat, BmffMeta, ItemDataLocation};
+use crate::iprp::{ColrInfo, ItemProperty, PixiInfo};
+use crate::media_meta::Clap;
 
 #[cfg(feature = "registry")]
 use oxideav_core::{Error, Result};
@@ -427,6 +429,55 @@ pub struct OverlayLayout {
     pub layer_size_warnings: Vec<IspeMismatch>,
 }
 
+/// One transformative-property step in an [`Identity`-layout
+/// `TransformChain`](ImageLayout::Identity).
+///
+/// Per HEIF §6.5 / §6.6.2.1 a derived `iden` item may carry the same
+/// transformative properties (`clap`, `irot`, `imir`) that may apply
+/// to a coded item; our planner walks those associations and composes
+/// them into the inner item's chain so callers don't have to call
+/// [`crate::render_iden`] separately. Spec property order is fixed
+/// (`clap` → `irot` → `imir`); the `TransformChain` carries the ops
+/// in that order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransformOp {
+    /// `clap` — clean-aperture crop (HEIF §6.5.4 / ISO BMFF §12.1.4).
+    Clap(Clap),
+    /// `irot` — 90° CCW rotation steps in [0, 3] (HEIF §6.5.10).
+    Irot { steps: u8 },
+    /// `imir` — mirror; axis 0 = vertical (top↔bottom), axis 1 =
+    /// horizontal (left↔right) (HEIF §6.5.12).
+    Imir { axis: u8 },
+}
+
+impl TransformOp {
+    /// Reshape an [`ItemProperty`] into a [`TransformOp`] when the
+    /// property is one of the three transformative kinds; `None`
+    /// otherwise. Order-preserving when called over a property
+    /// list because every kind maps to its own enum tag.
+    fn from_property(p: &ItemProperty) -> Option<Self> {
+        match p {
+            ItemProperty::Clap(c) => Some(TransformOp::Clap(*c)),
+            ItemProperty::Irot(r) => Some(TransformOp::Irot { steps: r.steps }),
+            ItemProperty::Imir(m) => Some(TransformOp::Imir { axis: m.axis }),
+            _ => None,
+        }
+    }
+}
+
+/// Ordered chain of transformative-property steps to apply on top of
+/// an [`ImageLayout::Identity`] inner item's decoded buffer.
+///
+/// The chain may be empty (no transformative properties) and is
+/// always emitted in HEIF spec order: `clap` first (crop), then
+/// `irot` (rotate), then `imir` (mirror) — see HEIF §6.3 last NOTE.
+/// The chain composes properties from BOTH the iden item and the
+/// inner item: the iden item's properties win when both items declare
+/// the same kind (the iden derivation overrides the inner decoded
+/// content's transform), but the inner item's properties are kept for
+/// any kind the iden item doesn't override.
+pub type TransformChain = Vec<TransformOp>;
+
 /// Resolved composition plan for a HEIF primary image.
 ///
 /// Returned by [`crate::MovDemuxer::primary_image_layout`] when the
@@ -443,9 +494,35 @@ pub struct OverlayLayout {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImageLayout {
     /// Primary item is itself a coded image (`hvc1` / `av01` / `j2k1`
-    /// / etc.) — no derivation, just decode `item_id` and you have
-    /// the picture.
-    Identity { item_id: u32 },
+    /// / etc.) — decode `item_id` and apply the [`Self::Identity`]'s
+    /// `transform` chain to the resulting buffer.
+    ///
+    /// `pixi` and `color_profile` carry the inner item's
+    /// `iprp/ipma`-bound channel-bit-depth and colour-profile so
+    /// callers don't have to re-walk the iprp themselves. Both are
+    /// `None` when the item carries no such association.
+    ///
+    /// `transform` is the composed [`TransformChain`] from the iden
+    /// derivation (when the primary is an `iden`) and the inner
+    /// item's own transformative properties; an empty chain when
+    /// neither side declares any.
+    Identity {
+        /// Item id of the inner coded image (the `iden` `dimg`
+        /// target, or the primary item itself when the primary is
+        /// already a coded image).
+        item_id: u32,
+        /// Composed transformative chain in HEIF spec order
+        /// (`clap` → `irot` → `imir`).
+        transform: TransformChain,
+        /// First `pixi` (channel count + per-channel bit depth)
+        /// associated with the inner item; `None` when absent.
+        pixi: Option<PixiInfo>,
+        /// First `colr` colour profile (HEIF-canonical
+        /// `nclx` / `rICC` / `prof`) associated with the inner item;
+        /// `None` when absent or when the underlying `colr` is the
+        /// QTFF-only `nclc` shape (which HEIF forbids).
+        color_profile: Option<ColrInfo>,
+    },
     /// Primary item is a `grid` derived image. Tile items live in
     /// `layout.tiles` in row-major order; decode each one and blit at
     /// `(x, y)`.
@@ -454,6 +531,109 @@ pub enum ImageLayout {
     /// layer item and composite over the canvas in the order
     /// `layout.layers` lists.
     Overlay(OverlayLayout),
+}
+
+/// Build the transformative-property chain for an item by walking the
+/// item's `iprp/ipma` row in spec order (`clap` → `irot` → `imir`).
+///
+/// The walk preserves the order of the underlying associations within
+/// each kind (only the first `clap` / `irot` / `imir` per item is
+/// honoured per HEIF, but we surface the spec-mandated `clap, irot,
+/// imir` ordering on the output regardless of the input row's
+/// declaration order).
+fn transform_chain_for(meta: &BmffMeta, item_id: u32) -> TransformChain {
+    let props = match meta.properties.as_ref() {
+        Some(p) => p,
+        None => return TransformChain::new(),
+    };
+    let mut clap_op: Option<TransformOp> = None;
+    let mut irot_op: Option<TransformOp> = None;
+    let mut imir_op: Option<TransformOp> = None;
+    for p in props.resolve(item_id) {
+        match TransformOp::from_property(p) {
+            Some(op @ TransformOp::Clap(_)) if clap_op.is_none() => clap_op = Some(op),
+            Some(op @ TransformOp::Irot { .. }) if irot_op.is_none() => irot_op = Some(op),
+            Some(op @ TransformOp::Imir { .. }) if imir_op.is_none() => imir_op = Some(op),
+            _ => {}
+        }
+    }
+    // Spec order: clap, irot, imir.
+    let mut chain = TransformChain::new();
+    if let Some(op) = clap_op {
+        chain.push(op);
+    }
+    if let Some(op) = irot_op {
+        chain.push(op);
+    }
+    if let Some(op) = imir_op {
+        chain.push(op);
+    }
+    chain
+}
+
+/// Compose two transformative chains: `outer` first (typically the
+/// iden derivation), then `inner` (the inner coded item). Same kind
+/// in both means the OUTER op wins (the derivation overrides the
+/// inner content's transform); inner-only ops are appended after the
+/// outer ones, preserving spec order globally.
+///
+/// In practice both chains are already in `clap, irot, imir` order,
+/// so the merge is just a per-kind pick. Spec order on the output is
+/// guaranteed by the same `clap → irot → imir` emission contract as
+/// [`transform_chain_for`].
+fn merge_transform_chains(outer: &TransformChain, inner: &TransformChain) -> TransformChain {
+    let pick = |kind: u8| -> Option<TransformOp> {
+        let want = |op: &TransformOp| {
+            matches!(
+                (kind, op),
+                (0, TransformOp::Clap(_))
+                    | (1, TransformOp::Irot { .. })
+                    | (2, TransformOp::Imir { .. })
+            )
+        };
+        outer
+            .iter()
+            .copied()
+            .find(|op| want(op))
+            .or_else(|| inner.iter().copied().find(|op| want(op)))
+    };
+    let mut out = TransformChain::new();
+    if let Some(op) = pick(0) {
+        out.push(op);
+    }
+    if let Some(op) = pick(1) {
+        out.push(op);
+    }
+    if let Some(op) = pick(2) {
+        out.push(op);
+    }
+    out
+}
+
+/// Build an [`ImageLayout::Identity`] for `inner_item_id`, composing
+/// the (optional) `iden_item_id`'s transformative cascade with the
+/// inner item's own transformative properties + `pixi` + `colr`.
+fn identity_layout_for(
+    meta: &BmffMeta,
+    inner_item_id: u32,
+    iden_item_id: Option<u32>,
+) -> ImageLayout {
+    let inner_chain = transform_chain_for(meta, inner_item_id);
+    let outer_chain = match iden_item_id {
+        Some(id) => transform_chain_for(meta, id),
+        None => TransformChain::new(),
+    };
+    let transform = merge_transform_chains(&outer_chain, &inner_chain);
+    let (pixi, color_profile) = match meta.properties.as_ref() {
+        Some(p) => (p.pixi(inner_item_id), p.color_profile(inner_item_id)),
+        None => (None, None),
+    };
+    ImageLayout::Identity {
+        item_id: inner_item_id,
+        transform,
+        pixi,
+        color_profile,
+    }
 }
 
 /// Build an [`ImageGridLayout`] from an already-resolved `grid`
@@ -726,17 +906,18 @@ pub fn image_layout_for(meta: &BmffMeta, item_id: u32) -> Option<ImageLayout> {
         b"iden" => {
             // Per §6.6.2.1: an iden item has exactly one dimg source;
             // the rendered output is that source with the iden item's
-            // own transformative properties applied.
+            // own transformative properties (clap / irot / imir)
+            // applied on top of the inner item's transform chain.
             let targets = meta.derived_from(item_id);
             targets
                 .first()
-                .map(|id| ImageLayout::Identity { item_id: *id })
+                .map(|inner| identity_layout_for(meta, *inner, Some(item_id)))
         }
         // Any other item_type (hvc1, av01, j2k1, …) is a coded image
         // taken as-is. v0/v1 infe rows have a zero item_type — also
         // surface them as Identity so legacy HEIF authoring lands on
         // the obvious decode-then-show path.
-        _ => Some(ImageLayout::Identity { item_id }),
+        _ => Some(identity_layout_for(meta, item_id, None)),
     }
 }
 
@@ -1231,7 +1412,17 @@ mod tests {
             data_references: Vec::new(),
         };
         match primary_image_layout_for(&meta) {
-            Some(ImageLayout::Identity { item_id }) => assert_eq!(item_id, 9),
+            Some(ImageLayout::Identity {
+                item_id,
+                transform,
+                pixi,
+                color_profile,
+            }) => {
+                assert_eq!(item_id, 9);
+                assert!(transform.is_empty());
+                assert!(pixi.is_none());
+                assert!(color_profile.is_none());
+            }
             other => panic!("expected Identity, got {other:?}"),
         }
     }
@@ -1251,7 +1442,17 @@ mod tests {
             ..Default::default()
         };
         match primary_image_layout_for(&meta) {
-            Some(ImageLayout::Identity { item_id }) => assert_eq!(item_id, 5),
+            Some(ImageLayout::Identity {
+                item_id,
+                transform,
+                pixi,
+                color_profile,
+            }) => {
+                assert_eq!(item_id, 5);
+                assert!(transform.is_empty());
+                assert!(pixi.is_none());
+                assert!(color_profile.is_none());
+            }
             other => panic!("expected Identity, got {other:?}"),
         }
     }
@@ -1478,5 +1679,298 @@ mod tests {
         assert_eq!(plan.layers.len(), 2);
         assert_eq!((plan.layers[0].w, plan.layers[0].h), (0, 0));
         assert_eq!(plan.layer_size_warnings.len(), 2);
+    }
+
+    // ─── round-13: iden TransformChain + pixi/colr on Identity layout ───
+
+    use crate::iprp::{Imir, Irot, Pixi};
+    use crate::media_meta::{ColorParameters, ColorParametersKind};
+
+    /// Build a HEIF meta with an iden item + inner item + iprp carrying
+    /// per-item transformative / pixi / colr associations.
+    fn make_iden_meta_with_props(
+        primary_iden_id: u32,
+        inner_id: u32,
+        iden_props: Vec<ItemProperty>,
+        inner_props: Vec<ItemProperty>,
+    ) -> BmffMeta {
+        // ipco: iden_props first, then inner_props (1-based indices).
+        let mut properties = Vec::new();
+        let iden_count = iden_props.len();
+        properties.extend(iden_props);
+        properties.extend(inner_props);
+        let mut associations = Vec::new();
+        // iden item is associated with properties [1..=iden_count].
+        let iden_assocs: Vec<PropertyAssociation> = (1..=iden_count)
+            .map(|i| PropertyAssociation {
+                index: i as u16,
+                essential: false,
+            })
+            .collect();
+        if !iden_assocs.is_empty() {
+            associations.push(ItemPropertyAssociation {
+                item_id: primary_iden_id,
+                associations: iden_assocs,
+            });
+        }
+        // Inner item is associated with [iden_count+1..total].
+        let inner_assocs: Vec<PropertyAssociation> = ((iden_count + 1)..=properties.len())
+            .map(|i| PropertyAssociation {
+                index: i as u16,
+                essential: false,
+            })
+            .collect();
+        if !inner_assocs.is_empty() {
+            associations.push(ItemPropertyAssociation {
+                item_id: inner_id,
+                associations: inner_assocs,
+            });
+        }
+        BmffMeta {
+            handler_type: *b"pict",
+            primary_item: Some(primary_iden_id),
+            items: vec![
+                ItemInfoEntry {
+                    item_id: primary_iden_id,
+                    item_type: *b"iden",
+                    ..Default::default()
+                },
+                ItemInfoEntry {
+                    item_id: inner_id,
+                    item_type: *b"hvc1",
+                    ..Default::default()
+                },
+            ],
+            locations: Vec::new(),
+            idat: Vec::new(),
+            xml: String::new(),
+            bxml: Vec::new(),
+            references: vec![ItemReference {
+                kind: *b"dimg",
+                from_item_id: primary_iden_id,
+                to_item_ids: vec![inner_id],
+            }],
+            properties: Some(ItemProperties {
+                properties,
+                associations,
+            }),
+            data_references: Vec::new(),
+        }
+    }
+
+    fn sample_clap() -> Clap {
+        Clap {
+            clean_aperture_width_n: 16,
+            clean_aperture_width_d: 1,
+            clean_aperture_height_n: 16,
+            clean_aperture_height_d: 1,
+            horiz_off_n: 0,
+            horiz_off_d: 1,
+            vert_off_n: 0,
+            vert_off_d: 1,
+        }
+    }
+
+    #[test]
+    fn iden_transform_chain_carries_iden_irot_and_inner_clap() {
+        // iden item carries irot{steps=1}; inner item carries a clap.
+        // Per HEIF spec order the chain emits clap first, then irot.
+        let iden_props = vec![ItemProperty::Irot(Irot { steps: 1 })];
+        let inner_props = vec![ItemProperty::Clap(sample_clap())];
+        let meta = make_iden_meta_with_props(7, 9, iden_props, inner_props);
+        match primary_image_layout_for(&meta).expect("iden layout") {
+            ImageLayout::Identity {
+                item_id,
+                transform,
+                pixi,
+                color_profile,
+            } => {
+                assert_eq!(item_id, 9, "Identity surfaces inner item id");
+                assert_eq!(
+                    transform,
+                    vec![
+                        TransformOp::Clap(sample_clap()),
+                        TransformOp::Irot { steps: 1 },
+                    ],
+                    "transform chain in spec order: clap then irot",
+                );
+                assert!(pixi.is_none(), "no pixi associated");
+                assert!(color_profile.is_none(), "no colr associated");
+            }
+            other => panic!("expected Identity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn iden_transform_chain_iden_op_overrides_inner_op_of_same_kind() {
+        // Both iden and inner declare irot. The iden's wins (its
+        // derivation overrides the inner item's intrinsic transform).
+        let iden_props = vec![ItemProperty::Irot(Irot { steps: 2 })];
+        let inner_props = vec![ItemProperty::Irot(Irot { steps: 1 })];
+        let meta = make_iden_meta_with_props(7, 9, iden_props, inner_props);
+        match primary_image_layout_for(&meta).expect("iden layout") {
+            ImageLayout::Identity { transform, .. } => {
+                assert_eq!(transform, vec![TransformOp::Irot { steps: 2 }]);
+            }
+            other => panic!("expected Identity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn iden_transform_chain_emits_full_clap_irot_imir_in_spec_order() {
+        // Inner has clap, iden has irot + imir. Result is in spec order.
+        let iden_props = vec![
+            ItemProperty::Imir(Imir { axis: 1 }),
+            ItemProperty::Irot(Irot { steps: 3 }),
+        ];
+        let inner_props = vec![ItemProperty::Clap(sample_clap())];
+        let meta = make_iden_meta_with_props(7, 9, iden_props, inner_props);
+        match primary_image_layout_for(&meta).expect("iden layout") {
+            ImageLayout::Identity { transform, .. } => {
+                assert_eq!(
+                    transform,
+                    vec![
+                        TransformOp::Clap(sample_clap()),
+                        TransformOp::Irot { steps: 3 },
+                        TransformOp::Imir { axis: 1 },
+                    ],
+                );
+            }
+            other => panic!("expected Identity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn identity_layout_surfaces_pixi_for_inner_item() {
+        // Bare hvc1 primary item with pixi {3, 8, 8, 8}.
+        let mut meta = BmffMeta {
+            handler_type: *b"pict",
+            primary_item: Some(5),
+            items: vec![ItemInfoEntry {
+                item_id: 5,
+                item_type: *b"hvc1",
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        meta.properties = Some(ItemProperties {
+            properties: vec![ItemProperty::Pixi(Pixi {
+                bits_per_channel: vec![8, 8, 8],
+            })],
+            associations: vec![ItemPropertyAssociation {
+                item_id: 5,
+                associations: vec![PropertyAssociation {
+                    index: 1,
+                    essential: false,
+                }],
+            }],
+        });
+        match primary_image_layout_for(&meta).expect("identity layout") {
+            ImageLayout::Identity { item_id, pixi, .. } => {
+                assert_eq!(item_id, 5);
+                let info = pixi.expect("pixi surfaced");
+                assert_eq!(info.channels, vec![8, 8, 8]);
+            }
+            other => panic!("expected Identity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn identity_layout_surfaces_color_profile_for_inner_item() {
+        // Bare av01 primary item with colr nclx (BT.2020 + PQ).
+        let mut meta = BmffMeta {
+            handler_type: *b"pict",
+            primary_item: Some(3),
+            items: vec![ItemInfoEntry {
+                item_id: 3,
+                item_type: *b"av01",
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        meta.properties = Some(ItemProperties {
+            properties: vec![ItemProperty::Colr(ColorParameters {
+                kind: ColorParametersKind::Nclx {
+                    primaries: 9,
+                    transfer: 16,
+                    matrix: 9,
+                    full_range: true,
+                },
+            })],
+            associations: vec![ItemPropertyAssociation {
+                item_id: 3,
+                associations: vec![PropertyAssociation {
+                    index: 1,
+                    essential: false,
+                }],
+            }],
+        });
+        match primary_image_layout_for(&meta).expect("identity layout") {
+            ImageLayout::Identity {
+                item_id,
+                color_profile,
+                ..
+            } => {
+                assert_eq!(item_id, 3);
+                let info = color_profile.expect("colr surfaced");
+                match info {
+                    ColrInfo::Nclx {
+                        primaries,
+                        transfer,
+                        matrix,
+                        full_range,
+                    } => {
+                        assert_eq!(primaries, 9);
+                        assert_eq!(transfer, 16);
+                        assert_eq!(matrix, 9);
+                        assert!(full_range);
+                    }
+                    other => panic!("expected Nclx, got {other:?}"),
+                }
+            }
+            other => panic!("expected Identity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn iden_layout_picks_up_inner_pixi_and_color_profile() {
+        // iden item with no transformative ops; inner item carries
+        // pixi + colr — both must surface on the layout.
+        let iden_props: Vec<ItemProperty> = Vec::new();
+        let inner_props = vec![
+            ItemProperty::Pixi(Pixi {
+                bits_per_channel: vec![10, 10, 10],
+            }),
+            ItemProperty::Colr(ColorParameters {
+                kind: ColorParametersKind::Nclx {
+                    primaries: 1,
+                    transfer: 13,
+                    matrix: 5,
+                    full_range: false,
+                },
+            }),
+        ];
+        let meta = make_iden_meta_with_props(7, 9, iden_props, inner_props);
+        match primary_image_layout_for(&meta).expect("iden layout") {
+            ImageLayout::Identity {
+                item_id,
+                transform,
+                pixi,
+                color_profile,
+            } => {
+                assert_eq!(item_id, 9);
+                assert!(transform.is_empty());
+                assert_eq!(pixi.expect("pixi").channels, vec![10, 10, 10]);
+                assert!(matches!(
+                    color_profile.expect("colr"),
+                    ColrInfo::Nclx {
+                        primaries: 1,
+                        transfer: 13,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected Identity, got {other:?}"),
+        }
     }
 }

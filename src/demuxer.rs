@@ -453,6 +453,44 @@ impl MovDemuxer {
         self.faststart
     }
 
+    /// Classify every brand declared by the file's `ftyp`. Empty when
+    /// the file has no `ftyp` (a malformed-but-tolerated case the
+    /// demuxer accepts because some early QTFF files predate `ftyp`).
+    ///
+    /// Order matches the on-wire order: `major_brand` first, then the
+    /// declared `compatible_brands` in declaration order. Convenience
+    /// helpers ([`Self::is_heic`], [`Self::is_avif`], [`Self::is_miaf`])
+    /// query the same list with the family rules baked in.
+    ///
+    /// See [`crate::BrandClass`] for the brand registry.
+    pub fn brand_class(&self) -> Vec<crate::header::BrandClass> {
+        match &self.ftyp {
+            Some(f) => f.brand_class(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether the file declares any HEIC-family brand (`heic`,
+    /// `heix`, `heim`, `heis`). Convenience wrapper around
+    /// [`crate::Ftyp::is_heic`] that also handles the no-`ftyp` case.
+    pub fn is_heic(&self) -> bool {
+        self.ftyp.as_ref().map(|f| f.is_heic()).unwrap_or(false)
+    }
+
+    /// Whether the file declares any AVIF-family brand (`avif`,
+    /// `avis`, `avio`).
+    pub fn is_avif(&self) -> bool {
+        self.ftyp.as_ref().map(|f| f.is_avif()).unwrap_or(false)
+    }
+
+    /// Whether the file declares any MIAF-family brand: explicit
+    /// `mif1` / `mif2` markers, MIAF Annex A profiles (`MA1A` /
+    /// `MA1B`), or any HEIC- / AVIF-family brand (each entails MIAF
+    /// conformance per HEIF §10 / AVIF §3).
+    pub fn is_miaf(&self) -> bool {
+        self.ftyp.as_ref().map(|f| f.is_miaf()).unwrap_or(false)
+    }
+
     // Stub used by `open()` to validate the container before we
     // recurse with the real ctor; bails if the input is too short
     // to even hold an `ftyp`.
@@ -616,12 +654,15 @@ impl MovDemuxer {
             }
             b"iden" => {
                 let fm = self.file_bmff_meta.as_ref()?;
-                let targets = fm.derived_from(pid);
-                targets
-                    .first()
-                    .map(|id| crate::derived::ImageLayout::Identity { item_id: *id })
+                // Defer to image_layout_for so the iden/inner cascade,
+                // pixi, and color_profile fields are populated
+                // identically to the pure-meta resolver.
+                crate::derived::image_layout_for(fm, pid)
             }
-            _ => Some(crate::derived::ImageLayout::Identity { item_id: pid }),
+            _ => {
+                let fm = self.file_bmff_meta.as_ref()?;
+                crate::derived::image_layout_for(fm, pid)
+            }
         }
     }
 

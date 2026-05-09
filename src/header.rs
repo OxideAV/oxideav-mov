@@ -38,6 +38,215 @@ impl Ftyp {
         const QT: [u8; 4] = *b"qt  ";
         self.major_brand == QT || self.compatible_brands.contains(&QT)
     }
+
+    /// Walk this file-type box's `major_brand` + `compatible_brands`
+    /// and classify each one against the well-known ISO BMFF / HEIF /
+    /// MIAF / AVIF brand registry. Unknown brands are surfaced as
+    /// [`BrandClass::Other`] with the raw 4-byte tag preserved so
+    /// callers can still match on niche / vendor-specific brands.
+    ///
+    /// The order of the returned vector matches the on-wire order:
+    /// `major_brand` first, then `compatible_brands` in declaration
+    /// order. Duplicates (e.g. a brand listed both as major and as
+    /// compatible) are preserved verbatim — readers that want a
+    /// deduplicated set can collect into a `HashSet` themselves.
+    pub fn brand_class(&self) -> Vec<BrandClass> {
+        let mut out = Vec::with_capacity(1 + self.compatible_brands.len());
+        out.push(BrandClass::classify(&self.major_brand));
+        for b in &self.compatible_brands {
+            out.push(BrandClass::classify(b));
+        }
+        out
+    }
+
+    /// Whether this `ftyp` carries any HEIC-family brand (`heic`,
+    /// `heix`, `heim`, or `heis`). Per ISO/IEC 23008-12 §10.
+    pub fn is_heic(&self) -> bool {
+        self.brand_class().iter().any(BrandClass::is_heic_family)
+    }
+
+    /// Whether this `ftyp` carries any AVIF-family brand (`avif`,
+    /// `avis`, `avio`). Per Alliance for Open Media AVIF spec
+    /// (`https://aomediacodec.github.io/av1-avif/`) which delegates
+    /// brand registration to MIAF (ISO/IEC 23000-22).
+    pub fn is_avif(&self) -> bool {
+        self.brand_class().iter().any(BrandClass::is_avif_family)
+    }
+
+    /// Whether this `ftyp` carries any MIAF brand — either the
+    /// generic `mif1` / `mif2` brands (ISO/IEC 23000-22 §7.2) or any
+    /// HEIC / AVIF derivative (which all entail MIAF conformance per
+    /// §10).
+    pub fn is_miaf(&self) -> bool {
+        self.brand_class().iter().any(BrandClass::is_miaf_family)
+    }
+}
+
+/// Classified file-type brand per the ISO BMFF / HEIF / MIAF / AVIF
+/// registries. Used by [`Ftyp::brand_class`] to surface a strongly-
+/// typed view of `ftyp::compatible_brands`.
+///
+/// The variants cover the brands that affect derivative-profile
+/// behaviour in our parsers; everything else is preserved verbatim
+/// in [`Self::Other`].
+///
+/// Spec sources:
+/// - ISO/IEC 14496-12:2015 §8.5 (FileTypeBox / brands).
+/// - ISO/IEC 14496-14 (`mp41`, `mp42`).
+/// - ISO/IEC 23008-12:2017 §10 (HEIF brand registry: `heic`, `heix`,
+///   `heim`, `heis`, `mif1`, `msf1`).
+/// - ISO/IEC 23000-22 (MIAF: `mif1`, `mif2`, `MA1A`, `MA1B`).
+/// - AOM AVIF spec (`avif`, `avis`, `avio`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BrandClass {
+    /// `heic` — HEVC main-profile single-image (HEIF §10.2).
+    Heic,
+    /// `heix` — HEVC extended-profile single-image (HEIF §10.2.1).
+    Heix,
+    /// `heim` — HEVC multiview (HEIF §10.4).
+    Heim,
+    /// `heis` — HEVC scalable (HEIF §10.5).
+    Heis,
+    /// `hevc` — HEVC image sequence (HEIF §10.3).
+    Hevc,
+    /// `hevx` — HEVC extended image sequence (HEIF §10.3).
+    Hevx,
+    /// `avif` — AV1 single-image / collection (AOM AVIF).
+    Avif,
+    /// `avis` — AV1 image sequence (AOM AVIF).
+    Avis,
+    /// `avio` — AV1 sequence override (AOM AVIF).
+    Avio,
+    /// `mif1` — MIAF base (HEIF §10.1; ISO/IEC 23000-22 §7.2).
+    Mif1,
+    /// `mif2` — MIAF v2 base (ISO/IEC 23000-22 §7.2).
+    Mif2,
+    /// `msf1` — HEIF image sequence (HEIF §10.1).
+    Msf1,
+    /// `MA1A` — MIAF Annex A1 profile.
+    Ma1a,
+    /// `MA1B` — MIAF Annex A1 profile (basic).
+    Ma1b,
+    /// `mp41` — MPEG-4 v1 (ISO/IEC 14496-14).
+    Mp41,
+    /// `mp42` — MPEG-4 v2 (ISO/IEC 14496-14).
+    Mp42,
+    /// `isom` — ISO Base Media File Format reference (§8.5.2).
+    Isom,
+    /// `iso2` — ISOBMFF rev 2.
+    Iso2,
+    /// `iso3` — ISOBMFF rev 3.
+    Iso3,
+    /// `iso4` — ISOBMFF rev 4.
+    Iso4,
+    /// `iso5` — ISOBMFF rev 5.
+    Iso5,
+    /// `iso6` — ISOBMFF rev 6.
+    Iso6,
+    /// `iso7` — ISOBMFF rev 7.
+    Iso7,
+    /// `iso8` — ISOBMFF rev 8.
+    Iso8,
+    /// `iso9` — ISOBMFF rev 9.
+    Iso9,
+    /// `qt  ` — Apple QuickTime native brand.
+    Qt,
+    /// Unknown / vendor brand. The raw 4-byte tag is preserved so the
+    /// caller can match on niche brands not modelled natively.
+    Other([u8; 4]),
+}
+
+impl BrandClass {
+    /// Map a raw 4-byte brand tag to a [`BrandClass`].
+    pub fn classify(brand: &[u8; 4]) -> Self {
+        match brand {
+            b"heic" => BrandClass::Heic,
+            b"heix" => BrandClass::Heix,
+            b"heim" => BrandClass::Heim,
+            b"heis" => BrandClass::Heis,
+            b"hevc" => BrandClass::Hevc,
+            b"hevx" => BrandClass::Hevx,
+            b"avif" => BrandClass::Avif,
+            b"avis" => BrandClass::Avis,
+            b"avio" => BrandClass::Avio,
+            b"mif1" => BrandClass::Mif1,
+            b"mif2" => BrandClass::Mif2,
+            b"msf1" => BrandClass::Msf1,
+            b"MA1A" => BrandClass::Ma1a,
+            b"MA1B" => BrandClass::Ma1b,
+            b"mp41" => BrandClass::Mp41,
+            b"mp42" => BrandClass::Mp42,
+            b"isom" => BrandClass::Isom,
+            b"iso2" => BrandClass::Iso2,
+            b"iso3" => BrandClass::Iso3,
+            b"iso4" => BrandClass::Iso4,
+            b"iso5" => BrandClass::Iso5,
+            b"iso6" => BrandClass::Iso6,
+            b"iso7" => BrandClass::Iso7,
+            b"iso8" => BrandClass::Iso8,
+            b"iso9" => BrandClass::Iso9,
+            b"qt  " => BrandClass::Qt,
+            other => BrandClass::Other(*other),
+        }
+    }
+
+    /// 4-byte FourCC of the underlying brand tag.
+    pub fn fourcc(&self) -> [u8; 4] {
+        match self {
+            BrandClass::Heic => *b"heic",
+            BrandClass::Heix => *b"heix",
+            BrandClass::Heim => *b"heim",
+            BrandClass::Heis => *b"heis",
+            BrandClass::Hevc => *b"hevc",
+            BrandClass::Hevx => *b"hevx",
+            BrandClass::Avif => *b"avif",
+            BrandClass::Avis => *b"avis",
+            BrandClass::Avio => *b"avio",
+            BrandClass::Mif1 => *b"mif1",
+            BrandClass::Mif2 => *b"mif2",
+            BrandClass::Msf1 => *b"msf1",
+            BrandClass::Ma1a => *b"MA1A",
+            BrandClass::Ma1b => *b"MA1B",
+            BrandClass::Mp41 => *b"mp41",
+            BrandClass::Mp42 => *b"mp42",
+            BrandClass::Isom => *b"isom",
+            BrandClass::Iso2 => *b"iso2",
+            BrandClass::Iso3 => *b"iso3",
+            BrandClass::Iso4 => *b"iso4",
+            BrandClass::Iso5 => *b"iso5",
+            BrandClass::Iso6 => *b"iso6",
+            BrandClass::Iso7 => *b"iso7",
+            BrandClass::Iso8 => *b"iso8",
+            BrandClass::Iso9 => *b"iso9",
+            BrandClass::Qt => *b"qt  ",
+            BrandClass::Other(b) => *b,
+        }
+    }
+
+    /// True for any `heic` / `heix` / `heim` / `heis` brand.
+    pub fn is_heic_family(&self) -> bool {
+        matches!(
+            self,
+            BrandClass::Heic | BrandClass::Heix | BrandClass::Heim | BrandClass::Heis
+        )
+    }
+
+    /// True for any `avif` / `avis` / `avio` brand.
+    pub fn is_avif_family(&self) -> bool {
+        matches!(self, BrandClass::Avif | BrandClass::Avis | BrandClass::Avio)
+    }
+
+    /// True for any MIAF-family brand: the explicit `mif1` / `mif2`
+    /// markers, the MIAF Annex A profiles (`MA1A` / `MA1B`), and any
+    /// HEIC- or AVIF-family brand (each of which entails MIAF
+    /// conformance per HEIF §10 / AVIF §3).
+    pub fn is_miaf_family(&self) -> bool {
+        matches!(
+            self,
+            BrandClass::Mif1 | BrandClass::Mif2 | BrandClass::Ma1a | BrandClass::Ma1b
+        ) || self.is_heic_family()
+            || self.is_avif_family()
+    }
 }
 
 /// Parse an `ftyp` payload.
@@ -667,5 +876,80 @@ mod tests {
         let h = parse_hdlr(&p).unwrap();
         assert!(h.is_video());
         assert!(!h.is_audio());
+    }
+
+    fn ftyp_with(major: &[u8; 4], compat: &[&[u8; 4]]) -> Ftyp {
+        Ftyp {
+            major_brand: *major,
+            minor_version: 0,
+            compatible_brands: compat.iter().map(|b| **b).collect(),
+        }
+    }
+
+    #[test]
+    fn brand_class_classifies_known_tags_and_preserves_unknown() {
+        assert_eq!(BrandClass::classify(b"heic"), BrandClass::Heic);
+        assert_eq!(BrandClass::classify(b"heix"), BrandClass::Heix);
+        assert_eq!(BrandClass::classify(b"avif"), BrandClass::Avif);
+        assert_eq!(BrandClass::classify(b"mif1"), BrandClass::Mif1);
+        assert_eq!(BrandClass::classify(b"MA1B"), BrandClass::Ma1b);
+        assert_eq!(BrandClass::classify(b"qt  "), BrandClass::Qt);
+        // Unknown vendor tag preserves its bytes verbatim.
+        match BrandClass::classify(b"vNDR") {
+            BrandClass::Other(b) => assert_eq!(b, *b"vNDR"),
+            other => panic!("expected Other(vNDR), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn brand_class_fourcc_round_trips() {
+        for tag in [
+            b"heic", b"heix", b"heim", b"heis", b"avif", b"mif1", b"qt  ",
+        ] {
+            assert_eq!(BrandClass::classify(tag).fourcc(), *tag);
+        }
+        assert_eq!(BrandClass::Other(*b"vNDR").fourcc(), *b"vNDR");
+    }
+
+    #[test]
+    fn ftyp_brand_class_walks_major_then_compatible() {
+        let f = ftyp_with(b"heic", &[b"mif1"]);
+        let classes = f.brand_class();
+        assert_eq!(classes, vec![BrandClass::Heic, BrandClass::Mif1]);
+    }
+
+    #[test]
+    fn ftyp_is_heic_detects_major_or_compatible_heic() {
+        // major=heic alone
+        assert!(ftyp_with(b"heic", &[]).is_heic());
+        // compatible carries heix
+        assert!(ftyp_with(b"mif1", &[b"heix"]).is_heic());
+        // mif1 alone is not heic
+        assert!(!ftyp_with(b"mif1", &[b"isom"]).is_heic());
+        // qt isn't heic
+        assert!(!ftyp_with(b"qt  ", &[b"qt  "]).is_heic());
+    }
+
+    #[test]
+    fn ftyp_is_avif_detects_avif_brand_family() {
+        assert!(ftyp_with(b"avif", &[b"mif1"]).is_avif());
+        assert!(ftyp_with(b"mif1", &[b"avis"]).is_avif());
+        assert!(!ftyp_with(b"heic", &[b"mif1"]).is_avif());
+    }
+
+    #[test]
+    fn ftyp_is_miaf_recognises_explicit_and_derivative_brands() {
+        // Explicit mif1.
+        assert!(ftyp_with(b"mif1", &[]).is_miaf());
+        // HEIC entails MIAF per HEIF §10.
+        assert!(ftyp_with(b"heic", &[]).is_miaf());
+        // AVIF entails MIAF per AVIF §3.
+        assert!(ftyp_with(b"avif", &[]).is_miaf());
+        // MA1A profile.
+        assert!(ftyp_with(b"MA1A", &[]).is_miaf());
+        // Plain isom is NOT MIAF.
+        assert!(!ftyp_with(b"isom", &[b"mp42"]).is_miaf());
+        // QT alone is not MIAF.
+        assert!(!ftyp_with(b"qt  ", &[]).is_miaf());
     }
 }

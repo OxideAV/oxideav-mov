@@ -71,6 +71,40 @@ pub struct Pixi {
     pub bits_per_channel: Vec<u8>,
 }
 
+/// HEIF-canonical Pixel Information accessor (`pixi` per
+/// ISO/IEC 23008-12 §6.5.6.3).
+///
+/// `channels[i]` is the bit depth of channel `i`; `channels.len()` is
+/// the channel count (the on-disk `num_channels` field). Common shapes:
+///
+/// * `[8, 8, 8]` — 8-bit sRGB.
+/// * `[8, 8, 8, 8]` — 8-bit RGBA.
+/// * `[10, 10, 10]` — 10-bit HDR.
+/// * `[8]` — single-channel monochrome / alpha mask.
+///
+/// Reshape of [`Pixi`] surfaced on layout plans so callers don't have
+/// to walk `iprp` themselves.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PixiInfo {
+    /// Per-channel bit depth, in channel order.
+    pub channels: Vec<u8>,
+}
+
+impl PixiInfo {
+    /// Number of channels declared by the property (== `channels.len()`).
+    pub fn num_channels(&self) -> usize {
+        self.channels.len()
+    }
+}
+
+impl From<&Pixi> for PixiInfo {
+    fn from(p: &Pixi) -> Self {
+        PixiInfo {
+            channels: p.bits_per_channel.clone(),
+        }
+    }
+}
+
 /// `irot` — ImageRotation (HEIF §6.5.10). 90° counter-clockwise
 /// rotation steps; valid values 0..=3.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -230,6 +264,27 @@ impl ItemProperties {
     pub fn color_profile(&self, item_id: u32) -> Option<ColrInfo> {
         let cp = self.colr_for(item_id)?;
         ColrInfo::from_color_parameters(cp)
+    }
+
+    /// First `pixi` (pixel-information) attached to the item.
+    pub fn pixi_for(&self, item_id: u32) -> Option<&Pixi> {
+        for p in self.resolve(item_id) {
+            if let ItemProperty::Pixi(x) = p {
+                return Some(x);
+            }
+        }
+        None
+    }
+
+    /// HEIF pixel-information accessor: returns the first [`PixiInfo`]
+    /// (channel count + per-channel bit depth) attached to `item_id`.
+    ///
+    /// Per ISO/IEC 23008-12 §6.5.6.3 a HEIF item with pixel data SHOULD
+    /// carry a `pixi` association declaring its channel count and the
+    /// bit depth of each channel. Returns `None` when no `pixi` is
+    /// associated. Companion to [`Self::color_profile`].
+    pub fn pixi(&self, item_id: u32) -> Option<PixiInfo> {
+        self.pixi_for(item_id).map(PixiInfo::from)
     }
 
     /// First `auxC` attached to the item.
@@ -1082,6 +1137,43 @@ mod tests {
             }
             other => panic!("expected UnrestrictedIcc, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pixi_accessor_returns_channel_bit_depths() {
+        // sRGB-shaped pixi: 3 channels × 8 bits.
+        let ipco = build_ipco(&[(b"pixi", &pixi_body(&[8, 8, 8]))]);
+        let ipma = build_ipma_v0(&[(7, &[(1, true)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        let info = p.pixi(7).expect("pixi associated");
+        assert_eq!(info.num_channels(), 3);
+        assert_eq!(info.channels, vec![8, 8, 8]);
+    }
+
+    #[test]
+    fn pixi_accessor_returns_rgba_4_channels() {
+        let ipco = build_ipco(&[(b"pixi", &pixi_body(&[8, 8, 8, 8]))]);
+        let ipma = build_ipma_v0(&[(1, &[(1, false)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        let info = p.pixi(1).expect("rgba pixi associated");
+        assert_eq!(info.channels, vec![8, 8, 8, 8]);
+    }
+
+    #[test]
+    fn pixi_accessor_returns_hdr_10bit_channels() {
+        let ipco = build_ipco(&[(b"pixi", &pixi_body(&[10, 10, 10]))]);
+        let ipma = build_ipma_v0(&[(2, &[(1, false)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        let info = p.pixi(2).expect("hdr pixi associated");
+        assert_eq!(info.channels, vec![10, 10, 10]);
+    }
+
+    #[test]
+    fn pixi_accessor_returns_none_when_unassociated() {
+        let ipco = build_ipco(&[(b"ispe", &ispe_body(2, 2))]);
+        let ipma = build_ipma_v0(&[(1, &[(1, false)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        assert!(p.pixi(1).is_none());
     }
 
     #[test]
