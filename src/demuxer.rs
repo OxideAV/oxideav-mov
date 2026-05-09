@@ -613,8 +613,10 @@ impl MovDemuxer {
     }
 
     /// Same as [`Self::primary_image_layout`] but also resolves
-    /// `construction_method == 0` (mdat-resident) `grid` / `iovl`
-    /// derivation payloads by reading the file extents from the input.
+    /// `construction_method == 0` (mdat-resident) **and**
+    /// `construction_method == 2` (item-resident, sub-slice of another
+    /// item) `grid` / `iovl` derivation payloads by reading the file
+    /// extents from the input.
     ///
     /// HEIF derived-image payloads are tiny fixed records (8 / 12
     /// bytes for `grid`, 12+ bytes for `iovl`); authoring tools
@@ -626,11 +628,14 @@ impl MovDemuxer {
     /// version takes `&mut self` so it can issue the seek+read for
     /// the file extents.
     ///
+    /// `construction_method == 2` (item_offset) is also resolved here
+    /// — the underlying read transparently sub-slices another item's
+    /// resolved bytes via [`Self::resolve_item_bytes`], so an
+    /// HEIF-grid primary whose payload lives at an offset inside
+    /// another item lands a `Grid` plan as expected.
+    ///
     /// Returns `None` for the same not-a-HEIF-file reasons as
-    /// [`Self::primary_image_layout`] AND on a clean
-    /// `construction_method == 2` (item_offset) primary item, which
-    /// requires resolving an indirection through another item — a
-    /// shape we leave to the caller's own resolver.
+    /// [`Self::primary_image_layout`].
     pub fn primary_image_layout_with_input(&mut self) -> Option<crate::derived::ImageLayout> {
         let pid = self.file_bmff_meta.as_ref()?.primary_item?;
         let info = self.file_bmff_meta.as_ref()?.find_item(pid)?;

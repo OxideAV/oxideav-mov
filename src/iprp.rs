@@ -58,6 +58,7 @@ pub const CLLI: [u8; 4] = fourcc("clli");
 pub const MDCV: [u8; 4] = fourcc("mdcv");
 pub const CCLV: [u8; 4] = fourcc("cclv");
 pub const AMVE: [u8; 4] = fourcc("amve");
+pub const LSEL: [u8; 4] = fourcc("lsel");
 
 /// `ispe` — ImageSpatialExtentsProperty (HEIF §6.5.3.1). Carries the
 /// pixel extent of the *encoded* picture (the consumer-visible size
@@ -304,12 +305,36 @@ pub struct Amve {
     pub ambient_light_y: u16,
 }
 
+/// `lsel` — LayerSelectorProperty (HEIF / ISO/IEC 23008-12 §6.5.11).
+/// Carries a single `layer_id` selecting one layer from a multi-layer
+/// coded image (e.g. an SHVC / MV-HEVC base+enhancement stream); the
+/// associated item is the *output* frame the selector picks out of the
+/// underlying multi-layer item. Callers walking a HEIF item that uses
+/// scalable coding consult `lsel` to decide which decoded layer to
+/// hand to the renderer.
+///
+/// On-disk shape per §6.5.11:
+///
+/// ```text
+/// layer_id    u16 BE       (no FullBox header in the spec)
+/// ```
+///
+/// Some authoring tools wrap the payload in a 4-byte FullBox prefix
+/// (yielding a 6-byte body); [`parse_lsel_payload`] accepts both
+/// shapes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LayerSelector {
+    /// Layer index the property selects from the associated multi-layer
+    /// coded item (0-based per HEIF §6.5.11).
+    pub layer_id: u16,
+}
+
 /// One property entry inside `ipco`.
 ///
 /// `Other` is a fall-through for any box type we don't model
-/// natively (typical example: `hvcC`, `av1C`, `lsel`). Callers can
-/// still match on its fourcc and parse the raw payload themselves —
-/// for instance, `hvcC` is parsed by
+/// natively (typical example: `hvcC`, `av1C`). Callers can still
+/// match on its fourcc and parse the raw payload themselves — for
+/// instance, `hvcC` is parsed by
 /// `oxideav-h265::HEVCDecoderConfigurationRecord` rather than by us.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ItemProperty {
@@ -325,6 +350,7 @@ pub enum ItemProperty {
     Mdcv(Mdcv),
     Cclv(Cclv),
     Amve(Amve),
+    Lsel(LayerSelector),
     Other { fourcc: [u8; 4], payload: Vec<u8> },
 }
 
@@ -344,6 +370,7 @@ impl ItemProperty {
             ItemProperty::Mdcv(_) => MDCV,
             ItemProperty::Cclv(_) => CCLV,
             ItemProperty::Amve(_) => AMVE,
+            ItemProperty::Lsel(_) => LSEL,
             ItemProperty::Other { fourcc, .. } => *fourcc,
         }
     }
@@ -523,6 +550,19 @@ impl ItemProperties {
         for p in self.resolve(item_id) {
             if let ItemProperty::Amve(a) = p {
                 return Some(*a);
+            }
+        }
+        None
+    }
+
+    /// First `lsel` (Layer Selector) attached to the item, identifying
+    /// which layer of an associated multi-layer coded item is the
+    /// output frame for the layout. `None` when no `lsel` association
+    /// exists (the typical single-layer image case).
+    pub fn lsel(&self, item_id: u32) -> Option<LayerSelector> {
+        for p in self.resolve(item_id) {
+            if let ItemProperty::Lsel(l) = p {
+                return Some(*l);
             }
         }
         None
@@ -805,6 +845,7 @@ fn parse_property_box<R: Read + Seek + ?Sized>(
         t if t == &MDCV => ItemProperty::Mdcv(parse_mdcv_payload(&body)?),
         t if t == &CCLV => ItemProperty::Cclv(parse_cclv_payload(&body)?),
         t if t == &AMVE => ItemProperty::Amve(parse_amve_payload(&body)?),
+        t if t == &LSEL => ItemProperty::Lsel(parse_lsel_payload(&body)?),
         _ => ItemProperty::Other {
             fourcc: hdr.fourcc,
             payload: body,
@@ -1120,6 +1161,37 @@ pub fn parse_amve_payload(body: &[u8]) -> Result<Amve> {
         ambient_illuminance: u32::from_be_bytes([p[0], p[1], p[2], p[3]]),
         ambient_light_x: u16::from_be_bytes([p[4], p[5]]),
         ambient_light_y: u16::from_be_bytes([p[6], p[7]]),
+    })
+}
+
+/// Parse an `lsel` (LayerSelector) payload.
+///
+/// On-disk shape per ISO/IEC 23008-12 §6.5.11:
+///
+/// ```text
+/// layer_id    u16 BE
+/// ```
+///
+/// `lsel` is **not** a FullBox in the spec — its body is a bare
+/// 2-byte big-endian `layer_id`. Some authoring tools nonetheless
+/// emit a 4-byte FullBox version+flags prefix; this helper accepts
+/// both shapes (2-byte bare body or 6-byte FullBox-prefixed body).
+///
+/// Returns `Err(InvalidData)` when the body is anything other than
+/// 2 or 6 bytes.
+pub fn parse_lsel_payload(body: &[u8]) -> Result<LayerSelector> {
+    let p: &[u8] = match body.len() {
+        2 => body,
+        6 => &body[4..],
+        _ => {
+            return Err(Error::invalid(format!(
+                "MOV: lsel payload must be 2 or 6 bytes, got {}",
+                body.len()
+            )))
+        }
+    };
+    Ok(LayerSelector {
+        layer_id: u16::from_be_bytes([p[0], p[1]]),
     })
 }
 
@@ -1725,5 +1797,68 @@ mod tests {
         assert_eq!(info.ambient_illuminance, 314_150_000);
         assert_eq!(info.ambient_light_x, 15635);
         assert_eq!(info.ambient_light_y, 16450);
+    }
+
+    // ─── round-17: lsel (LayerSelector) typed extraction ───
+
+    #[test]
+    fn parse_lsel_payload_accepts_bare_2_byte_layer_id() {
+        // Bare on-disk shape per HEIF §6.5.11: a single u16 BE.
+        let p = 7u16.to_be_bytes();
+        let lsel = parse_lsel_payload(&p).unwrap();
+        assert_eq!(lsel.layer_id, 7);
+    }
+
+    #[test]
+    fn parse_lsel_payload_accepts_fullbox_prefixed_6_byte_form() {
+        // Some authoring tools emit a 4-byte FullBox version+flags
+        // prefix; the parser must accept both shapes.
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+        p.extend_from_slice(&42u16.to_be_bytes());
+        let lsel = parse_lsel_payload(&p).unwrap();
+        assert_eq!(lsel.layer_id, 42);
+    }
+
+    #[test]
+    fn parse_lsel_payload_rejects_wrong_size() {
+        assert!(parse_lsel_payload(&[0u8; 1]).is_err());
+        assert!(parse_lsel_payload(&[0u8; 3]).is_err());
+        assert!(parse_lsel_payload(&[0u8; 5]).is_err());
+        assert!(parse_lsel_payload(&[0u8; 7]).is_err());
+    }
+
+    #[test]
+    fn iprp_lsel_accessor_returns_typed_struct_for_associated_item() {
+        // Build an iprp with one ispe + one lsel; ipma associates both
+        // with item 1; the lsel accessor surfaces the parsed layer_id.
+        let lsel_body = 2u16.to_be_bytes();
+        let ipco = build_ipco(&[(b"ispe", &ispe_body(64, 64)), (b"lsel", &lsel_body)]);
+        let ipma = build_ipma_v0(&[(1, &[(1, false), (2, false)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        let info = p.lsel(1).expect("lsel surfaced");
+        assert_eq!(info.layer_id, 2);
+    }
+
+    #[test]
+    fn iprp_lsel_property_is_typed_not_other_fallthrough() {
+        // Before round 17 lsel was caught by the `Other` fall-through;
+        // make sure it now lands on its own typed variant.
+        let lsel_body = 5u16.to_be_bytes();
+        let ipco = build_ipco(&[(b"lsel", &lsel_body)]);
+        let ipma = build_ipma_v0(&[(1, &[(1, false)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        match &p.properties[0] {
+            ItemProperty::Lsel(l) => assert_eq!(l.layer_id, 5),
+            other => panic!("expected Lsel typed variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn iprp_lsel_accessor_returns_none_when_no_lsel_associated() {
+        let ipco = build_ipco(&[(b"ispe", &ispe_body(2, 2))]);
+        let ipma = build_ipma_v0(&[(1, &[(1, false)])]);
+        let p = run_parse(&build_iprp(&ipco, &ipma));
+        assert!(p.lsel(1).is_none());
     }
 }

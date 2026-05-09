@@ -54,6 +54,12 @@ pub const IPRO: [u8; 4] = fourcc("ipro");
 pub const DINF: [u8; 4] = fourcc("dinf");
 pub const DREF: [u8; 4] = fourcc("dref");
 
+// FourCCs inside `ipro/sinf` (§8.12).
+pub const SINF: [u8; 4] = fourcc("sinf");
+pub const FRMA: [u8; 4] = fourcc("frma");
+pub const SCHM: [u8; 4] = fourcc("schm");
+pub const SCHI: [u8; 4] = fourcc("schi");
+
 /// One extent inside an [`ItemLocation`]. Items may be split across
 /// multiple extents; the resource is the concatenation of every
 /// extent's data.
@@ -153,6 +159,78 @@ pub enum ItemReferenceType {
     },
 }
 
+/// One protection-scheme entry inside the `ipro` Item Protection Box
+/// (ISO/IEC 14496-12 §8.11.5 + §8.12). Each entry is a parsed
+/// `ProtectionSchemeInfoBox` (`sinf`) carrying the `SchemeTypeBox`
+/// (`schm`) fields plus the raw `SchemeInformationBox` (`schi`)
+/// payload.
+///
+/// `scheme_type` and `scheme_version` come from the `schm` box;
+/// `scheme_uri` is `Some(s)` only when `schm`'s `flags & 0x000001`
+/// bit is set (the spec gates the URI on that flag).
+/// `raw_payload` is the full `sinf` body verbatim — callers that want
+/// to dispatch on the actual DRM scheme (e.g. `cenc` parsers) consume
+/// this directly. We deliberately don't parse scheme-specific
+/// sub-boxes here: the catalogue is broad and downstream-driven, and
+/// leaving the bytes verbatim avoids lossy re-encoding.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProtectionScheme {
+    /// 4-byte `scheme_type` from the `schm` box (e.g. `b"cenc"`,
+    /// `b"cbc1"`, `b"cens"`, `b"cbcs"` for Common Encryption variants).
+    /// Zeroed when the `sinf` carries no `schm` child.
+    pub scheme_type: [u8; 4],
+    /// `scheme_version` from the `schm` box (typically `0x00010000`
+    /// for v1.0). Zeroed when the `sinf` carries no `schm` child.
+    pub scheme_version: u32,
+    /// `scheme_uri` from the `schm` box when its `flags & 0x000001`
+    /// bit is set; `None` otherwise (the `schm` URI field is gated
+    /// on that flag per ISO/IEC 14496-12 §8.12.6.2).
+    pub scheme_uri: Option<String>,
+    /// Original media-format FourCC from the `frma` (Original Format
+    /// Box) child of `sinf`; `[0;4]` when no `frma` is present. For a
+    /// CENC-protected video item this typically holds the unencrypted
+    /// codec FourCC (e.g. `b"hvc1"`, `b"avc1"`).
+    pub original_format: [u8; 4],
+    /// Raw `sinf` body bytes (every child of the `sinf` container,
+    /// concatenated as on disk). Surfaced verbatim so DRM-specific
+    /// callers can re-walk the structure without losing fidelity.
+    pub raw_payload: Vec<u8>,
+}
+
+/// Parsed `ipro` Item Protection Box surface (ISO/IEC 14496-12
+/// §8.11.5). `ipro` is a FullBox container of `protection_count`
+/// `ProtectionSchemeInfoBox` (`sinf`) children; each describes one
+/// protection scheme keyed by an item-protection index that the
+/// `infe.item_protection_index` field references.
+///
+/// Index semantics: a non-zero `item_protection_index` on an `infe`
+/// row is a **1-based** offset into [`Self::schemes`] identifying
+/// which scheme protects that item. Index `0` means "unprotected"
+/// (the spec's well-known sentinel; see §8.11.6.3). Use
+/// [`Self::scheme_for_item_index`] to do the index translation
+/// safely.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ItemProtection {
+    /// One entry per `sinf` child of the `ipro` box, in declaration
+    /// order. The 1-based `item_protection_index` field on `infe`
+    /// rows is a 1-based offset into this list (with `0` meaning
+    /// "unprotected").
+    pub schemes: Vec<ProtectionScheme>,
+}
+
+impl ItemProtection {
+    /// Resolve a 1-based `item_protection_index` (the
+    /// `infe.item_protection_index` field) against the parsed scheme
+    /// list. Returns `None` for index `0` (unprotected — the
+    /// well-known sentinel) and for any out-of-range value.
+    pub fn scheme_for_item_index(&self, index: u16) -> Option<&ProtectionScheme> {
+        if index == 0 {
+            return None;
+        }
+        self.schemes.get((index - 1) as usize)
+    }
+}
+
 /// Parsed ISO BMFF §8.11 `meta` box surface. All fields are optional;
 /// a HEIF still-image file typically has `handler_type = "pict"`,
 /// non-empty `iinf` + `iloc`, a single-entry `pitm`, and no `xml` /
@@ -188,6 +266,12 @@ pub struct BmffMeta {
     /// containing file or an external file referenced by `url ` /
     /// `urn ` / `alis`). Empty when the meta box has no `dinf`.
     pub data_references: Vec<DataReference>,
+    /// `ipro` Item Protection Box (ISO/IEC 14496-12 §8.11.5); `None`
+    /// when the meta box carries no `ipro`. The typical case for
+    /// HEIF / AVIF stills is `None` (unprotected); MIAF DRM-stamped
+    /// fixtures and ISMACryp / Common-Encryption-protected files
+    /// surface the parsed scheme list here.
+    pub item_protection: Option<ItemProtection>,
 }
 
 impl BmffMeta {
@@ -341,6 +425,15 @@ impl BmffMeta {
         let loc = self.find_location(item_id)?;
         Some(self.data_location(loc.data_reference_index))
     }
+
+    /// Borrow the parsed `ipro` Item Protection Box; `None` when the
+    /// `meta` box carries no `ipro` (the typical case for unprotected
+    /// HEIF / AVIF stills). When present, callers can resolve an
+    /// `infe.item_protection_index` against
+    /// [`ItemProtection::scheme_for_item_index`].
+    pub fn item_protection(&self) -> Option<&ItemProtection> {
+        self.item_protection.as_ref()
+    }
 }
 
 /// Resolved meta-scope data-reference target for an [`ItemLocation`].
@@ -450,6 +543,10 @@ pub fn parse_bmff_meta<R: Read + Seek + ?Sized>(
             }
             t if t == &DINF => {
                 out.data_references = parse_meta_dinf(r, child)?;
+                found_iso_marker = true;
+            }
+            t if t == &IPRO => {
+                out.item_protection = Some(parse_ipro(r, child)?);
                 found_iso_marker = true;
             }
             _ => {}
@@ -889,6 +986,107 @@ fn parse_meta_dinf<R: Read + Seek + ?Sized>(
         Ok(())
     })?;
     Ok(out)
+}
+
+/// Parse an `ipro` Item Protection Box (ISO/IEC 14496-12 §8.11.5).
+///
+/// `ipro` is a FullBox whose payload starts with a u16
+/// `protection_count`, followed by exactly that many
+/// `ProtectionSchemeInfoBox` (`sinf`) children. We surface every
+/// `sinf` as a [`ProtectionScheme`] preserving the raw `sinf` body
+/// in [`ProtectionScheme::raw_payload`].
+///
+/// Per §8.12 the `sinf` container typically carries:
+///
+/// * `frma` (OriginalFormatBox) — the original media-format FourCC
+///   the item would carry if the protection were stripped.
+/// * `schm` (SchemeTypeBox, FullBox) — the protection-scheme type
+///   FourCC + version + (when `flags & 0x000001`) URI.
+/// * `schi` (SchemeInformationBox) — scheme-specific opaque payload
+///   that scheme-aware callers parse themselves.
+///
+/// Unknown or malformed children are tolerated (we surface them via
+/// `raw_payload`); a missing `schm` leaves `scheme_type` /
+/// `scheme_version` zeroed and `scheme_uri` `None`.
+fn parse_ipro<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<ItemProtection> {
+    let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
+    r.seek(SeekFrom::Start(hdr.payload_offset))?;
+    // FullBox version+flags (4 bytes) then u16 protection_count.
+    let mut head = [0u8; 6];
+    let pos_now = r.stream_position()?;
+    let remain = body_end.saturating_sub(pos_now);
+    if remain < 6 {
+        // Empty / malformed ipro — surface an empty list rather than
+        // failing the whole parse.
+        return Ok(ItemProtection::default());
+    }
+    r.read_exact(&mut head)?;
+    let protection_count = u16::from_be_bytes([head[4], head[5]]) as usize;
+
+    let mut schemes = Vec::with_capacity(protection_count.min(64));
+    walk_children(r, Some(body_end), |r, child| {
+        if child.fourcc != SINF {
+            return Ok(());
+        }
+        let sinf_body = read_payload(r, child)?;
+        schemes.push(parse_sinf(&sinf_body)?);
+        Ok(())
+    })?;
+
+    Ok(ItemProtection { schemes })
+}
+
+/// Parse a `sinf` (`ProtectionSchemeInfoBox`) body into a
+/// [`ProtectionScheme`]. The body is the concatenation of a `frma`
+/// (optional), a `schm` (optional), and a `schi` (optional) child;
+/// anything we don't recognise is preserved by `raw_payload` (the
+/// caller's verbatim copy) so downstream DRM-aware code can re-walk
+/// the structure.
+fn parse_sinf(body: &[u8]) -> Result<ProtectionScheme> {
+    let mut scheme = ProtectionScheme {
+        raw_payload: body.to_vec(),
+        ..Default::default()
+    };
+    let mut p = 0usize;
+    while p + 8 <= body.len() {
+        let size = u32::from_be_bytes([body[p], body[p + 1], body[p + 2], body[p + 3]]) as usize;
+        let fc = [body[p + 4], body[p + 5], body[p + 6], body[p + 7]];
+        if size < 8 || p + size > body.len() {
+            // Malformed child — stop here and surface what we have so
+            // far. The verbatim raw_payload still carries the bytes.
+            break;
+        }
+        let child = &body[p + 8..p + size];
+        match &fc {
+            t if t == &FRMA && child.len() >= 4 => {
+                scheme.original_format = [child[0], child[1], child[2], child[3]];
+            }
+            t if t == &SCHM && child.len() >= 12 => {
+                let flags = u32::from_be_bytes([0, child[1], child[2], child[3]]);
+                scheme.scheme_type = [child[4], child[5], child[6], child[7]];
+                scheme.scheme_version =
+                    u32::from_be_bytes([child[8], child[9], child[10], child[11]]);
+                if (flags & 0x0000_0001) != 0 && child.len() > 12 {
+                    let uri_bytes = &child[12..];
+                    let nul = uri_bytes
+                        .iter()
+                        .position(|&b| b == 0)
+                        .unwrap_or(uri_bytes.len());
+                    scheme.scheme_uri = Some(
+                        std::str::from_utf8(&uri_bytes[..nul])
+                            .unwrap_or("")
+                            .to_string(),
+                    );
+                }
+            }
+            // `schi` is preserved verbatim through `raw_payload`; we
+            // don't decode scheme-specific contents here. Falls through
+            // also for other / malformed children.
+            _ => {}
+        }
+        p += size;
+    }
+    Ok(scheme)
 }
 
 /// Returns the absolute byte ranges for an item's data inside the
@@ -1347,5 +1545,135 @@ mod tests {
         let hdr = read_atom_header(&mut c).unwrap().unwrap();
         let meta = parse_bmff_meta(&mut c, &hdr).unwrap().unwrap();
         assert_eq!(meta.data_location(1), DataLocation::SameFile);
+    }
+
+    // ─── round-17: ipro Item Protection Box typed surface ───
+
+    /// Build a minimal `sinf` body carrying:
+    ///   frma { data_format = original_format }
+    ///   schm { ver=0, flags=0, scheme_type, scheme_version }
+    fn build_sinf_body(
+        original_format: &[u8; 4],
+        scheme_type: &[u8; 4],
+        scheme_version: u32,
+    ) -> Vec<u8> {
+        let mut sinf = Vec::new();
+        // frma: 4-byte data_format
+        push_atom(&mut sinf, b"frma", original_format);
+        // schm (FullBox): ver(1)+flags(3)+scheme_type(4)+scheme_version(4)
+        let mut schm = Vec::new();
+        schm.push(0); // version
+        schm.extend_from_slice(&[0, 0, 0]); // flags = 0 → no URI
+        schm.extend_from_slice(scheme_type);
+        schm.extend_from_slice(&scheme_version.to_be_bytes());
+        push_atom(&mut sinf, b"schm", &schm);
+        sinf
+    }
+
+    fn build_ipro_body(sinfs: &[Vec<u8>]) -> Vec<u8> {
+        let mut ipro = Vec::new();
+        ipro.extend_from_slice(&0u32.to_be_bytes()); // FullBox ver+flags
+        ipro.extend_from_slice(&(sinfs.len() as u16).to_be_bytes()); // protection_count
+        for s in sinfs {
+            push_atom(&mut ipro, b"sinf", s);
+        }
+        ipro
+    }
+
+    #[test]
+    fn parse_bmff_meta_with_ipro_one_cenc_scheme() {
+        // Single sinf with frma=hvc1 + schm cenc v1.0.
+        let sinf = build_sinf_body(b"hvc1", b"cenc", 0x0001_0000);
+        let ipro = build_ipro_body(std::slice::from_ref(&sinf));
+        let body = build_meta_atom_payload(vec![(b"hdlr", hdlr_pict()), (b"ipro", ipro)]);
+        let mut wrapped = Vec::new();
+        push_atom(&mut wrapped, b"meta", &body);
+        let mut c = Cursor::new(wrapped);
+        let hdr = read_atom_header(&mut c).unwrap().unwrap();
+        let meta = parse_bmff_meta(&mut c, &hdr).unwrap().unwrap();
+
+        let ip = meta.item_protection().expect("ipro surfaced");
+        assert_eq!(ip.schemes.len(), 1);
+        assert_eq!(&ip.schemes[0].scheme_type, b"cenc");
+        assert_eq!(ip.schemes[0].scheme_version, 0x0001_0000);
+        assert_eq!(&ip.schemes[0].original_format, b"hvc1");
+        assert!(ip.schemes[0].scheme_uri.is_none());
+        assert_eq!(ip.schemes[0].raw_payload, sinf);
+
+        // 1-based item-protection-index resolution.
+        assert!(ip.scheme_for_item_index(0).is_none()); // unprotected sentinel
+        assert_eq!(&ip.scheme_for_item_index(1).unwrap().scheme_type, b"cenc");
+        assert!(ip.scheme_for_item_index(2).is_none()); // out of range
+    }
+
+    #[test]
+    fn parse_bmff_meta_with_ipro_two_schemes_and_uri_flag() {
+        // Two sinfs:
+        //   #1: frma=avc1 + schm cbcs v1.0 with a URI flag set.
+        //   #2: frma=hvc1 + schm cenc v0.0 (no URI).
+        let mut schm_with_uri = Vec::new();
+        schm_with_uri.push(0); // version
+        schm_with_uri.extend_from_slice(&[0, 0, 1]); // flags = 0x000001 → URI present
+        schm_with_uri.extend_from_slice(b"cbcs");
+        schm_with_uri.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        schm_with_uri.extend_from_slice(b"https://drm.example/scheme");
+        schm_with_uri.push(0); // NUL terminator
+
+        let mut sinf1 = Vec::new();
+        push_atom(&mut sinf1, b"frma", b"avc1");
+        push_atom(&mut sinf1, b"schm", &schm_with_uri);
+
+        let sinf2 = build_sinf_body(b"hvc1", b"cenc", 0);
+        let ipro = build_ipro_body(&[sinf1, sinf2]);
+        let body = build_meta_atom_payload(vec![(b"hdlr", hdlr_pict()), (b"ipro", ipro)]);
+        let mut wrapped = Vec::new();
+        push_atom(&mut wrapped, b"meta", &body);
+        let mut c = Cursor::new(wrapped);
+        let hdr = read_atom_header(&mut c).unwrap().unwrap();
+        let meta = parse_bmff_meta(&mut c, &hdr).unwrap().unwrap();
+
+        let ip = meta.item_protection().expect("ipro surfaced");
+        assert_eq!(ip.schemes.len(), 2);
+
+        // First scheme: cbcs with URI.
+        assert_eq!(&ip.schemes[0].scheme_type, b"cbcs");
+        assert_eq!(&ip.schemes[0].original_format, b"avc1");
+        assert_eq!(
+            ip.schemes[0].scheme_uri.as_deref(),
+            Some("https://drm.example/scheme")
+        );
+
+        // Second scheme: cenc without URI.
+        assert_eq!(&ip.schemes[1].scheme_type, b"cenc");
+        assert_eq!(&ip.schemes[1].original_format, b"hvc1");
+        assert!(ip.schemes[1].scheme_uri.is_none());
+    }
+
+    #[test]
+    fn parse_bmff_meta_without_ipro_yields_none_item_protection() {
+        let body = build_meta_atom_payload(vec![(b"hdlr", hdlr_pict())]);
+        let mut wrapped = Vec::new();
+        push_atom(&mut wrapped, b"meta", &body);
+        let mut c = Cursor::new(wrapped);
+        let hdr = read_atom_header(&mut c).unwrap().unwrap();
+        let meta = parse_bmff_meta(&mut c, &hdr).unwrap().unwrap();
+        assert!(meta.item_protection().is_none());
+    }
+
+    #[test]
+    fn parse_bmff_meta_ipro_empty_count_yields_empty_list() {
+        // ipro with protection_count = 0; the box exists so the
+        // accessor returns Some(_), but the schemes list is empty.
+        let mut ipro = Vec::new();
+        ipro.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+        ipro.extend_from_slice(&0u16.to_be_bytes()); // protection_count = 0
+        let body = build_meta_atom_payload(vec![(b"hdlr", hdlr_pict()), (b"ipro", ipro)]);
+        let mut wrapped = Vec::new();
+        push_atom(&mut wrapped, b"meta", &body);
+        let mut c = Cursor::new(wrapped);
+        let hdr = read_atom_header(&mut c).unwrap().unwrap();
+        let meta = parse_bmff_meta(&mut c, &hdr).unwrap().unwrap();
+        let ip = meta.item_protection().expect("ipro present");
+        assert!(ip.schemes.is_empty());
     }
 }

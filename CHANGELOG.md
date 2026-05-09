@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 17 — long-pending typed-extraction gaps closed and r16's
+  recursive `iloc` resolver wired into the layout planner so
+  `construction_method == 2` (item_offset) primary items resolve
+  transparently through `MovDemuxer::primary_image_layout_with_input`.
+  - `iprp::LayerSelector { layer_id: u16 }` +
+    `iprp::ItemProperty::Lsel(LayerSelector)` +
+    `ItemProperties::lsel(item_id)` + `parse_lsel_payload` — typed
+    extraction for the HEIF / ISO/IEC 23008-12 §6.5.11 LayerSelector
+    property (was previously caught by the `Other` fall-through). The
+    parser accepts both the bare 2-byte and FullBox-prefixed 6-byte
+    on-disk shapes.
+  - `ImageLayout::Identity { …, lsel: Option<LayerSelector> }` —
+    extended `Identity` layout. The selector is populated from the
+    inner item's `iprp` association so multi-layer-aware callers
+    (SHVC / MV-HEVC) don't have to re-walk `iprp`. Shape-breaking
+    field addition; the only consumer in this crate is the demuxer's
+    own resolver.
+  - `bmff_meta::ItemProtection { schemes: Vec<ProtectionScheme> }` +
+    `ProtectionScheme { scheme_type, scheme_version, scheme_uri,
+    original_format, raw_payload }` + `BmffMeta::item_protection() ->
+    Option<&ItemProtection>` — typed surface for the previously
+    parser-skipped `ipro` Item Protection Box (ISO/IEC 14496-12
+    §8.11.5). One `ProtectionScheme` per `sinf` child preserves
+    `frma.data_format`, `schm.scheme_type` / `scheme_version` /
+    optional `scheme_uri`, and the verbatim `sinf` body in
+    `raw_payload` for downstream DRM-aware callers.
+    `ItemProtection::scheme_for_item_index` resolves the 1-based
+    `infe.item_protection_index` field (with `0` meaning unprotected
+    per the spec).
+  - `MovDemuxer::primary_image_layout_with_input` now resolves
+    `construction_method == 2` (item_offset) `grid` / `iovl` primary
+    items end-to-end via r16's `resolve_item_bytes`. Previously the
+    cm=2 path returned `None`; the cm=2 indirection is now walked
+    transparently and the planner lands a `Grid` / `Overlay` plan as
+    expected. Doc comment updated to reflect the new contract.
+  - `BmffMeta { …, item_protection: Option<ItemProtection> }` —
+    shape-breaking field addition. The only literal-construction
+    consumers are this crate's own `derived` test fixtures (all
+    updated).
+  - 11 new tests (5 lsel — bare / FullBox / wrong-size / typed-variant
+    presence / Identity layout surface, 4 ipro — single cenc /
+    two-scheme + URI flag / absent / empty count, 1 cm=2 grid
+    end-to-end through `primary_image_layout_with_input`, +1 unit
+    test verifying `lsel` accessor returns None when unassociated).
+
 - Round 16 — long-deferred `iloc` resolver gaps: recursive
   `construction_method == 2` (item_offset) walker with cycle
   detection, per-extent `extent_index` surfacing on `index_size > 0`,

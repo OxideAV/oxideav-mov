@@ -52,7 +52,7 @@
 //! payload against the file's own iref topology.
 
 use crate::bmff_meta::{idat_bytes_concat, BmffMeta, ItemDataLocation};
-use crate::iprp::{Amve, Cclv, Clli, ColrInfo, ItemProperty, Mdcv, PixiInfo};
+use crate::iprp::{Amve, Cclv, Clli, ColrInfo, ItemProperty, LayerSelector, Mdcv, PixiInfo};
 use crate::media_meta::Clap;
 
 #[cfg(feature = "registry")]
@@ -594,6 +594,11 @@ pub enum ImageLayout {
         /// of the intended viewing environment per HEIF Amd.1 / SMPTE
         /// ST 2108-1 — pairs with `clli` / `mdcv` for HDR tone-mapping.
         amve: Option<Amve>,
+        /// First `lsel` (LayerSelector) attached to the inner item;
+        /// `None` when absent. Selects which layer of an associated
+        /// multi-layer coded item (SHVC / MV-HEVC base+enhancement) is
+        /// the renderable output for this layout.
+        lsel: Option<LayerSelector>,
     },
     /// Primary item is a `grid` derived image. Tile items live in
     /// `layout.tiles` in row-major order; decode each one and blit at
@@ -811,7 +816,7 @@ fn identity_layout_for(
         None => TransformChain::new(),
     };
     let transform = merge_transform_chains(&outer_chain, &inner_chain);
-    let (pixi, color_profile, clli, mdcv, cclv, amve) = match meta.properties.as_ref() {
+    let (pixi, color_profile, clli, mdcv, cclv, amve, lsel) = match meta.properties.as_ref() {
         Some(p) => (
             p.pixi(inner_item_id),
             p.color_profile(inner_item_id),
@@ -819,8 +824,9 @@ fn identity_layout_for(
             p.mdcv(inner_item_id),
             p.cclv(inner_item_id),
             p.amve(inner_item_id),
+            p.lsel(inner_item_id),
         ),
-        None => (None, None, None, None, None, None),
+        None => (None, None, None, None, None, None, None),
     };
     let alpha_for = alpha_target_for(meta, inner_item_id);
     ImageLayout::Identity {
@@ -833,6 +839,7 @@ fn identity_layout_for(
         mdcv,
         cclv,
         amve,
+        lsel,
     }
 }
 
@@ -1413,6 +1420,7 @@ mod tests {
             references,
             properties: Some(properties),
             data_references: Vec::new(),
+            item_protection: None,
         }
     }
 
@@ -1551,6 +1559,7 @@ mod tests {
             references,
             properties: None,
             data_references: Vec::new(),
+            item_protection: None,
         }
     }
 
@@ -1655,6 +1664,7 @@ mod tests {
             }],
             properties: None,
             data_references: Vec::new(),
+            item_protection: None,
         };
         match primary_image_layout_for(&meta) {
             Some(ImageLayout::Identity {
@@ -1801,6 +1811,7 @@ mod tests {
             references,
             properties: Some(properties),
             data_references: Vec::new(),
+            item_protection: None,
         }
     }
 
@@ -2006,6 +2017,7 @@ mod tests {
                 associations,
             }),
             data_references: Vec::new(),
+            item_protection: None,
         }
     }
 

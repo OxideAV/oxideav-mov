@@ -36,7 +36,7 @@ pub mod standalone;
 pub use bmff_meta::{
     file_extents_for_item, idat_bytes_concat, idat_bytes_for_item, item_data, parse_bmff_meta,
     primary_item_data, BmffMeta, DataLocation, ItemDataLocation, ItemExtent, ItemInfoEntry,
-    ItemLocation, ItemReference, ItemReferenceType,
+    ItemLocation, ItemProtection, ItemReference, ItemReferenceType, ProtectionScheme,
 };
 pub use chapter::{
     decode_text_sample, decode_text_sample_full, parse_text_sample_styles, ChapterEntry,
@@ -56,9 +56,9 @@ pub use gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, Tcmi, Text
 pub use header::{BrandClass, Ftyp, Hdlr, Mdhd, Mvhd, Tkhd, TrackRotation};
 pub use iprp::{
     parse_amve_payload, parse_auxc_payload, parse_cclv_payload, parse_clli_payload,
-    parse_colr_payload, parse_iprp, parse_mdcv_payload, Amve, AuxC, Cclv, Clli, ColrInfo, Imir,
-    Irot, Ispe, ItemProperties, ItemProperty, ItemPropertyAssociation, Mdcv, Pixi, PixiInfo,
-    PropertyAssociation,
+    parse_colr_payload, parse_iprp, parse_lsel_payload, parse_mdcv_payload, Amve, AuxC, Cclv, Clli,
+    ColrInfo, Imir, Irot, Ispe, ItemProperties, ItemProperty, ItemPropertyAssociation,
+    LayerSelector, Mdcv, Pixi, PixiInfo, PropertyAssociation,
 };
 pub use media_meta::{
     channel_mask_for_layout_tag, Chan, ChanDescription, Clap, ColorParameters, ColorParametersKind,
