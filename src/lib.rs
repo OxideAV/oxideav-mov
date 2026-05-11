@@ -21,6 +21,7 @@ pub mod gmhd;
 pub mod header;
 pub mod iprp;
 pub mod media_meta;
+pub mod muxer;
 pub mod reference;
 pub mod render;
 pub mod sample_table;
@@ -75,6 +76,7 @@ pub use media_meta::{
     channel_mask_for_layout_tag, Chan, ChanDescription, Clap, ColorParameters, ColorParametersKind,
     Cslg, MetaKeyValue, Pasp, Tapt,
 };
+pub use muxer::{MovMuxer, MuxSample, MuxTrackKind};
 pub use reference::{parse_dref, DataReference, ReferenceMovie};
 pub use render::{ispe_dimensions, render_grid, render_iden, render_iovl, Rgba8Canvas};
 pub use sample_table::{SampleEntry, SampleTable};

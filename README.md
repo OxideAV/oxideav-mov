@@ -30,6 +30,16 @@ Round 18 adds fragmented MP4 / fMP4 / DASH-init decode (ISO/IEC
 `.mp4` now walks every sample through `MovDemuxer::next_packet`,
 ffprobe-cross-checked.
 
+Round 19 adds the **write side**: `MovMuxer` emits a non-fragmented
+MOV/MP4 (`ftyp` + `mdat` + `moov`) carrying one or more video/audio
+tracks. Output is `ffprobe -of json` accepted and round-trips
+through `MovDemuxer` with sample count, per-sample sizes, payloads,
+and keyframe flags preserved. Atom coverage: `ftyp`, `mvhd`, `tkhd`,
+`mdhd`, `hdlr`, `vmhd`/`smhd`, `dinf`/`dref`/`url ` self-ref, `stsd`,
+`stts` (run-length), `stss` (only when needed), `stsc`, `stsz`
+(uniform-or-table), `stco`/`co64` (auto-promoted when the cumulative
+chunk byte offset crosses 4 GiB).
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per

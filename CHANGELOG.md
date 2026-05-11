@@ -9,6 +9,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 19 — write-side `MovMuxer` for non-fragmented MOV/MP4. Builds
+  a structurally-valid `ftyp` + `mdat` + `moov` file from per-track
+  sample lists; the emitted bytes are accepted by `ffprobe -of json`
+  and round-trip back through [`MovDemuxer`] with sample count,
+  per-sample sizes, byte payloads, and keyframe flags preserved
+  verbatim.
+  - New `muxer` module exposing `MovMuxer`, `MuxSample`, and
+    `MuxTrackKind { Video, Audio }`. The muxer emits, per ISO/IEC
+    14496-12 sections cited in the module docstring:
+    - `ftyp` (§4.3) — major `qt  `, minor 0x200, compat
+      `qt  ` / `isom` / `mp42`.
+    - `mdat` (§8.1.1) — auto-promotes to the 16-byte extended-size
+      header when the body exceeds `u32::MAX`.
+    - `moov/mvhd` (§8.2.2) — v0, identity matrix, rate=1.0,
+      `next_track_id = tracks.len() + 1`.
+    - `moov/trak/tkhd` (§8.3.2) — v0, flags
+      `enabled|in_movie|in_preview = 0x07`, identity matrix,
+      audio-track volume = 1.0 / video-track volume = 0.
+    - `moov/trak/mdia/mdhd` (§8.4.2) — v0, language code `und`
+      (0x55C4).
+    - `moov/trak/mdia/hdlr` (§8.4.3) — `mhlr` / `vide`|`soun`,
+      empty counted-Pascal name.
+    - `moov/trak/mdia/minf/{vmhd|smhd}` (§12.1.2 / §12.2.2) — `vmhd`
+      with no-lean-ahead flag for video, balance=0 `smhd` for audio.
+    - `moov/trak/mdia/minf/dinf/dref/url` (§8.7.2) — single self-
+      reference entry, `flags=1` ("data is in this file").
+    - `moov/trak/mdia/minf/stbl/stsd` (§8.5.2 / QTFF p. 70) — single
+      entry per track, `data_reference_index=1`. Video body carries
+      hres/vres = 72.0 fixed-point, frame_count=1, depth=24,
+      color_table_id=-1 plus the declared width/height; audio body
+      carries v0 channels/bits/sample_rate. Callers may inject one
+      or more codec-config extension atoms (e.g. `avcC`) via the
+      `extra_stsd_atoms` slot which the muxer copies verbatim into
+      the trailing portion of the entry.
+    - `moov/trak/mdia/minf/stbl/stts` (§8.6.1.2) — run-length-
+      encoded against per-sample `MuxSample::duration`.
+    - `moov/trak/mdia/minf/stbl/stss` (§8.6.2) — emitted only when
+      at least one sample is *not* a keyframe (preserves the
+      QTFF p. 73 implicit "every-sample-keyframe" rule for audio).
+    - `moov/trak/mdia/minf/stbl/stsc` (§8.7.4) — single chunk per
+      track, `samples_per_chunk = track.sample_count`,
+      `sample_description_id = 1`.
+    - `moov/trak/mdia/minf/stbl/stsz` (§8.7.3) — uniform
+      `sample_size` when all samples are the same length, otherwise
+      `sample_size = 0` followed by the per-sample size table.
+    - `moov/trak/mdia/minf/stbl/stco|co64` (§8.7.5) — `stco` when
+      all chunk offsets fit in `u32`, `co64` otherwise (the muxer
+      auto-promotes when the cumulative sample bytes push any
+      track's chunk past 4 GiB).
+  - Layout produced is `ftyp + mdat + moov` (mdat-before-moov);
+    [`MovDemuxer::open`] already accepts both orderings, so the
+    round-trip closes without a faststart pass. A symmetric
+    faststart helper (`moov`-before-`mdat`, two-pass write) is on
+    the round-20 menu.
+  - `MovMuxer::write_to::<W: Write>` — emit to any `std::io::Write`.
+  - `MovMuxer::encode_to_vec` — emit to a `Vec<u8>` for in-memory
+    consumers (the testing path).
+  - `MovMuxer::with_movie_timescale(ts)` — override the default
+    movie timescale (600).
+  - Tests:
+    - `synth_round19.rs`:
+      - `roundtrip_5_frame_video_mov_preserves_sample_count_and_bytes` —
+        builds a 5-frame `mp4v` MOV (1 keyframe + 4 non-keyframes),
+        demuxes back through `MovDemuxer`, verifies sample count,
+        per-sample sizes, durations, keyframe flags, byte-level
+        payloads, and the post-EOF `Error::Eof` contract.
+      - `roundtrip_audio_only_mov_preserves_sample_table` — 3
+        uniform-size `sowt` samples, asserts `stsz_default_size =
+        Some(256)` and that `stss` is omitted (every-sample-keyframe
+        implicit rule).
+      - `roundtrip_two_track_video_plus_audio_preserves_both_streams`
+        — 4 video + 2 audio samples in one file, verifies both
+        track-id assignment (1 / 2) and per-track sample-table
+        round-trip.
+      - `empty_track_list_rejected` / `track_with_zero_samples_rejected`
+        — error-path coverage.
+      - `ffprobe_accepts_synth_video_only_mov` — invokes
+        `ffprobe -v error -of json -show_format -show_streams` on
+        the synth bytes, asserts exit success and one
+        `"codec_type": "video"` stream.
+      - `ffprobe_accepts_synth_video_plus_audio_mov` — same pattern
+        with one video + one audio stream. Both ffprobe tests
+        no-op (with a stderr note) when ffprobe isn't on `$PATH`.
+    - 9 new unit tests in `muxer::tests` covering `ftyp` byte
+      layout, empty-muxer / zero-sample rejection, stts run-length
+      encoding, stss omit-when-all-keyframes, stss emission with
+      keyframe-index resolution, and stsz uniform-vs-table
+      dispatch.
+
 - Round 18 — fragmented MP4 / fMP4 / DASH-init decode path landed. The
   demuxer used to refuse `moof` / `mvex` outright; this round
   implements the full ISO/IEC 14496-12 §8.8 cascade so a fragmented
