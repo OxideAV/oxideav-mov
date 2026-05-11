@@ -20,6 +20,7 @@ use crate::atom::{
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
 use crate::edit::{parse_elst, EditList};
+use crate::fragment::{parse_mvex, resolve_traf_samples, Mehd, TrexDefaults};
 use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
 use crate::header::{parse_ftyp, parse_hdlr, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd};
 use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
@@ -88,6 +89,21 @@ pub struct MovDemuxer {
     samples: Vec<(u32, SampleEntry)>,
     /// Cursor into `samples` for the next packet to emit.
     next: usize,
+    /// Per-track `trex` defaults from `moov/mvex` (ISO/IEC 14496-12
+    /// §8.8.3). Empty for non-fragmented streams. Round 18 surfaces
+    /// the parsed records so callers can inspect the per-track
+    /// fragment defaults; the demuxer itself uses them while
+    /// resolving `moof/traf/trun` samples.
+    pub trex_defaults: Vec<TrexDefaults>,
+    /// `mvex/mehd` total fragmented duration in `mvhd.time_scale`
+    /// ticks (§8.8.2). `None` when the file omits `mehd` — in
+    /// which case the duration is the sum across all `moof`s.
+    pub mehd: Option<Mehd>,
+    /// `mfhd.sequence_number` of each `moof` walked at open time,
+    /// in declaration order. Lets callers spot dropped fragments
+    /// (the spec requires monotonic increase per §8.8.5.3); empty
+    /// for non-fragmented streams.
+    pub fragment_sequence_numbers: Vec<u32>,
     #[cfg(feature = "registry")]
     streams: Vec<StreamInfo>,
 }
@@ -283,7 +299,17 @@ impl MovDemuxer {
         let mut reference_movies: Vec<ReferenceMovie> = Vec::new();
         let mut movie_bmff_meta: Option<BmffMeta> = None;
         let mut file_bmff_meta: Option<BmffMeta> = None;
-        let mut has_mvex = false;
+        let mut mehd_box: Option<Mehd> = None;
+        let mut trex_defaults: Vec<TrexDefaults> = Vec::new();
+        let mut fragment_sequence_numbers: Vec<u32> = Vec::new();
+        // Per-track running media-time cursor (DTS) for fragmented
+        // playback. Indexed by track-id (not by track index); only
+        // populated for tracks that actually receive `traf` runs.
+        let mut track_dts_cursor: std::collections::HashMap<u32, u64> =
+            std::collections::HashMap::new();
+        // Per-track running sample index for fragmented playback.
+        let mut track_sample_index_cursor: std::collections::HashMap<u32, u32> =
+            std::collections::HashMap::new();
         // Faststart probe: track whether `moov` precedes `mdat` in
         // the top-level atom stream, ignoring `ftyp`, `free`, `skip`,
         // `wide`. Per QTFF "Movie Atom" — moov-first allows streaming
@@ -326,7 +352,8 @@ impl MovDemuxer {
                         &mut movie_user_data,
                         &mut reference_movies,
                         &mut movie_bmff_meta,
-                        &mut has_mvex,
+                        &mut mehd_box,
+                        &mut trex_defaults,
                     )?;
                 }
                 t if t == &META => {
@@ -342,15 +369,56 @@ impl MovDemuxer {
                     seen_mdat = true;
                 }
                 t if t == &MOOF => {
-                    // Fragmented MP4 — QTFF doesn't define `moof`; this is
-                    // ISO BMFF §8.16. We refuse rather than silently
-                    // produce a partial decode. The hint points at our
-                    // sibling crate (oxideav-mp4) which is the right home
-                    // for fragmented streams.
-                    return Err(unsupported_error(
-                        "MOV: fragmented MP4 ('moof') is unsupported by the QuickTime demuxer; \
-                         use oxideav-mp4 for fragmented streams",
-                    ));
+                    // Movie Fragment Box (ISO/IEC 14496-12 §8.8.4).
+                    // Round 18: parse `mfhd` + per-track `traf` → per-
+                    // sample SampleEntry rows appended to each track's
+                    // `fragment_samples` queue. Anchor:
+                    // `moof_start` is the position of the size word
+                    // (`pos`), which is the "first byte of the
+                    // enclosing Movie Fragment Box" per §8.8.7.1.
+                    let moof_start = pos;
+                    let (mfhd_opt, trafs) = crate::fragment::parse_moof(input.as_mut(), &hdr)?;
+                    if let Some(m) = mfhd_opt {
+                        fragment_sequence_numbers.push(m.sequence_number);
+                    }
+                    // Anchor for the "previous traf end" within this
+                    // moof. The very first traf with no
+                    // base-data-offset and no default-base-is-moof
+                    // defaults to "position of the first byte of the
+                    // enclosing Movie Fragment Box" per §8.8.7.1.
+                    let mut prev_traf_end = moof_start;
+                    for traf in &trafs {
+                        // Resolve track-id → track index.
+                        let tid = traf.tfhd.track_id;
+                        let track_idx = match tracks.iter().position(|t| t.tkhd.track_id == tid) {
+                            Some(i) => i,
+                            None => {
+                                // Spec §8.8.7.3: track_ID must match a
+                                // declared track. Refuse rather than
+                                // silently drop.
+                                return Err(Error::invalid(format!(
+                                    "MOV: moof traf references unknown track_id {tid}"
+                                )));
+                            }
+                        };
+                        let trex = trex_defaults.iter().find(|t| t.track_id == tid);
+                        let dts_cursor = *track_dts_cursor.entry(tid).or_insert(0);
+                        let sample_idx_cursor = *track_sample_index_cursor.entry(tid).or_insert(0);
+                        let (samples, new_prev_traf_end, new_dts) = resolve_traf_samples(
+                            traf,
+                            trex,
+                            moof_start,
+                            prev_traf_end,
+                            dts_cursor,
+                            sample_idx_cursor,
+                        )?;
+                        let n_samples = samples.len() as u32;
+                        tracks[track_idx].fragment_samples.extend(samples);
+                        prev_traf_end = new_prev_traf_end;
+                        track_dts_cursor.insert(tid, new_dts);
+                        track_sample_index_cursor
+                            .insert(tid, sample_idx_cursor.saturating_add(n_samples));
+                    }
                 }
                 t if t == &FREE || t == &SKIP || t == &WIDE => {
                     // free-space atoms — skip
@@ -363,15 +431,6 @@ impl MovDemuxer {
             input.seek(SeekFrom::Start(body_end))?;
         }
 
-        if has_mvex {
-            // `mvex` inside `moov` declares the file as fragmented (ISO
-            // BMFF §8.16.1) — even when `moof` boxes haven't been seen
-            // yet at top-level walk. Reject for the same reason as
-            // top-level `moof`.
-            return Err(unsupported_error(
-                "MOV: 'mvex' indicates a fragmented MP4; use oxideav-mp4 for fragmented streams",
-            ));
-        }
         if mvhd.is_none() {
             // A bare HEIF/HEIC/AVIF still-image file is allowed to
             // ship without any `moov` at all — its content is
@@ -414,11 +473,18 @@ impl MovDemuxer {
         let streams = build_streams(&tracks, resolver);
 
         // Flatten sample tables into a globally offset-sorted queue.
+        // For fragmented streams, the per-track stsz_count may be 0
+        // (an "init segment" with no in-moov samples) while
+        // `fragment_samples` carries the actual data; both sources
+        // contribute to the flat queue.
         let mut samples: Vec<(u32, SampleEntry)> = Vec::new();
         for (track_idx, t) in tracks.iter().enumerate() {
             for sample in t.sample_table.iter_samples() {
                 let s = sample?;
                 samples.push((track_idx as u32, s));
+            }
+            for s in &t.fragment_samples {
+                samples.push((track_idx as u32, *s));
             }
         }
         samples.sort_by_key(|(_, s)| s.offset);
@@ -440,9 +506,21 @@ impl MovDemuxer {
             faststart: seen_moov_before_mdat,
             samples,
             next: 0,
+            trex_defaults,
+            mehd: mehd_box,
+            fragment_sequence_numbers,
             #[cfg(feature = "registry")]
             streams,
         })
+    }
+
+    /// `true` when the file has at least one `moof` box (i.e. is
+    /// fragmented per ISO/IEC 14496-12 §8.8). Convenience accessor
+    /// for callers that want to short-circuit "is this a DASH/
+    /// fMP4 segment" decisions without inspecting
+    /// `fragment_sequence_numbers` directly.
+    pub fn is_fragmented(&self) -> bool {
+        !self.fragment_sequence_numbers.is_empty() || !self.trex_defaults.is_empty()
     }
 
     /// True when the file is laid out for streaming playback
@@ -1201,7 +1279,8 @@ fn parse_moov<R: Read + Seek + ?Sized>(
     user_data: &mut Vec<UserDataEntry>,
     reference_movies: &mut Vec<ReferenceMovie>,
     bmff_meta: &mut Option<BmffMeta>,
-    has_mvex: &mut bool,
+    mehd_out: &mut Option<Mehd>,
+    trex_out: &mut Vec<TrexDefaults>,
 ) -> Result<()> {
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
     walk_children(r, Some(body_end), |r, child| {
@@ -1231,10 +1310,16 @@ fn parse_moov<R: Read + Seek + ?Sized>(
                 *reference_movies = parse_rmra(r, child)?;
             }
             t if t == &MVEX => {
-                // Fragment header — defer the rejection to `open_with`
-                // so we can also surface info about which fragmented
-                // pieces (mehd/trex) are present, useful for diagnostics.
-                *has_mvex = true;
+                // Movie-extends header (ISO/IEC 14496-12 §8.8.1) —
+                // declares the file as fragmented. Round 18 parses
+                // the optional `mehd` (total fragmented duration) and
+                // the per-track `trex` defaults; both feed the
+                // top-level `moof` walker.
+                let (mehd, trex) = parse_mvex(r, child)?;
+                if mehd.is_some() {
+                    *mehd_out = mehd;
+                }
+                trex_out.extend(trex);
             }
             _ => {}
         }

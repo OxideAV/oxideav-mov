@@ -1,5 +1,7 @@
-//! Round-3 acceptance: reference-movie (`rmra`/`rmda`) recognition
-//! + clean rejection, and fragmented MP4 (`mvex`/`moof`) refusal.
+//! Round-3 / Round-18 acceptance: reference-movie (`rmra`/`rmda`)
+//! recognition + clean rejection, and fragmented MP4 (`mvex`/`moof`)
+//! **acceptance** (was rejection through round 17; round 18 lands a
+//! real decode path for the ISO/IEC 14496-12 §8.8 fragmented atoms).
 
 #![cfg(feature = "registry")]
 
@@ -197,22 +199,28 @@ fn build_qt_with_mvex() -> Vec<u8> {
 }
 
 #[test]
-fn mvex_inside_moov_is_unsupported() {
+fn mvex_inside_moov_surfaces_trex_defaults() {
+    // Round 18: `mvex/trex` no longer rejects. The demuxer parses
+    // the per-track defaults so a downstream `moof` walk can pull
+    // its per-fragment values from the cascade. With no `moof`,
+    // the file has exactly the one in-moov sample from the
+    // declared stbl.
     let bytes = build_qt_with_mvex();
     let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
-    let err = match MovDemuxer::open(cur) {
-        Ok(_) => panic!("mvex must reject"),
-        Err(e) => e,
-    };
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("fragmented") || msg.contains("oxideav-mp4"),
-        "expected fragmented hint, got: {msg}"
-    );
+    let d = MovDemuxer::open(cur).expect("mvex-with-no-moof opens fine in round 18");
+    assert!(d.is_fragmented(), "mvex/trex declares the file fragmented");
+    assert_eq!(d.trex_defaults.len(), 1);
+    let trex = &d.trex_defaults[0];
+    assert_eq!(trex.track_id, 1);
+    assert_eq!(trex.default_sample_description_index, 1);
+    // No moof was emitted, so no fragment_sequence_numbers either.
+    assert!(d.fragment_sequence_numbers.is_empty());
 }
 
-/// Build a movie with a top-level `moof` atom — must reject.
-fn build_qt_with_moof() -> Vec<u8> {
+/// Build a top-level `moof` with `mfhd` only — no `traf`. The
+/// demuxer accepts it: the mfhd sequence number is recorded but no
+/// new samples are appended.
+fn build_qt_with_empty_moof() -> Vec<u8> {
     let mut out = Vec::new();
     let mut ftyp = Vec::new();
     ftyp.extend_from_slice(b"qt  ");
@@ -222,9 +230,51 @@ fn build_qt_with_moof() -> Vec<u8> {
 
     let mut moov = Vec::new();
     push_atom(&mut moov, *b"mvhd", &build_mvhd(600, 30));
+    // No fragmented tracks, but we still need at least one `trak` to
+    // satisfy the "moov must declare its tracks" rule.
+    let mut trak = Vec::new();
+    push_atom(&mut trak, *b"tkhd", &build_tkhd(1, 30, 320, 240));
+    let mut mdia = Vec::new();
+    push_atom(&mut mdia, *b"mdhd", &build_mdhd(600, 30));
+    push_atom(&mut mdia, *b"hdlr", &build_hdlr(b"mhlr", b"vide"));
+    let mut minf = Vec::new();
+    push_atom(&mut minf, *b"vmhd", &build_vmhd());
+    let mut stbl = Vec::new();
+    push_atom(
+        &mut stbl,
+        *b"stsd",
+        &build_stsd_video(b"avc1", 320, 240, &[]),
+    );
+    // Empty stbl (0 samples) — a legal fragmented init-segment shape.
+    let stts_empty = {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes()); // 0 entries
+        p
+    };
+    push_atom(&mut stbl, *b"stts", &stts_empty);
+    let stsc_empty = {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes()); // 0 entries
+        p
+    };
+    push_atom(&mut stbl, *b"stsc", &stsc_empty);
+    push_atom(&mut stbl, *b"stsz", &build_stsz_constant(0, 0));
+    let stco_empty = {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p
+    };
+    push_atom(&mut stbl, *b"stco", &stco_empty);
+    push_atom(&mut minf, *b"stbl", &stbl);
+    push_atom(&mut mdia, *b"minf", &minf);
+    push_atom(&mut trak, *b"mdia", &mdia);
+    push_atom(&mut moov, *b"trak", &trak);
     push_atom(&mut out, *b"moov", &moov);
 
-    // a moof at top level
+    // a moof at top level with only an `mfhd`
     let mut mfhd = Vec::new();
     mfhd.extend_from_slice(&0u32.to_be_bytes());
     mfhd.extend_from_slice(&1u32.to_be_bytes()); // sequence number
@@ -236,16 +286,12 @@ fn build_qt_with_moof() -> Vec<u8> {
 }
 
 #[test]
-fn top_level_moof_is_unsupported() {
-    let bytes = build_qt_with_moof();
+fn top_level_moof_with_mfhd_only_accepted() {
+    let bytes = build_qt_with_empty_moof();
     let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
-    let err = match MovDemuxer::open(cur) {
-        Ok(_) => panic!("moof must reject"),
-        Err(e) => e,
-    };
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("fragmented") || msg.contains("moof") || msg.contains("oxideav-mp4"),
-        "expected fragmented hint, got: {msg}"
-    );
+    let d = MovDemuxer::open(cur).expect("moof with empty traf list opens fine");
+    assert!(d.is_fragmented());
+    assert_eq!(d.fragment_sequence_numbers, vec![1]);
+    // No traf → no fragment samples.
+    assert_eq!(d.tracks[0].fragment_samples.len(), 0);
 }

@@ -16,6 +16,7 @@ pub mod chapter;
 pub mod demuxer;
 pub mod derived;
 pub mod edit;
+pub mod fragment;
 pub mod gmhd;
 pub mod header;
 pub mod iprp;
@@ -52,6 +53,16 @@ pub use derived::{
     TransformChain, TransformOp,
 };
 pub use edit::{Edit, EditList};
+pub use fragment::{
+    parse_mehd, parse_mfhd, parse_moof, parse_mvex, parse_tfhd, parse_traf, parse_trex, parse_trun,
+    resolve_traf_samples, sample_flags_is_sync, Mehd, Mfhd, Tfhd, TrafRecord, TrexDefaults, Trun,
+    TrunSample, TFHD_BASE_DATA_OFFSET_PRESENT, TFHD_DEFAULT_BASE_IS_MOOF,
+    TFHD_DEFAULT_SAMPLE_DURATION_PRESENT, TFHD_DEFAULT_SAMPLE_FLAGS_PRESENT,
+    TFHD_DEFAULT_SAMPLE_SIZE_PRESENT, TFHD_DURATION_IS_EMPTY,
+    TFHD_SAMPLE_DESCRIPTION_INDEX_PRESENT, TRUN_DATA_OFFSET_PRESENT,
+    TRUN_FIRST_SAMPLE_FLAGS_PRESENT, TRUN_SAMPLE_CTS_OFFSET_PRESENT, TRUN_SAMPLE_DURATION_PRESENT,
+    TRUN_SAMPLE_FLAGS_PRESENT, TRUN_SAMPLE_SIZE_PRESENT,
+};
 pub use gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, Tcmi, TextHeader};
 pub use header::{BrandClass, Ftyp, Hdlr, Mdhd, Mvhd, Tkhd, TrackRotation};
 pub use iprp::{

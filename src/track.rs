@@ -17,7 +17,7 @@ use crate::media_meta::{
     MetaKeyValue, Pasp, Tapt,
 };
 use crate::reference::DataReference;
-use crate::sample_table::SampleTable;
+use crate::sample_table::{SampleEntry, SampleTable};
 use crate::timecode::{parse_tmcd_sample_description, Tmcd};
 use crate::user_data::UserDataEntry;
 
@@ -170,6 +170,15 @@ pub struct Track {
     /// — `gmin`, `text`, `tmcd/tcmi` (round 5). `None` when the track
     /// uses a typed media header (`vmhd`/`smhd`) instead.
     pub gmhd: Option<Gmhd>,
+    /// Samples appended by `moof/traf/trun` fragment runs (ISO/IEC
+    /// 14496-12 §8.8). Empty for non-fragmented streams. Each
+    /// entry already has its absolute file offset, DTS, duration,
+    /// keyframe flag, sample-description-id and composition offset
+    /// resolved via the tfhd → trex defaults cascade. Round 18
+    /// builds these from `mvex/trex` + `moof/traf/tfhd/trun` so a
+    /// fragmented `qt  ` or `mp4` plays straight through
+    /// [`crate::MovDemuxer::next_packet`].
+    pub fragment_samples: Vec<SampleEntry>,
 }
 
 impl Track {

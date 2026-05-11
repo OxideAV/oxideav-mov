@@ -24,6 +24,12 @@ Round 1 ships:
   framework's `oxideav-meta` build script wires this crate up
   automatically.
 
+Round 18 adds fragmented MP4 / fMP4 / DASH-init decode (ISO/IEC
+14496-12 §8.8) — `mvex/trex` per-track defaults plus full
+`moof/traf/tfhd/trun` cascade resolution. A fragmented `.mov` or
+`.mp4` now walks every sample through `MovDemuxer::next_packet`,
+ffprobe-cross-checked.
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per

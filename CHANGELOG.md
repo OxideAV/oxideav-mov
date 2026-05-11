@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 18 — fragmented MP4 / fMP4 / DASH-init decode path landed. The
+  demuxer used to refuse `moof` / `mvex` outright; this round
+  implements the full ISO/IEC 14496-12 §8.8 cascade so a fragmented
+  `qt  ` or `mp4` walks all samples cleanly through
+  `MovDemuxer::next_packet`.
+  - New `fragment` module with end-to-end parsers for the §8.8 box
+    family: `mfhd` (§8.8.5), `mehd` (§8.8.2), `trex` (§8.8.3),
+    `tfhd` (§8.8.7), `trun` (§8.8.8), `traf` (§8.8.6) and `moof`
+    (§8.8.4) — plus the `tf_flags` / `tr_flags` bit constants
+    (`TFHD_BASE_DATA_OFFSET_PRESENT`, `TFHD_DEFAULT_BASE_IS_MOOF`,
+    `TFHD_DURATION_IS_EMPTY`, `TRUN_DATA_OFFSET_PRESENT`,
+    `TRUN_FIRST_SAMPLE_FLAGS_PRESENT`, `TRUN_SAMPLE_*_PRESENT`)
+    re-exported from the crate root.
+  - `MovDemuxer::is_fragmented()` — true iff the file declares `mvex`
+    or contains at least one `moof`.
+  - `MovDemuxer::trex_defaults: Vec<TrexDefaults>` — per-track
+    fragment defaults parsed from `moov/mvex/trex`.
+  - `MovDemuxer::mehd: Option<Mehd>` — optional total fragmented
+    presentation duration (§8.8.2).
+  - `MovDemuxer::fragment_sequence_numbers: Vec<u32>` — the `mfhd`
+    sequence number of every `moof` walked at open time, in wire
+    order, so callers can spot dropped fragments.
+  - `Track::fragment_samples: Vec<SampleEntry>` — samples appended
+    by `moof/traf/trun` runs. Each entry's absolute file offset, DTS,
+    duration, keyframe flag, sample-description-id, and composition
+    offset are resolved through the `trun → tfhd → trex` defaults
+    cascade. Shape-breaking field addition; the only literal-
+    construction consumer is this crate's own tests (none touched).
+  - `MovDemuxer::resolve_traf_samples` (exported as
+    `oxideav_mov::resolve_traf_samples`) — pure helper that turns
+    a `TrafRecord` plus the per-track `trex` defaults into a vector
+    of `SampleEntry` with the correct `default-base-is-moof` /
+    explicit `base_data_offset` / "end of previous traf" anchor
+    semantics from §8.8.7.1.
+  - Tests:
+    - `synth_round18.rs`: 4 in-memory fixtures — single-moof
+      walk, two-moof DTS monotonicity, mfhd sequence-number
+      preservation, and a non-fragmented "false" classification
+      check.
+    - `ffmpeg_fragments_oracle.rs`: 2 opt-in tests that generate
+      real `ffmpeg`-emitted fragmented MP4 (single-moof + multi-moof)
+      and verify the demuxer's emitted packet count matches
+      `ffprobe`'s `nb_read_packets`. Skipped (with a stderr note)
+      when `ffmpeg`/`ffprobe` aren't on `$PATH`.
+    - `synth_reference_and_fragments.rs`: the two long-standing
+      rejection tests (`mvex_inside_moov_is_unsupported`,
+      `top_level_moof_is_unsupported`) flipped to *acceptance*
+      tests (`mvex_inside_moov_surfaces_trex_defaults`,
+      `top_level_moof_with_mfhd_only_accepted`) — the round-3
+      rejection was the user-visible blocker this round retires.
+
 - Round 17 — long-pending typed-extraction gaps closed and r16's
   recursive `iloc` resolver wired into the layout planner so
   `construction_method == 2` (item_offset) primary items resolve
