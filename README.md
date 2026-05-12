@@ -40,6 +40,16 @@ and keyframe flags preserved. Atom coverage: `ftyp`, `mvhd`, `tkhd`,
 (uniform-or-table), `stco`/`co64` (auto-promoted when the cumulative
 chunk byte offset crosses 4 GiB).
 
+Round 20 adds the **fragmented write side**:
+`MovMuxer::with_fragmentation(ByDuration|ByFrameCount)` +
+`encode_fragmented_to_vec()` emit an ISO/IEC 14496-12 §8.8 fragmented
+MP4 / fMP4 / DASH segment stream — an init segment (`ftyp` with
+`iso5`/`dash`/`msdh` brands + `moov` with empty stbl + `mvex/trex`)
+followed by one media segment per fragment (`moof` with `mfhd` +
+per-track `traf/tfhd/trun` + trailing `mdat`). Pairs with the
+round-18 decode path so fragmented streams round-trip in both
+directions.
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per

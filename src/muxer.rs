@@ -117,6 +117,32 @@ struct TrackWrite {
     extra_stsd_atoms: Vec<u8>,
 }
 
+/// Fragmentation policy for [`MovMuxer::write_to_fragmented`].
+///
+/// Selects the rule used to slice each track's flat sample list into
+/// per-fragment runs. The same rule applies to every track; per-track
+/// fragmentation policies are out of scope for round 20.
+///
+/// Spec layout the rule produces: ISO/IEC 14496-12 §8.8.4 — an
+/// initial segment (`ftyp` + `moov` with empty stbl tables + `mvex/
+/// trex` defaults) followed by one media segment per fragment slice,
+/// each carrying a `moof` (with `mfhd` + per-track `traf`) plus a
+/// trailing `mdat` whose bytes the `trun` rows index into.
+#[derive(Clone, Copy, Debug)]
+pub enum FragmentationMode {
+    /// Close the current fragment once its accumulated *primary-track
+    /// media-timescale* duration meets or exceeds the threshold. The
+    /// primary track is the first track added (typically video for
+    /// A/V; audio-only files use the only track). Threshold is in
+    /// primary-track media-timescale ticks.
+    ByDuration(u64),
+    /// Close the current fragment once its accumulated primary-track
+    /// sample count meets the threshold. Audio tracks slice along the
+    /// primary track's wall-clock duration so per-fragment audio
+    /// counts vary.
+    ByFrameCount(u32),
+}
+
 /// Writer-side counterpart of [`crate::demuxer::MovDemuxer`]. Builds a
 /// non-fragmented MOV/MP4 carrying one or more video/audio tracks; the
 /// emitted file is structurally accepted by `ffprobe -of json` and
@@ -127,6 +153,12 @@ struct TrackWrite {
 /// moov). The demuxer accepts both orderings; a follow-up round can
 /// add a faststart helper that swaps `moov` to before `mdat` after
 /// building the chunk-offset table.
+///
+/// Round 20 also adds the fragmented-write path via
+/// [`MovMuxer::with_fragmentation`] + [`MovMuxer::write_to_fragmented`]:
+/// the emitted file is a DASH-/fMP4-compliant initial-segment +
+/// media-segment stream (`ftyp` + `moov` with empty stbl +
+/// `mvex/trex`, then one or more `moof` + `mdat` pairs).
 pub struct MovMuxer {
     /// Movie-scope timescale used by `mvhd.duration` and every
     /// `tkhd.duration`. Defaults to 600 (the QTFF historical
@@ -134,6 +166,10 @@ pub struct MovMuxer {
     /// callers can override via [`MovMuxer::with_movie_timescale`].
     movie_timescale: u32,
     tracks: Vec<TrackWrite>,
+    /// Optional fragmentation policy — when `Some`, the muxer emits
+    /// a fragmented layout (`ftyp` + init-`moov` + N × `moof`+`mdat`)
+    /// rather than the default non-fragmented `ftyp` + `mdat` + `moov`.
+    fragmentation: Option<FragmentationMode>,
 }
 
 impl Default for MovMuxer {
@@ -148,6 +184,7 @@ impl MovMuxer {
         Self {
             movie_timescale: 600,
             tracks: Vec::new(),
+            fragmentation: None,
         }
     }
 
@@ -157,6 +194,29 @@ impl MovMuxer {
         debug_assert!(ts > 0, "movie_timescale must be > 0");
         self.movie_timescale = ts.max(1);
         self
+    }
+
+    /// Opt-in fragmentation. Subsequent calls to
+    /// [`MovMuxer::write_to_fragmented`] / [`encode_fragmented_to_vec`]
+    /// will emit an ISO/IEC 14496-12 §8.8 fragmented layout: an init
+    /// segment (`ftyp` + `moov` with empty `stbl` tables and a
+    /// `mvex/trex` defaults block per track) followed by one media
+    /// segment per fragment, each a `moof` (with `mfhd` +
+    /// per-track `traf/tfhd/trun`) and a trailing `mdat` carrying the
+    /// per-sample bytes.
+    ///
+    /// The non-fragmented [`MovMuxer::write_to`] / `encode_to_vec`
+    /// methods remain available — they ignore this setting.
+    ///
+    /// [`encode_fragmented_to_vec`]: MovMuxer::encode_fragmented_to_vec
+    pub fn with_fragmentation(mut self, mode: FragmentationMode) -> Self {
+        self.fragmentation = Some(mode);
+        self
+    }
+
+    /// Return the configured fragmentation policy (if any).
+    pub fn fragmentation_mode(&self) -> Option<FragmentationMode> {
+        self.fragmentation
     }
 
     /// Append a track. Returns the resulting 1-based track id.
@@ -248,6 +308,128 @@ impl MovMuxer {
         }
         let moov = build_moov(self, &chunk_offsets, need_co64);
         push_atom(&mut out, *b"moov", &moov);
+        Ok(out)
+    }
+
+    /// Emit the fragmented file to a writer.
+    ///
+    /// Requires [`MovMuxer::with_fragmentation`] to have been called.
+    /// Layout: `ftyp` (with `iso5` / `dash` brands) → init `moov` (no
+    /// in-stbl samples, `mvex/trex` per track) → one `moof` + `mdat`
+    /// pair per fragment slice. Returns total bytes written.
+    pub fn write_to_fragmented<W: Write>(&self, w: &mut W) -> Result<u64> {
+        let bytes = self.encode_fragmented_to_vec()?;
+        w.write_all(&bytes).map_err(Error::from)?;
+        Ok(bytes.len() as u64)
+    }
+
+    /// Two-pass build of a fragmented MP4. Each fragment is laid out
+    /// in two passes: a sizing pass that determines the `moof` byte
+    /// length so the `trun.data_offset` can point at the first byte
+    /// of the trailing `mdat`'s payload, then an emit pass that
+    /// writes the boxes verbatim.
+    ///
+    /// Requires [`MovMuxer::with_fragmentation`]. Errors out when the
+    /// fragmentation policy is `None`, when there are zero tracks,
+    /// when any track has zero samples, or when the policy threshold
+    /// is zero (would slice every sample into its own fragment for
+    /// `ByFrameCount(0)`).
+    pub fn encode_fragmented_to_vec(&self) -> Result<Vec<u8>> {
+        let mode = self
+            .fragmentation
+            .ok_or_else(|| Error::invalid("MOV muxer: fragmentation policy not set"))?;
+        if self.tracks.is_empty() {
+            return Err(Error::invalid("MOV muxer: at least one track required"));
+        }
+        for (i, t) in self.tracks.iter().enumerate() {
+            if t.samples.is_empty() {
+                return Err(Error::invalid(format!(
+                    "MOV muxer: track {} has zero samples",
+                    i + 1
+                )));
+            }
+        }
+        match mode {
+            FragmentationMode::ByDuration(0) => {
+                return Err(Error::invalid(
+                    "MOV muxer: ByDuration threshold must be > 0",
+                ))
+            }
+            FragmentationMode::ByFrameCount(0) => {
+                return Err(Error::invalid(
+                    "MOV muxer: ByFrameCount threshold must be > 0",
+                ))
+            }
+            _ => {}
+        }
+
+        // ── Slice each track's flat sample list into per-fragment
+        //    runs. The primary track (index 0) drives the slice
+        //    boundaries; secondary tracks (audio paired to a video
+        //    primary) walk their samples until accumulated DTS in
+        //    primary-track-timescale ticks crosses the primary's
+        //    per-fragment boundary. Both rules degenerate to "every
+        //    sample is its own fragment row of the only track" for a
+        //    single-track input.
+        let fragments = slice_fragments(&self.tracks, mode);
+
+        // ── Pass 1: emit ftyp + init-moov (no samples yet).
+        let mut out = Vec::new();
+        out.extend_from_slice(&build_ftyp_fragmented());
+        let init_moov = build_init_moov(self);
+        push_atom(&mut out, *b"moov", &init_moov);
+
+        // ── Pass 2: per-fragment moof + mdat with two sub-passes
+        //    each so the trun.data_offset can be computed before the
+        //    moof is emitted.
+        let mut sequence_number: u32 = 1;
+        for fragment in &fragments {
+            // Skip empty fragments (can happen for trailing audio
+            // when primary track ended before the audio did — those
+            // residual audio rows roll into the final fragment, so
+            // genuinely empty fragments don't occur, but the guard
+            // is cheap).
+            if fragment.iter().all(|r| r.samples.is_empty()) {
+                continue;
+            }
+            // Sizing pass: build each traf with a placeholder
+            // data_offset = 0, measure the resulting moof, then
+            // recompute each traf with the correct offset.
+            //
+            // Per §8.8.7.1 with default-base-is-moof: each track's
+            // base-data-offset = position of the enclosing moof's
+            // first byte. Each trun.data_offset is then "offset from
+            // the moof start to the run's first sample". With one
+            // run per track per moof, that equals
+            //   moof_size + 8 (mdat header) + (cumulative bytes of
+            //   preceding tracks' samples in this fragment).
+            let moof_size = measure_moof(sequence_number, fragment);
+            let mut traf_data_offsets: Vec<i32> = Vec::with_capacity(fragment.len());
+            let mut cumulative_in_mdat: u64 = 0;
+            for run in fragment {
+                let do_val = (moof_size + 8 + cumulative_in_mdat) as i32;
+                traf_data_offsets.push(do_val);
+                cumulative_in_mdat += run.samples.iter().map(|s| s.data.len() as u64).sum::<u64>();
+            }
+            // Emit the moof with the real offsets.
+            let moof = build_moof(sequence_number, fragment, &traf_data_offsets);
+            debug_assert_eq!(
+                (moof.len() as u64) + 8,
+                moof_size,
+                "moof sizing pass mismatch"
+            );
+            push_atom(&mut out, *b"moof", &moof);
+            // Emit the mdat with all tracks' samples concatenated in
+            // track order (matching the offsets we just baked in).
+            let mut mdat_payload: Vec<u8> = Vec::new();
+            for run in fragment {
+                for s in run.samples {
+                    mdat_payload.extend_from_slice(&s.data);
+                }
+            }
+            push_atom(&mut out, *b"mdat", &mdat_payload);
+            sequence_number = sequence_number.saturating_add(1);
+        }
         Ok(out)
     }
 }
@@ -680,6 +862,411 @@ fn push_atom(out: &mut Vec<u8>, fourcc: [u8; 4], body: &[u8]) {
     out.extend_from_slice(&size.to_be_bytes());
     out.extend_from_slice(&fourcc);
     out.extend_from_slice(body);
+}
+
+// ────────────────────────── fragmented encoders ──────────────────────────
+
+/// One track's slice for a single fragment. References the source
+/// muxer's track (by index) plus the run of samples destined for this
+/// fragment's `trun`.
+struct FragmentRun<'a> {
+    /// Index into `MovMuxer::tracks` — used to look up the track id
+    /// (1-based: `track_idx + 1`) and media-timescale.
+    track_idx: usize,
+    samples: &'a [MuxSample],
+}
+
+/// Slice every track's flat sample list into per-fragment runs per
+/// the requested [`FragmentationMode`].
+///
+/// The output is `Vec<Vec<FragmentRun>>` — outer index = fragment
+/// number, inner index = per-track run inside that fragment. Tracks
+/// always appear in the same order they were added with
+/// [`MovMuxer::add_track`]. Empty runs are preserved (e.g. when the
+/// secondary track has no samples that overlap the primary's
+/// fragment window) so per-fragment track ids stay contiguous.
+fn slice_fragments(tracks: &[TrackWrite], mode: FragmentationMode) -> Vec<Vec<FragmentRun<'_>>> {
+    if tracks.is_empty() {
+        return Vec::new();
+    }
+    // Compute primary-track per-sample DTS table.
+    let primary = &tracks[0];
+    let primary_ts = primary.media_timescale.max(1) as u64;
+    let mut primary_dts_starts: Vec<u64> = Vec::with_capacity(primary.samples.len() + 1);
+    let mut dts: u64 = 0;
+    for s in &primary.samples {
+        primary_dts_starts.push(dts);
+        dts = dts.saturating_add(s.duration as u64);
+    }
+    primary_dts_starts.push(dts); // sentinel = end DTS
+
+    // Derive per-fragment primary-sample [start, end) index pairs
+    // from the policy.
+    let mut frag_primary_ranges: Vec<(usize, usize)> = Vec::new();
+    match mode {
+        FragmentationMode::ByDuration(threshold) => {
+            let mut start = 0usize;
+            let mut acc: u64 = 0;
+            for (i, s) in primary.samples.iter().enumerate() {
+                acc = acc.saturating_add(s.duration as u64);
+                if acc >= threshold {
+                    frag_primary_ranges.push((start, i + 1));
+                    start = i + 1;
+                    acc = 0;
+                }
+            }
+            if start < primary.samples.len() {
+                frag_primary_ranges.push((start, primary.samples.len()));
+            }
+        }
+        FragmentationMode::ByFrameCount(n) => {
+            let n = n as usize;
+            let mut start = 0usize;
+            while start < primary.samples.len() {
+                let end = (start + n).min(primary.samples.len());
+                frag_primary_ranges.push((start, end));
+                start = end;
+            }
+        }
+    }
+
+    // Convert each fragment's [start, end) primary-sample range into
+    // a primary-track *media-time* window so secondary tracks can be
+    // sliced along the same time boundary. The last fragment swallows
+    // any residual time so trailing secondary-track samples are not
+    // dropped (per DASH §6.3.4.2 "media segments cover the entire
+    // duration of the Representation").
+    let mut fragments: Vec<Vec<FragmentRun<'_>>> = Vec::with_capacity(frag_primary_ranges.len());
+    for (frag_idx, (p_start, p_end)) in frag_primary_ranges.iter().enumerate() {
+        let is_last = frag_idx + 1 == frag_primary_ranges.len();
+        let prim_start_dts = primary_dts_starts[*p_start];
+        let prim_end_dts = if is_last {
+            // Last fragment: sweep everything to the end.
+            u64::MAX
+        } else {
+            primary_dts_starts[*p_end]
+        };
+        let mut runs: Vec<FragmentRun<'_>> = Vec::with_capacity(tracks.len());
+        for (ti, t) in tracks.iter().enumerate() {
+            let run_slice = if ti == 0 {
+                &primary.samples[*p_start..*p_end]
+            } else {
+                // Walk the secondary track's flat sample list,
+                // selecting samples whose DTS-start (computed in
+                // its own timescale) lies within
+                // [prim_start_dts, prim_end_dts) *after* rescaling
+                // to the primary timescale.
+                let sec_ts = t.media_timescale.max(1) as u64;
+                let mut s_start: Option<usize> = None;
+                let mut s_end: Option<usize> = None;
+                let mut acc: u64 = 0;
+                for (i, s) in t.samples.iter().enumerate() {
+                    let start_in_prim = (acc * primary_ts + sec_ts / 2) / sec_ts;
+                    if s_start.is_none() && start_in_prim >= prim_start_dts {
+                        s_start = Some(i);
+                    }
+                    if start_in_prim >= prim_end_dts {
+                        s_end = Some(i);
+                        break;
+                    }
+                    acc = acc.saturating_add(s.duration as u64);
+                }
+                let lo = s_start.unwrap_or(t.samples.len());
+                let hi = s_end.unwrap_or(t.samples.len());
+                if lo <= hi {
+                    &t.samples[lo..hi]
+                } else {
+                    &t.samples[..0]
+                }
+            };
+            runs.push(FragmentRun {
+                track_idx: ti,
+                samples: run_slice,
+            });
+        }
+        fragments.push(runs);
+    }
+    fragments
+}
+
+/// Build the fragmented-MP4 `ftyp` atom.
+///
+/// Brands chosen for ISO/IEC 23009-1 DASH compatibility:
+///   * major = `iso5` (ISO BMFF §8.8.7.1 note — the brand that
+///     requires `default-base-is-moof` semantics in `tfhd`).
+///   * compatible = `iso5` + `isom` + `mp42` + `dash` + `msdh`.
+fn build_ftyp_fragmented() -> Vec<u8> {
+    let mut body = Vec::with_capacity(8 + 5 * 4);
+    body.extend_from_slice(b"iso5");
+    body.extend_from_slice(&0x0000_0200u32.to_be_bytes());
+    body.extend_from_slice(b"iso5");
+    body.extend_from_slice(b"isom");
+    body.extend_from_slice(b"mp42");
+    body.extend_from_slice(b"dash");
+    body.extend_from_slice(b"msdh");
+    let mut out = Vec::with_capacity(8 + body.len());
+    push_atom(&mut out, *b"ftyp", &body);
+    out
+}
+
+/// Build the init-segment `moov`. Per ISO/IEC 14496-12 §8.8.1, a
+/// fragmented file's `moov` declares the global movie + per-track
+/// structures (handler, codec config, timescale) but emits *empty*
+/// sample tables — the per-fragment `moof`s carry the actual sample
+/// indexing. Each track gets one `mvex/trex` defaults record.
+fn build_init_moov(m: &MovMuxer) -> Vec<u8> {
+    let mut moov = Vec::new();
+    push_atom(&mut moov, *b"mvhd", &build_init_mvhd(m));
+    for (idx, t) in m.tracks.iter().enumerate() {
+        let trak = build_init_trak(t, (idx as u32) + 1, m.movie_timescale);
+        push_atom(&mut moov, *b"trak", &trak);
+    }
+    // mvex with one trex per track.
+    let mut mvex = Vec::new();
+    for (idx, t) in m.tracks.iter().enumerate() {
+        let trex = build_trex(t, (idx as u32) + 1);
+        push_atom(&mut mvex, *b"trex", &trex);
+    }
+    push_atom(&mut moov, *b"mvex", &mvex);
+    moov
+}
+
+/// `mvhd` for the init segment. Same body as the non-fragmented
+/// `build_mvhd` but with `duration = 0` per DASH §6.3.4.2 (the
+/// presentation duration is reconstructed from the `moof` runs, not
+/// declared in `mvhd`).
+fn build_init_mvhd(m: &MovMuxer) -> Vec<u8> {
+    let mut p = vec![0u8; 100];
+    p[12..16].copy_from_slice(&m.movie_timescale.to_be_bytes());
+    // duration = 0 (set by DASH consumers — the fragment runs carry
+    // the actual playable duration). DASH spec note: "The duration
+    // of the movie may not be known at the time of authoring".
+    p[16..20].copy_from_slice(&0u32.to_be_bytes());
+    p[20..24].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // rate=1.0
+    p[24..26].copy_from_slice(&0x0100i16.to_be_bytes()); // volume=1.0
+    p[36..40].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    p[52..56].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    p[68..72].copy_from_slice(&0x4000_0000u32.to_be_bytes());
+    p[96..100].copy_from_slice(&((m.tracks.len() as u32) + 1).to_be_bytes());
+    p
+}
+
+/// Build an init-segment `trak`. Same shape as `build_trak` but the
+/// `stbl` body is empty per ISO BMFF §8.8.4 (no in-moov samples).
+fn build_init_trak(t: &TrackWrite, track_id: u32, _movie_ts: u32) -> Vec<u8> {
+    let mut trak = Vec::new();
+    // tkhd: declare duration = 0 (set by fragments).
+    push_atom(&mut trak, *b"tkhd", &build_init_tkhd(t, track_id));
+    push_atom(&mut trak, *b"mdia", &build_init_mdia(t));
+    trak
+}
+
+fn build_init_tkhd(t: &TrackWrite, track_id: u32) -> Vec<u8> {
+    let mut p = vec![0u8; 84];
+    p[3] = 0x07; // flags
+    p[12..16].copy_from_slice(&track_id.to_be_bytes());
+    // duration = 0 for fragmented init segments.
+    p[20..24].copy_from_slice(&0u32.to_be_bytes());
+    if matches!(t.kind, MuxTrackKind::Audio { .. }) {
+        p[36..38].copy_from_slice(&0x0100i16.to_be_bytes());
+    }
+    p[40..44].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    p[56..60].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    p[72..76].copy_from_slice(&0x4000_0000u32.to_be_bytes());
+    let (w_fp, h_fp) = match &t.kind {
+        MuxTrackKind::Video { width, height, .. } => {
+            ((*width as u32) << 16, (*height as u32) << 16)
+        }
+        MuxTrackKind::Audio { .. } => (0, 0),
+    };
+    p[76..80].copy_from_slice(&w_fp.to_be_bytes());
+    p[80..84].copy_from_slice(&h_fp.to_be_bytes());
+    p
+}
+
+fn build_init_mdia(t: &TrackWrite) -> Vec<u8> {
+    let mut mdia = Vec::new();
+    push_atom(&mut mdia, *b"mdhd", &build_init_mdhd(t));
+    push_atom(&mut mdia, *b"hdlr", &build_hdlr(t));
+    push_atom(&mut mdia, *b"minf", &build_init_minf(t));
+    mdia
+}
+
+fn build_init_mdhd(t: &TrackWrite) -> Vec<u8> {
+    let mut p = vec![0u8; 24];
+    p[12..16].copy_from_slice(&t.media_timescale.to_be_bytes());
+    // duration = 0 for fragmented init segments.
+    p[16..20].copy_from_slice(&0u32.to_be_bytes());
+    p[20..22].copy_from_slice(&0x55C4u16.to_be_bytes());
+    p
+}
+
+fn build_init_minf(t: &TrackWrite) -> Vec<u8> {
+    let mut minf = Vec::new();
+    match &t.kind {
+        MuxTrackKind::Video { .. } => push_atom(&mut minf, *b"vmhd", &build_vmhd()),
+        MuxTrackKind::Audio { .. } => push_atom(&mut minf, *b"smhd", &build_smhd()),
+    }
+    push_atom(&mut minf, *b"dinf", &build_dinf());
+    push_atom(&mut minf, *b"stbl", &build_init_stbl(t));
+    minf
+}
+
+/// Init-segment `stbl`: same `stsd` as the non-fragmented build, but
+/// `stts`/`stsc`/`stsz`/`stco` are all empty per ISO BMFF §8.8.4.
+fn build_init_stbl(t: &TrackWrite) -> Vec<u8> {
+    let mut stbl = Vec::new();
+    push_atom(&mut stbl, *b"stsd", &build_stsd(t));
+    push_atom(&mut stbl, *b"stts", &build_empty_stts());
+    push_atom(&mut stbl, *b"stsc", &build_empty_stsc());
+    push_atom(&mut stbl, *b"stsz", &build_empty_stsz());
+    push_atom(&mut stbl, *b"stco", &build_empty_stco());
+    stbl
+}
+
+fn build_empty_stts() -> Vec<u8> {
+    let mut p = Vec::with_capacity(8);
+    p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+    p.extend_from_slice(&0u32.to_be_bytes()); // entry_count = 0
+    p
+}
+
+fn build_empty_stsc() -> Vec<u8> {
+    let mut p = Vec::with_capacity(8);
+    p.extend_from_slice(&0u32.to_be_bytes());
+    p.extend_from_slice(&0u32.to_be_bytes());
+    p
+}
+
+fn build_empty_stsz() -> Vec<u8> {
+    let mut p = Vec::with_capacity(12);
+    p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+    p.extend_from_slice(&0u32.to_be_bytes()); // sample_size = 0
+    p.extend_from_slice(&0u32.to_be_bytes()); // count = 0
+    p
+}
+
+fn build_empty_stco() -> Vec<u8> {
+    let mut p = Vec::with_capacity(8);
+    p.extend_from_slice(&0u32.to_be_bytes());
+    p.extend_from_slice(&0u32.to_be_bytes());
+    p
+}
+
+/// One `trex` per track. ISO/IEC 14496-12 §8.8.3.2.
+///
+/// Default sample flags = `0x0001_0000` (`sample_is_non_sync_sample`
+/// set) for video tracks — every per-fragment override that lands a
+/// sync sample then needs to clear the bit via the `trun`'s
+/// `first_sample_flags`. For audio we keep the default at 0 (sync)
+/// since every audio sample is conventionally a sync sample.
+fn build_trex(t: &TrackWrite, track_id: u32) -> Vec<u8> {
+    let mut p = Vec::with_capacity(24);
+    p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+    p.extend_from_slice(&track_id.to_be_bytes());
+    p.extend_from_slice(&1u32.to_be_bytes()); // default_sample_description_index
+    p.extend_from_slice(&0u32.to_be_bytes()); // default_sample_duration (we send per-sample)
+    p.extend_from_slice(&0u32.to_be_bytes()); // default_sample_size (per-sample)
+    let default_flags = match &t.kind {
+        MuxTrackKind::Video { .. } => 0x0001_0000u32, // non-sync default
+        MuxTrackKind::Audio { .. } => 0u32,           // sync default
+    };
+    p.extend_from_slice(&default_flags.to_be_bytes());
+    p
+}
+
+/// Build the per-fragment `tfhd` box payload using
+/// `default-base-is-moof` (no explicit base_data_offset; the spec's
+/// "first byte of the enclosing Movie Fragment Box" anchor).
+///
+/// Per ISO/IEC 14496-12 §8.8.7: when every sample has explicit size +
+/// duration + flags via `trun`, no per-fragment defaults are needed,
+/// so we omit them all and the `tf_flags` carries only the
+/// default-base-is-moof bit.
+fn build_tfhd(track_id: u32) -> Vec<u8> {
+    use crate::fragment::TFHD_DEFAULT_BASE_IS_MOOF;
+    let flags = TFHD_DEFAULT_BASE_IS_MOOF;
+    let mut p = Vec::with_capacity(8);
+    p.extend_from_slice(&flags.to_be_bytes());
+    p.extend_from_slice(&track_id.to_be_bytes());
+    p
+}
+
+/// Build a `trun` carrying explicit per-sample size + duration +
+/// flags for every sample in the run. ISO/IEC 14496-12 §8.8.8.2.
+///
+/// Layout produced (each per-sample row = 12 bytes):
+///   `[ver+flags:4][sample_count:4][data_offset:4]`
+///   N × `[duration:4][size:4][flags:4]`
+///
+/// `data_offset` is the trun-payload signed `i32`; the caller supplies
+/// the precomputed value (it depends on the moof's total byte size,
+/// which is fixed at this point).
+fn build_trun(samples: &[MuxSample], data_offset: i32) -> Vec<u8> {
+    use crate::fragment::{
+        TRUN_DATA_OFFSET_PRESENT, TRUN_SAMPLE_DURATION_PRESENT, TRUN_SAMPLE_FLAGS_PRESENT,
+        TRUN_SAMPLE_SIZE_PRESENT,
+    };
+    let flags = TRUN_DATA_OFFSET_PRESENT
+        | TRUN_SAMPLE_DURATION_PRESENT
+        | TRUN_SAMPLE_SIZE_PRESENT
+        | TRUN_SAMPLE_FLAGS_PRESENT;
+    let mut p = Vec::with_capacity(12 + samples.len() * 12);
+    p.extend_from_slice(&flags.to_be_bytes()); // ver=0 + flags
+    p.extend_from_slice(&(samples.len() as u32).to_be_bytes()); // sample_count
+    p.extend_from_slice(&data_offset.to_be_bytes()); // data_offset (signed)
+    for s in samples {
+        p.extend_from_slice(&s.duration.to_be_bytes());
+        p.extend_from_slice(&(s.data.len() as u32).to_be_bytes());
+        // sample_flags: 0 (sync) for keyframes, 0x0001_0000 (non-sync)
+        // otherwise. ISO/IEC 14496-12 §8.8.3.1 — `sample_is_non_sync_
+        // sample` bit at 0x0001_0000.
+        let f: u32 = if s.keyframe { 0 } else { 0x0001_0000 };
+        p.extend_from_slice(&f.to_be_bytes());
+    }
+    p
+}
+
+/// Build a `traf` payload (per §8.8.6.2): `tfhd` + `trun`.
+fn build_traf(run: &FragmentRun<'_>, data_offset: i32) -> Vec<u8> {
+    let track_id = (run.track_idx as u32) + 1;
+    let mut traf = Vec::new();
+    push_atom(&mut traf, *b"tfhd", &build_tfhd(track_id));
+    push_atom(&mut traf, *b"trun", &build_trun(run.samples, data_offset));
+    traf
+}
+
+/// Build the full `moof` payload for a fragment. The `data_offsets`
+/// slice is parallel to `fragment` and carries the precomputed
+/// `trun.data_offset` for each track's run.
+fn build_moof(sequence_number: u32, fragment: &[FragmentRun<'_>], data_offsets: &[i32]) -> Vec<u8> {
+    debug_assert_eq!(fragment.len(), data_offsets.len());
+    let mut moof = Vec::new();
+    push_atom(&mut moof, *b"mfhd", &build_mfhd(sequence_number));
+    for (run, &data_offset) in fragment.iter().zip(data_offsets) {
+        push_atom(&mut moof, *b"traf", &build_traf(run, data_offset));
+    }
+    moof
+}
+
+fn build_mfhd(sequence_number: u32) -> Vec<u8> {
+    let mut p = Vec::with_capacity(8);
+    p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+    p.extend_from_slice(&sequence_number.to_be_bytes());
+    p
+}
+
+/// Measure the byte length of the full `moof` box (header + payload)
+/// for the supplied fragment. Used by the two-pass build to compute
+/// each track's `trun.data_offset` (which depends on the moof's
+/// total byte length).
+fn measure_moof(sequence_number: u32, fragment: &[FragmentRun<'_>]) -> u64 {
+    // Sizing pass uses a placeholder data_offset of 0 — the moof's
+    // byte length doesn't depend on the value of the offset, only
+    // on its presence (a fixed 4-byte slot).
+    let placeholder: Vec<i32> = (0..fragment.len()).map(|_| 0).collect();
+    let moof = build_moof(sequence_number, fragment, &placeholder);
+    8 + moof.len() as u64
 }
 
 #[cfg(test)]

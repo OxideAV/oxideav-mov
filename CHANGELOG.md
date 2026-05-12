@@ -9,6 +9,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 20 — fragmented MP4 / fMP4 / DASH muxer (ISO/IEC 14496-12
+  §8.8 write side). Pairs with the round-18 `moof/traf/trun` decode
+  path so the crate now round-trips fragmented streams in both
+  directions.
+  - `FragmentationMode { ByDuration(u64), ByFrameCount(u32) }` —
+    opt-in fragmentation policy. Slices the primary (first-added)
+    track's flat sample list into per-fragment runs along either
+    accumulated media-timescale ticks (`ByDuration`) or accumulated
+    sample count (`ByFrameCount`). Secondary tracks (audio paired to
+    a video primary) snap to the same time boundary, rescaled into
+    each track's own media timescale.
+  - `MovMuxer::with_fragmentation(mode)` — opt-in. The non-fragmented
+    `write_to` / `encode_to_vec` path is unchanged and ignores the
+    setting.
+  - `MovMuxer::write_to_fragmented::<W: Write>(&self, w)` and
+    `MovMuxer::encode_fragmented_to_vec()` — emit the fragmented
+    file. Layout produced:
+    - `ftyp` — major `iso5`, compat `iso5` / `isom` / `mp42` /
+      `dash` / `msdh` (ISO BMFF §8.8.7.1 note +
+      ISO/IEC 23009-1 §6.3.4.2 DASH compatibility).
+    - Init `moov` — `mvhd` (duration=0), per-track `trak` with
+      empty `stbl` (`stts`/`stsc`/`stsz`/`stco` all
+      `entry_count=0`), one `mvex/trex` per track. The `trex`'s
+      `default_sample_flags` is `0x0001_0000` (non-sync) for video
+      tracks and `0` (sync) for audio.
+    - Media segments — one `moof` + `mdat` pair per fragment.
+      `moof` carries `mfhd` (sequence number climbing from 1) plus
+      one `traf` per track. Each `traf` is `tfhd` (with
+      `default-base-is-moof` flag and no per-fragment defaults) +
+      `trun` (with `data_offset` + `sample_duration` +
+      `sample_size` + `sample_flags` flags set; per-sample rows
+      carry the explicit duration / size / keyframe flag).
+  - Two-pass moof sizing — the muxer first measures the moof byte
+    length with placeholder data offsets, then re-emits with the
+    real `trun.data_offset` values pointing at the first byte of
+    each track's run inside the trailing `mdat` payload.
+  - `MovMuxer::fragmentation_mode()` — read-back accessor for the
+    configured policy.
+  - Tests:
+    - `synth_round20.rs`:
+      - `fragmented_by_frame_count_emits_three_fragments_for_5_samples_n2`
+        — 5-frame video, `ByFrameCount(2)` → 3 fragments
+        (sequence numbers `[1, 2, 3]`), per-sample bytes survive
+        verbatim through the demuxer.
+      - `fragmented_by_duration_slices_along_primary_timebase`
+        — 6 frames × 1000 ticks each, `ByDuration(2000)` →
+        3 fragments of 2 samples.
+      - `fragmented_keyframe_flag_round_trips_via_trun_sample_flags`
+        — single-fragment 5-sample run; sample 0's `keyframe = true`
+        and samples 1–4's `keyframe = false` survive the
+        `trun.sample_flags` round-trip.
+      - `fragmented_dts_climbs_monotonically_across_fragment_boundaries`
+        — verifies the per-track DTS cursor advances through
+        fragment boundaries (round-18 demuxer threads `dts_cursor`
+        across moofs).
+      - `fragmented_audio_only_track_works` — 8-sample audio-only
+        fragmented MP4.
+      - `fragmented_init_segment_has_ftyp_then_moov_layout`
+        — byte-level check the wire order is `ftyp` → `moov` → first
+        `moof` and that `iso5` + `dash` brand FourCCs appear.
+      - `fragmented_requires_fragmentation_mode` /
+        `fragmented_by_{frame_count,duration}_zero_rejected` /
+        `fragmented_empty_track_list_rejected` /
+        `fragmented_track_with_zero_samples_rejected` — error-path
+        coverage.
+      - `ffprobe_accepts_fragmented_output` — opt-in `ffprobe -v
+        error -of json -show_format -show_streams` cross-check;
+        no-op (with a stderr note) when ffprobe isn't on PATH.
+
 - Round 19 — write-side `MovMuxer` for non-fragmented MOV/MP4. Builds
   a structurally-valid `ftyp` + `mdat` + `moov` file from per-track
   sample lists; the emitted bytes are accepted by `ffprobe -of json`
