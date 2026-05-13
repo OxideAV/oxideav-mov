@@ -291,6 +291,11 @@ pub const MEHD: [u8; 4] = fourcc("mehd"); // movie-extends header
 pub const MOOF: [u8; 4] = fourcc("moof"); // movie fragment (top-level)
 pub const TRAF: [u8; 4] = fourcc("traf"); // track fragment inside moof
 
+// Round-21: Movie-fragment random-access atoms (ISO BMFF §8.8.9–§8.8.11).
+pub const MFRA: [u8; 4] = fourcc("mfra"); // movie-fragment random-access box (end-of-file)
+pub const TFRA: [u8; 4] = fourcc("tfra"); // track-fragment random-access entries (per track)
+pub const MFRO: [u8; 4] = fourcc("mfro"); // movie-fragment random-access offset (size_of_mfra)
+
 // Round-3: Composition-shift-least-greatest atom.
 pub const CSLG: [u8; 4] = fourcc("cslg");
 

@@ -53,10 +53,19 @@ directions.
 Seek support: `MovDemuxer::seek_to(stream, pts)` walks the per-track
 sample queue, snaps to the largest sync (`stss`) sample at-or-before
 the target DTS, and resets the demuxer cursor so the next
-`next_packet()` re-emits from that sample. Non-fragmented files only
-in this round; fragmented (`moof/traf/trun`) seek over `tfra` is a
-follow-up. Algorithm: QTFF "Finding a Sample" (pp. 79–80), mirroring
-`oxideav-mp4`'s `Mp4Demuxer::seek_to`.
+`next_packet()` re-emits from that sample. Algorithm: QTFF "Finding a
+Sample" (pp. 79–80), mirroring `oxideav-mp4`'s `Mp4Demuxer::seek_to`.
+
+Round 21 adds **fragmented-MP4 seek** via the ISO/IEC 14496-12
+§8.8.10 `tfra` (Track Fragment Random Access Box) at open time. The
+demuxer walks `mfra/tfra/mfro` once and `seek_to` binary-searches
+the per-track entries for the largest entry whose *presentation*
+time is `<= target_pts` (§8.8.10.3 — `tfra` rows are PTS-keyed),
+locating the matching sync sample in the flat queue and snapping
+`self.next`. Files without `mfra` fall back to a linear scan of the
+round-18 flattened `fragment_samples` queue. `tfdt` (§8.8.12) is
+now also parsed so per-fragment DTS climbs from the writer-supplied
+baseline rather than a re-zeroed cursor.
 
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to

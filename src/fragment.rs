@@ -37,7 +37,7 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::atom::{read_payload, walk_children, AtomHeader, MEHD, TRAF, TREX};
+use crate::atom::{read_payload, walk_children, AtomHeader, MEHD, MFRO, TFRA, TRAF, TREX};
 use crate::sample_table::SampleEntry;
 
 #[cfg(feature = "registry")]
@@ -522,24 +522,30 @@ pub fn parse_trun(payload: &[u8]) -> Result<Trun> {
     })
 }
 
-/// Walk a `traf` container, collecting the single `tfhd` and any
-/// number of `trun`s. The order on the wire is `[tfhd][trun ...]`
-/// per §8.8.6.2; the walker does not enforce ordering — derived
-/// specs add sibling boxes (`sdtp` / `subs` / `saio` / `sbgp`) that
-/// the round-18 demuxer ignores.
+/// Walk a `traf` container, collecting the single `tfhd`, any
+/// number of `trun`s, and the optional `tfdt`
+/// (Track Fragment Decode Time, §8.8.12). The order on the wire is
+/// `[tfhd][tfdt?][trun ...]` per §8.8.6.2; the walker does not
+/// enforce ordering — derived specs add sibling boxes (`sdtp` /
+/// `subs` / `saio` / `sbgp`) that the round-18 demuxer ignores.
 pub fn parse_traf<R: Read + Seek + ?Sized>(
     r: &mut R,
     hdr: &AtomHeader,
-) -> Result<(Option<Tfhd>, Vec<Trun>)> {
+) -> Result<(Option<Tfhd>, Option<u64>, Vec<Trun>)> {
     let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
     let mut tfhd: Option<Tfhd> = None;
+    let mut tfdt: Option<u64> = None;
     let mut truns: Vec<Trun> = Vec::new();
     walk_children(r, Some(body_end), |r, child| {
         match &child.fourcc {
             b"tfhd" => {
                 let body = read_payload(r, child)?;
                 tfhd = Some(parse_tfhd(&body)?);
+            }
+            b"tfdt" => {
+                let body = read_payload(r, child)?;
+                tfdt = Some(parse_tfdt(&body)?);
             }
             b"trun" => {
                 let body = read_payload(r, child)?;
@@ -549,7 +555,52 @@ pub fn parse_traf<R: Read + Seek + ?Sized>(
         }
         Ok(())
     })?;
-    Ok((tfhd, truns))
+    Ok((tfhd, tfdt, truns))
+}
+
+/// Parse a `tfdt` payload per ISO/IEC 14496-12 §8.8.12.2.
+///
+/// On-disk layout:
+/// ```text
+/// [ver+flags:4]
+/// version == 0 → [baseMediaDecodeTime:4]
+/// version == 1 → [baseMediaDecodeTime:8]
+/// ```
+///
+/// Returns the absolute decode-time of the *first* sample of the
+/// fragment in the enclosing track's `mdhd.time_scale`. Threaded
+/// into [`resolve_traf_samples`] as the `track_media_time` argument
+/// so per-fragment DTS climbs from the writer-supplied baseline
+/// rather than from a re-zeroed cursor.
+pub fn parse_tfdt(payload: &[u8]) -> Result<u64> {
+    if payload.len() < 4 {
+        return Err(Error::invalid("MOV: tfdt payload < 4 bytes"));
+    }
+    let version = payload[0];
+    match version {
+        0 => {
+            if payload.len() < 8 {
+                return Err(Error::invalid("MOV: tfdt v0 payload < 8 bytes"));
+            }
+            Ok(u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]) as u64)
+        }
+        1 => {
+            if payload.len() < 12 {
+                return Err(Error::invalid("MOV: tfdt v1 payload < 12 bytes"));
+            }
+            Ok(u64::from_be_bytes([
+                payload[4],
+                payload[5],
+                payload[6],
+                payload[7],
+                payload[8],
+                payload[9],
+                payload[10],
+                payload[11],
+            ]))
+        }
+        _ => Err(Error::invalid("MOV: tfdt unsupported version")),
+    }
 }
 
 /// Parse a `moof` container, returning the parsed `mfhd` and one
@@ -576,9 +627,9 @@ pub fn parse_moof<R: Read + Seek + ?Sized>(
                 mfhd = Some(parse_mfhd(&body)?);
             }
             t if t == &TRAF => {
-                let (tfhd, truns) = parse_traf(r, child)?;
+                let (tfhd, tfdt, truns) = parse_traf(r, child)?;
                 if let Some(tfhd) = tfhd {
-                    trafs.push(TrafRecord { tfhd, truns });
+                    trafs.push(TrafRecord { tfhd, tfdt, truns });
                 }
             }
             _ => {}
@@ -593,6 +644,13 @@ pub fn parse_moof<R: Read + Seek + ?Sized>(
 pub struct TrafRecord {
     /// The mandatory `tfhd` defaults.
     pub tfhd: Tfhd,
+    /// Optional `tfdt` (Track Fragment Decode Time, §8.8.12). When
+    /// present, supplies the absolute `baseMediaDecodeTime` of the
+    /// first sample in this fragment in `mdhd.time_scale` ticks; the
+    /// demuxer threads it into [`resolve_traf_samples`] as
+    /// `track_media_time` so per-fragment DTS climbs from the
+    /// writer-supplied baseline rather than a re-zeroed cursor.
+    pub tfdt: Option<u64>,
     /// Zero or more `trun` runs in declaration order.
     pub truns: Vec<Trun>,
 }
@@ -759,6 +817,229 @@ fn apply_signed_offset(base: u64, off: i32) -> Result<u64> {
 ///   (the LSB of the third byte from the right when read MSB-first).
 pub fn sample_flags_is_sync(flags: u32) -> bool {
     (flags & 0x0001_0000) == 0
+}
+
+// ─────────────── tfra / mfra / mfro (§8.8.9–§8.8.11) ───────────────
+
+/// One row of a `tfra` (Track Fragment Random Access Box, §8.8.10.2).
+///
+/// Each entry pinpoints one *sync* sample inside a fragmented stream:
+/// `time` is the sample's decode-time-of-sync in the track's `mdhd`
+/// timescale and `moof_offset` is the absolute byte offset of the
+/// `moof` that contains the sample. The triple
+/// `(traf_number, trun_number, sample_number)` is 1-based and
+/// uniquely identifies the sample inside that `moof`.
+///
+/// The on-disk byte widths of the trailing three fields are encoded
+/// in the parent `tfra`'s `length_size_of_*` nibbles (each ∈ {1,2,3,4}
+/// bytes per §8.8.10.3); the parser widens them all to `u32`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TfraEntry {
+    /// Decode-time of the indexed sync sample in `mdhd.time_scale`
+    /// ticks. Monotonically increases across entries within a single
+    /// `tfra` per §8.8.10.3 ("the entries are stored in increasing
+    /// order of time").
+    pub time: u64,
+    /// Absolute byte offset of the enclosing `moof` from the start
+    /// of the file (the "first byte of the enclosing Movie Fragment
+    /// Box" per §8.8.10.3, matching the `moof_start` anchor used by
+    /// `resolve_traf_samples`).
+    pub moof_offset: u64,
+    /// 1-based index of the `traf` inside the moof that contains the
+    /// indexed sample.
+    pub traf_number: u32,
+    /// 1-based index of the `trun` inside the `traf` that contains
+    /// the indexed sample.
+    pub trun_number: u32,
+    /// 1-based index of the sample within the `trun`'s sample list.
+    pub sample_number: u32,
+}
+
+/// Parsed `tfra` box per ISO/IEC 14496-12 §8.8.10. One `tfra` per
+/// track that has fragmented random-access entries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tfra {
+    /// Track this index applies to (matches `tkhd.track_id`).
+    pub track_id: u32,
+    /// Per-entry decode-time and byte-offset table.
+    pub entries: Vec<TfraEntry>,
+}
+
+/// Parsed `mfro` box per ISO/IEC 14496-12 §8.8.11. Always the very
+/// last top-level box; carries the total byte length of the
+/// preceding `mfra`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mfro {
+    /// Total byte length of the immediately-preceding `mfra` box
+    /// (including the 8-byte `mfra` header itself, and the `mfro`
+    /// trailer). Used to locate `mfra` without scanning forward from
+    /// `moov`.
+    pub size: u32,
+}
+
+/// Parse a `tfra` payload per §8.8.10.3.
+///
+/// On-disk layout:
+/// ```text
+/// [ver+flags:4]
+/// [track_ID:4]
+/// [reserved:26 bits = 0]
+/// [length_size_of_traf_num:2 bits]
+/// [length_size_of_trun_num:2 bits]
+/// [length_size_of_sample_num:2 bits]
+/// [number_of_entry:4]
+/// per entry:
+///   v0 → [time:4][moof_offset:4]
+///   v1 → [time:8][moof_offset:8]
+///   [traf_number:1..4][trun_number:1..4][sample_number:1..4]
+/// ```
+///
+/// The three `length_size_*` 2-bit fields each encode "byte width
+/// minus 1", so 0 → 1 byte, 3 → 4 bytes. The parser widens every
+/// field to `u32` on read.
+pub fn parse_tfra(payload: &[u8]) -> Result<Tfra> {
+    if payload.len() < 16 {
+        return Err(Error::invalid("MOV: tfra payload < 16 bytes"));
+    }
+    let version = payload[0];
+    let track_id = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
+    let len_word = u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]]);
+    let length_size_of_traf_num = (((len_word >> 4) & 0x3) + 1) as usize;
+    let length_size_of_trun_num = (((len_word >> 2) & 0x3) + 1) as usize;
+    let length_size_of_sample_num = ((len_word & 0x3) + 1) as usize;
+    let number_of_entry = u32::from_be_bytes([payload[12], payload[13], payload[14], payload[15]]);
+
+    let time_off_width: usize = match version {
+        0 => 8,  // 4 + 4
+        1 => 16, // 8 + 8
+        _ => return Err(Error::invalid("MOV: tfra unsupported version")),
+    };
+    let per_entry = time_off_width
+        + length_size_of_traf_num
+        + length_size_of_trun_num
+        + length_size_of_sample_num;
+    let want = per_entry
+        .checked_mul(number_of_entry as usize)
+        .and_then(|t| t.checked_add(16))
+        .ok_or_else(|| Error::invalid("MOV: tfra entry table overflow"))?;
+    if payload.len() < want {
+        return Err(Error::invalid("MOV: tfra entry table truncated"));
+    }
+    let mut entries = Vec::with_capacity(number_of_entry as usize);
+    let mut off = 16usize;
+    for _ in 0..number_of_entry {
+        let (time, moof_offset) = match version {
+            0 => {
+                let t = u32::from_be_bytes([
+                    payload[off],
+                    payload[off + 1],
+                    payload[off + 2],
+                    payload[off + 3],
+                ]) as u64;
+                let m = u32::from_be_bytes([
+                    payload[off + 4],
+                    payload[off + 5],
+                    payload[off + 6],
+                    payload[off + 7],
+                ]) as u64;
+                off += 8;
+                (t, m)
+            }
+            _ => {
+                let t = u64::from_be_bytes([
+                    payload[off],
+                    payload[off + 1],
+                    payload[off + 2],
+                    payload[off + 3],
+                    payload[off + 4],
+                    payload[off + 5],
+                    payload[off + 6],
+                    payload[off + 7],
+                ]);
+                let m = u64::from_be_bytes([
+                    payload[off + 8],
+                    payload[off + 9],
+                    payload[off + 10],
+                    payload[off + 11],
+                    payload[off + 12],
+                    payload[off + 13],
+                    payload[off + 14],
+                    payload[off + 15],
+                ]);
+                off += 16;
+                (t, m)
+            }
+        };
+        let traf_number = read_var_be_u32(&payload[off..off + length_size_of_traf_num]);
+        off += length_size_of_traf_num;
+        let trun_number = read_var_be_u32(&payload[off..off + length_size_of_trun_num]);
+        off += length_size_of_trun_num;
+        let sample_number = read_var_be_u32(&payload[off..off + length_size_of_sample_num]);
+        off += length_size_of_sample_num;
+        entries.push(TfraEntry {
+            time,
+            moof_offset,
+            traf_number,
+            trun_number,
+            sample_number,
+        });
+    }
+    Ok(Tfra { track_id, entries })
+}
+
+/// Parse an `mfro` payload per §8.8.11.2. Always 8 bytes:
+/// `[ver+flags:4][size:4]`.
+pub fn parse_mfro(payload: &[u8]) -> Result<Mfro> {
+    if payload.len() < 8 {
+        return Err(Error::invalid("MOV: mfro payload < 8 bytes"));
+    }
+    let size = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
+    Ok(Mfro { size })
+}
+
+/// Walk an `mfra` container, returning every `tfra` row plus the
+/// trailing `mfro` (when present).
+///
+/// `mfra` carries zero or more `tfra` boxes (one per track with a
+/// random-access index) followed by exactly one `mfro` (§8.8.9.2).
+/// Unknown children are silently skipped — derived ISO BMFF specs
+/// occasionally add new sub-boxes inside `mfra` and we want
+/// forward compatibility.
+pub fn parse_mfra<R: Read + Seek + ?Sized>(
+    r: &mut R,
+    hdr: &AtomHeader,
+) -> Result<(Vec<Tfra>, Option<Mfro>)> {
+    let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
+    r.seek(SeekFrom::Start(hdr.payload_offset))?;
+    let mut tfras: Vec<Tfra> = Vec::new();
+    let mut mfro: Option<Mfro> = None;
+    walk_children(r, Some(body_end), |r, child| {
+        match &child.fourcc {
+            t if t == &TFRA => {
+                let body = read_payload(r, child)?;
+                tfras.push(parse_tfra(&body)?);
+            }
+            t if t == &MFRO => {
+                let body = read_payload(r, child)?;
+                mfro = Some(parse_mfro(&body)?);
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+    Ok((tfras, mfro))
+}
+
+/// Read a variable-width big-endian unsigned integer (1..=4 bytes)
+/// into a `u32`. Used by `parse_tfra` for the `traf_number`,
+/// `trun_number`, and `sample_number` fields whose widths are
+/// declared by the `length_size_of_*` nibbles.
+fn read_var_be_u32(bytes: &[u8]) -> u32 {
+    let mut v: u32 = 0;
+    for &b in bytes {
+        v = (v << 8) | (b as u32);
+    }
+    v
 }
 
 #[cfg(test)]
@@ -935,6 +1216,7 @@ mod tests {
         };
         let rec = TrafRecord {
             tfhd,
+            tfdt: None,
             truns: vec![trun],
         };
         let moof_start = 1000u64;
@@ -984,6 +1266,7 @@ mod tests {
         };
         let rec = TrafRecord {
             tfhd,
+            tfdt: None,
             truns: vec![trun],
         };
         let (samples, _, dts) = resolve_traf_samples(&rec, None, 0, 0, 1000, 5).unwrap();
@@ -1034,6 +1317,7 @@ mod tests {
         };
         let rec = TrafRecord {
             tfhd,
+            tfdt: None,
             truns: vec![trun],
         };
         let (samples, _, _) = resolve_traf_samples(&rec, Some(&trex), 0, 0, 0, 0).unwrap();
@@ -1056,6 +1340,7 @@ mod tests {
         };
         let rec = TrafRecord {
             tfhd,
+            tfdt: None,
             truns: Vec::new(),
         };
         let (samples, _, dts) = resolve_traf_samples(&rec, None, 0, 100, 500, 0).unwrap();
@@ -1097,5 +1382,130 @@ mod tests {
         p.extend_from_slice(&10u32.to_be_bytes());
         p.extend_from_slice(&10u32.to_be_bytes());
         assert!(parse_trun(&p).is_err());
+    }
+
+    #[test]
+    fn tfra_v0_single_entry_default_widths() {
+        // §8.8.10: v0 → 32-bit time + 32-bit moof_offset; default
+        // length_size_of_* nibbles = 0 → 1 byte each for traf_num /
+        // trun_num / sample_num.
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags (ver=0)
+        p.extend_from_slice(&7u32.to_be_bytes()); // track_id
+        p.extend_from_slice(&0u32.to_be_bytes()); // length_size word
+        p.extend_from_slice(&1u32.to_be_bytes()); // number_of_entry
+        p.extend_from_slice(&12345u32.to_be_bytes()); // time
+        p.extend_from_slice(&5675u32.to_be_bytes()); // moof_offset
+        p.push(1); // traf_number
+        p.push(1); // trun_number
+        p.push(1); // sample_number
+        let t = parse_tfra(&p).unwrap();
+        assert_eq!(t.track_id, 7);
+        assert_eq!(t.entries.len(), 1);
+        assert_eq!(t.entries[0].time, 12345);
+        assert_eq!(t.entries[0].moof_offset, 5675);
+        assert_eq!(t.entries[0].traf_number, 1);
+        assert_eq!(t.entries[0].trun_number, 1);
+        assert_eq!(t.entries[0].sample_number, 1);
+    }
+
+    #[test]
+    fn tfra_v1_multi_entry_64bit_time_offset() {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0x01_00_00_00u32.to_be_bytes()); // version=1
+        p.extend_from_slice(&1u32.to_be_bytes()); // track_id
+        p.extend_from_slice(&0u32.to_be_bytes()); // length_size word (all 1 byte)
+        p.extend_from_slice(&2u32.to_be_bytes()); // n
+                                                  // entry 0
+        p.extend_from_slice(&1u64.to_be_bytes()); // time
+        p.extend_from_slice(&100u64.to_be_bytes()); // moof_offset
+        p.extend_from_slice(&[1, 1, 1]);
+        // entry 1
+        p.extend_from_slice(&500u64.to_be_bytes());
+        p.extend_from_slice(&8200u64.to_be_bytes());
+        p.extend_from_slice(&[1, 2, 1]);
+        let t = parse_tfra(&p).unwrap();
+        assert_eq!(t.entries.len(), 2);
+        assert_eq!(t.entries[1].time, 500);
+        assert_eq!(t.entries[1].moof_offset, 8200);
+        assert_eq!(t.entries[1].trun_number, 2);
+    }
+
+    #[test]
+    fn tfra_variable_width_fields() {
+        // length_size_of_traf_num=1 (2 bytes), trun=2 (3 bytes),
+        // sample=3 (4 bytes). Encoded as 0b01 01 10 11 in bits [5:0],
+        // so the low 6 bits = 0b011011 = 0x1B.
+        let len_word: u32 = (1 << 4) | (2 << 2) | 3;
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&1u32.to_be_bytes());
+        p.extend_from_slice(&len_word.to_be_bytes());
+        p.extend_from_slice(&1u32.to_be_bytes()); // n
+        p.extend_from_slice(&10u32.to_be_bytes()); // time
+        p.extend_from_slice(&20u32.to_be_bytes()); // moof_offset
+        p.extend_from_slice(&[0, 7]); // traf_number = 7 (2 bytes)
+        p.extend_from_slice(&[0, 0, 9]); // trun_number = 9 (3 bytes)
+        p.extend_from_slice(&[0, 0, 0, 42]); // sample_number = 42 (4 bytes)
+        let t = parse_tfra(&p).unwrap();
+        assert_eq!(t.entries[0].traf_number, 7);
+        assert_eq!(t.entries[0].trun_number, 9);
+        assert_eq!(t.entries[0].sample_number, 42);
+    }
+
+    #[test]
+    fn tfra_truncated_table_errors() {
+        // n=5 but only one entry's worth of data after the header.
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&1u32.to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&5u32.to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&[1, 1, 1]);
+        assert!(parse_tfra(&p).is_err());
+    }
+
+    #[test]
+    fn mfro_parses_size() {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+        p.extend_from_slice(&67u32.to_be_bytes()); // size
+        let m = parse_mfro(&p).unwrap();
+        assert_eq!(m.size, 67);
+    }
+
+    #[test]
+    fn mfro_truncated_errors() {
+        let p = vec![0u8; 4];
+        assert!(parse_mfro(&p).is_err());
+    }
+
+    #[test]
+    fn tfdt_v0_round_trip() {
+        // version 0 → 32-bit baseMediaDecodeTime
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&5120u32.to_be_bytes());
+        assert_eq!(parse_tfdt(&p).unwrap(), 5120);
+    }
+
+    #[test]
+    fn tfdt_v1_round_trip() {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0x01_00_00_00u32.to_be_bytes()); // ver=1
+        p.extend_from_slice(&0x1_0000_0000u64.to_be_bytes());
+        assert_eq!(parse_tfdt(&p).unwrap(), 0x1_0000_0000);
+    }
+
+    #[test]
+    fn tfdt_truncated_errors() {
+        let p = vec![0u8; 2];
+        assert!(parse_tfdt(&p).is_err());
+        // v0 with only 4 bytes (no baseline payload)
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        assert!(parse_tfdt(&p).is_err());
     }
 }

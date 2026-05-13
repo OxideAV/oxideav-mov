@@ -13,14 +13,14 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DINF, DREF,
-    EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, MDAT, MDHD, MDIA, META, MINF, MOOF,
-    MOOV, MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SKIP, SMHD, STBL, STCO,
-    STSC, STSD, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
+    EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, MDAT, MDHD, MDIA, META, MFRA, MINF,
+    MOOF, MOOV, MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SKIP, SMHD, STBL,
+    STCO, STSC, STSD, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
 use crate::edit::{parse_elst, EditList};
-use crate::fragment::{parse_mvex, resolve_traf_samples, Mehd, TrexDefaults};
+use crate::fragment::{parse_mfra, parse_mvex, resolve_traf_samples, Mehd, Tfra, TrexDefaults};
 use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
 use crate::header::{parse_ftyp, parse_hdlr, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd};
 use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
@@ -104,6 +104,13 @@ pub struct MovDemuxer {
     /// (the spec requires monotonic increase per §8.8.5.3); empty
     /// for non-fragmented streams.
     pub fragment_sequence_numbers: Vec<u32>,
+    /// Parsed `mfra/tfra` rows (ISO/IEC 14496-12 §8.8.10), one entry
+    /// per track that ships a Movie-Fragment Random Access index.
+    /// Populated at open time by [`MovDemuxer::open_with`] from the
+    /// tail `mfra` box; empty when the file is not fragmented or the
+    /// optional `mfra` is absent. Drives the fragmented-seek path in
+    /// [`MovDemuxer::seek_to_impl`] (§8.8.10.3).
+    pub tfra_indexes: Vec<Tfra>,
     #[cfg(feature = "registry")]
     streams: Vec<StreamInfo>,
 }
@@ -302,6 +309,7 @@ impl MovDemuxer {
         let mut mehd_box: Option<Mehd> = None;
         let mut trex_defaults: Vec<TrexDefaults> = Vec::new();
         let mut fragment_sequence_numbers: Vec<u32> = Vec::new();
+        let mut tfra_indexes: Vec<Tfra> = Vec::new();
         // Per-track running media-time cursor (DTS) for fragmented
         // playback. Indexed by track-id (not by track index); only
         // populated for tracks that actually receive `traf` runs.
@@ -402,7 +410,12 @@ impl MovDemuxer {
                             }
                         };
                         let trex = trex_defaults.iter().find(|t| t.track_id == tid);
-                        let dts_cursor = *track_dts_cursor.entry(tid).or_insert(0);
+                        // `tfdt` (§8.8.12), when present, is the absolute
+                        // baseline; otherwise climb from the running
+                        // cursor (round-18 behaviour).
+                        let dts_cursor = traf
+                            .tfdt
+                            .unwrap_or_else(|| *track_dts_cursor.entry(tid).or_insert(0));
                         let sample_idx_cursor = *track_sample_index_cursor.entry(tid).or_insert(0);
                         let (samples, new_prev_traf_end, new_dts) = resolve_traf_samples(
                             traf,
@@ -419,6 +432,16 @@ impl MovDemuxer {
                         track_sample_index_cursor
                             .insert(tid, sample_idx_cursor.saturating_add(n_samples));
                     }
+                }
+                t if t == &MFRA => {
+                    // Movie Fragment Random Access Box (§8.8.9).
+                    // Lives at the end of the file (next to `mfro`).
+                    // Walked here as a top-level child so we don't need
+                    // a separate end-of-file pass — `mfra` is allowed
+                    // anywhere at top scope per §8.8.9.1, and most
+                    // writers emit it last.
+                    let (tfras, _mfro) = parse_mfra(input.as_mut(), &hdr)?;
+                    tfra_indexes.extend(tfras);
                 }
                 t if t == &FREE || t == &SKIP || t == &WIDE => {
                     // free-space atoms — skip
@@ -472,6 +495,29 @@ impl MovDemuxer {
         #[cfg(feature = "registry")]
         let streams = build_streams(&tracks, resolver);
 
+        // Tfra-driven keyframe back-patch: ffmpeg's fragmented writer
+        // emits a `tfra` entry per per-moof-leading sample but
+        // *omits* `first_sample_flags` on alternate moofs, leaving
+        // those samples carrying the per-fragment "non-sync" default.
+        // §8.8.10.3 makes `tfra` authoritative for random-access
+        // points, so walk every tfra row and lift the matching
+        // sample's `keyframe` bit before flattening.
+        for tfra in &tfra_indexes {
+            let track_idx_opt = tracks.iter().position(|t| t.tkhd.track_id == tfra.track_id);
+            if let Some(track_idx) = track_idx_opt {
+                for entry in &tfra.entries {
+                    // Match on `pts == entry.time` (tfra's `time` is
+                    // composition / presentation time per §8.8.10.3).
+                    let want_pts = entry.time as i64;
+                    for s in tracks[track_idx].fragment_samples.iter_mut() {
+                        if s.pts() == want_pts {
+                            s.keyframe = true;
+                        }
+                    }
+                }
+            }
+        }
+
         // Flatten sample tables into a globally offset-sorted queue.
         // For fragmented streams, the per-track stsz_count may be 0
         // (an "init segment" with no in-moov samples) while
@@ -509,6 +555,7 @@ impl MovDemuxer {
             trex_defaults,
             mehd: mehd_box,
             fragment_sequence_numbers,
+            tfra_indexes,
             #[cfg(feature = "registry")]
             streams,
         })
@@ -1020,13 +1067,16 @@ impl MovDemuxer {
             )));
         }
 
-        // 2. Fragmented MP4: defer to a follow-up. The stbl tables are
-        // empty in the init segment so the rest of this function would
-        // either no-op or return wrong offsets.
+        // 2. Fragmented MP4: route through the `tfra`-indexed seek
+        // path. `tracks[stream].fragment_samples` was flattened into
+        // `self.samples` at open time, so once we pick the right
+        // sample we can re-use the same "snap the queue cursor"
+        // mechanism as the non-fragmented branch. The pre-condition
+        // is that a `tfra` index exists for the requested track — the
+        // index gives us O(log N) random access without walking every
+        // `moof` from `moov` forwards.
         if self.is_fragmented() {
-            return Err(Error::unsupported(
-                "MOV: seek in fragmented MP4 not yet implemented (use seek over per-moof tfra)",
-            ));
+            return self.seek_to_fragmented(stream_index, pts);
         }
 
         // 3. Walk the flattened sample queue, filtering by stream.
@@ -1078,6 +1128,153 @@ impl MovDemuxer {
         })?;
         self.next = cursor;
         Ok(best_dts)
+    }
+
+    /// Fragmented-MP4 seek path — companion to [`Self::seek_to_impl`]
+    /// when [`Self::is_fragmented`] is true.
+    ///
+    /// Algorithm per ISO/IEC 14496-12 §8.8.10 ("Track Fragment Random
+    /// Access Box"):
+    ///
+    /// 1. Look up the target track's `tfra` index. If absent, fall
+    ///    back to walking the flattened `self.samples` queue for the
+    ///    largest sync sample at-or-before `pts`. The fallback works
+    ///    because round-18's open-time `moof` walker already
+    ///    materialised every fragment's samples into the queue —
+    ///    only the *random-access* shortcut is missing without `tfra`.
+    /// 2. With `tfra` present, binary-search the entries for the
+    ///    largest `time <= target_pts` (saturating to entry 0 on
+    ///    past-start, to the last entry on past-end). Each entry's
+    ///    `time` is the *presentation* (composition) time of the sync
+    ///    sample in the track's `mdhd.time_scale` per §8.8.10.3.
+    /// 3. Locate the matching sample in `self.samples`. We match on
+    ///    `sample.pts() == entry.time` (PTS = DTS +
+    ///    `composition_offset`) and snap `self.next`.
+    ///
+    /// Returns the actual landed DTS of the chosen sync sample
+    /// (matching `next_packet().dts` for the post-seek read), even
+    /// though the tfra entry input is keyed on PTS. The DTS-return
+    /// contract matches the non-fragmented branch above.
+    #[cfg(feature = "registry")]
+    fn seek_to_fragmented(&mut self, stream_index: u32, pts: i64) -> Result<i64> {
+        let track_id = self
+            .tracks
+            .get(stream_index as usize)
+            .map(|t| t.tkhd.track_id)
+            .ok_or_else(|| Error::invalid("MOV: fragmented seek track index out of range"))?;
+        let tfra = self.tfra_indexes.iter().find(|t| t.track_id == track_id);
+        let target_pts: i64 = pts.max(0);
+
+        // Sub-routine: scan `self.samples` for the sync sample whose
+        // `pts <= target_pts` and is closest. Falls back to the first
+        // sync sample if none qualifies. Returns `(cursor, dts)` so
+        // the caller can report DTS even though the comparison is on
+        // PTS.
+        let snap_to_sync = |samples: &[(u32, SampleEntry)], target: i64| -> Option<(usize, i64)> {
+            let mut best: Option<(usize, i64, i64)> = None; // (cursor, pts, dts)
+            for (i, (sidx, s)) in samples.iter().enumerate() {
+                if *sidx != stream_index || !s.keyframe {
+                    continue;
+                }
+                let s_pts = s.pts();
+                let s_dts = s.dts as i64;
+                if s_pts <= target {
+                    match best {
+                        Some((_, bp, _)) if bp >= s_pts => {}
+                        _ => best = Some((i, s_pts, s_dts)),
+                    }
+                }
+            }
+            if best.is_none() {
+                for (i, (sidx, s)) in samples.iter().enumerate() {
+                    if *sidx == stream_index && s.keyframe {
+                        return Some((i, s.dts as i64));
+                    }
+                }
+                return None;
+            }
+            best.map(|(c, _, d)| (c, d))
+        };
+
+        if let Some(t) = tfra {
+            if t.entries.is_empty() {
+                // Empty tfra (legal per spec, useless in practice) →
+                // fall through to the generic queue scan.
+                return self.seek_fragmented_queue_scan(stream_index, pts, snap_to_sync);
+            }
+            // §8.8.10.3: "the entries are stored in increasing order of
+            // time" — binary search for the largest entry whose time
+            // is <= target.
+            let target_u: u64 = target_pts as u64;
+            let pp = t.entries.partition_point(|e| e.time <= target_u);
+            let pick = if pp == 0 {
+                // Target precedes the first tfra entry — land on
+                // entry 0 (first sync sample available).
+                0
+            } else {
+                pp - 1
+            };
+            let entry = t.entries[pick];
+            // Locate the sample in `self.samples` by matching the
+            // tfra entry's presentation time against
+            // `SampleEntry::pts()`. Spec-compliant tfra writers emit
+            // one entry per sync sample with the PTS in the track's
+            // `mdhd.time_scale`, so the match is exact.
+            let mut hit: Option<(usize, i64)> = None;
+            for (i, (sidx, s)) in self.samples.iter().enumerate() {
+                if *sidx != stream_index || !s.keyframe {
+                    continue;
+                }
+                if s.pts() == entry.time as i64 {
+                    hit = Some((i, s.dts as i64));
+                    break;
+                }
+            }
+            // Spec-deviating files: writers occasionally drift the
+            // tfra time off by a duration tick. Fall back to the
+            // generic snap-to-sync scan so we still land *somewhere*
+            // sensible instead of erroring.
+            let (cursor, landed) = match hit {
+                Some(v) => v,
+                None => snap_to_sync(&self.samples, target_pts).ok_or_else(|| {
+                    Error::unsupported(format!(
+                        "MOV: fragmented stream {stream_index} has no sync sample matching tfra \
+                         entry time={t}",
+                        t = entry.time
+                    ))
+                })?,
+            };
+            self.next = cursor;
+            Ok(landed)
+        } else {
+            // No tfra for this track — generic queue scan over the
+            // round-18 fragment_samples union.
+            self.seek_fragmented_queue_scan(stream_index, pts, snap_to_sync)
+        }
+    }
+
+    /// Fragmented seek without a `tfra` index — falls back to a linear
+    /// scan of `self.samples`. Slower than the indexed path but works
+    /// for files whose authoring tool omitted `mfra` (bad practice
+    /// per §8.8.9 but seen in the wild).
+    #[cfg(feature = "registry")]
+    fn seek_fragmented_queue_scan<F>(
+        &mut self,
+        stream_index: u32,
+        pts: i64,
+        snap_to_sync: F,
+    ) -> Result<i64>
+    where
+        F: Fn(&[(u32, SampleEntry)], i64) -> Option<(usize, i64)>,
+    {
+        let target_pts: i64 = pts.max(0);
+        let (cursor, landed) = snap_to_sync(&self.samples, target_pts).ok_or_else(|| {
+            Error::unsupported(format!(
+                "MOV: fragmented stream {stream_index} has no sync samples to seek to"
+            ))
+        })?;
+        self.next = cursor;
+        Ok(landed)
     }
 }
 

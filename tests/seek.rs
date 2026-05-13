@@ -165,27 +165,31 @@ fn seek_past_end_clamps() {
     assert!(pkt.flags.keyframe);
 }
 
-// ─────────────────── fragmented MP4: unsupported (this round) ───────────────────
+// ─────────────────── fragmented MP4: tfra-indexed seek lands at a keyframe ──
 
 #[test]
-fn seek_in_fragmented_returns_unsupported() {
+fn seek_in_fragmented_lands_at_keyframe() {
     let mut d = match open_fixture("h264_2s_frag.mov") {
         Some(d) => d,
         None => return,
     };
     if !d.is_fragmented() {
-        // Skip cleanly when the fixture wasn't actually muxed
-        // fragmented (some ffmpeg builds ignore `+frag_keyframe` for
-        // tiny inputs).
         return;
     }
-    let err = d
-        .seek_to(0, 0)
-        .expect_err("fragmented seek should be unsupported");
-    assert!(
-        matches!(err, Error::Unsupported(_)),
-        "expected Error::Unsupported, got {err:?}"
-    );
+    // Pick the video track (the fragmented fixture is video-only).
+    let video_idx = d
+        .streams()
+        .iter()
+        .position(|s| s.params.media_type == oxideav_core::MediaType::Video)
+        .expect("video stream") as u32;
+    let landed = d
+        .seek_to(video_idx, 0)
+        .expect("fragmented seek_to(0) should succeed via tfra index");
+    assert!(landed >= 0);
+    let pkt = d.next_packet().expect("packet after fragmented seek");
+    assert_eq!(pkt.stream_index, video_idx);
+    assert!(pkt.flags.keyframe, "post-seek packet must be a keyframe");
+    let _ = Error::Eof;
 }
 
 // ─────────────────── invariant: returned pts == next packet's pts ───────────────────

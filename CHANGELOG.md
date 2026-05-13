@@ -9,6 +9,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 21 — fragmented-MP4 random-access seek via the ISO/IEC
+  14496-12 §8.8.10 `tfra` index. `MovDemuxer::seek_to` now handles
+  fragmented streams end-to-end instead of refusing them with
+  `Error::Unsupported`. Pairs with round-20's stbl-based seek so the
+  same `Demuxer::seek_to` surface works across both layouts.
+  - `parse_tfra` (§8.8.10.3) — decodes the per-track random-access
+    table. Handles both v0 (32-bit time/moof_offset) and v1 (64-bit)
+    plus the three variable-width nibble fields
+    (`length_size_of_traf_num`, `_trun_num`, `_sample_num` each
+    ∈ {1,2,3,4} bytes).
+  - `parse_mfro` (§8.8.11.2) — decodes the trailing
+    `size_of_mfra` pointer.
+  - `parse_mfra` (§8.8.9) — walks the `mfra` container, returning
+    `(Vec<Tfra>, Option<Mfro>)`.
+  - `parse_tfdt` (§8.8.12.2) — Track Fragment Decode Time, v0/v1.
+    Threaded into `resolve_traf_samples` as the per-fragment DTS
+    baseline so multi-moof streams (the common ffmpeg shape with
+    a zero `tfdt` on the first moof and climbing values after)
+    surface correctly through `next_packet`.
+  - `MovDemuxer::tfra_indexes: Vec<Tfra>` — per-track random-access
+    table populated at open time from a tail `mfra` box. Empty when
+    the file is not fragmented or omits `mfra`.
+  - `TrafRecord::tfdt: Option<u64>` — parsed `tfdt`
+    baseMediaDecodeTime, when present.
+  - `fragment::Tfra { track_id, entries }` +
+    `TfraEntry { time, moof_offset, traf_number, trun_number,
+    sample_number }`. Re-exported from the crate root.
+  - `MovDemuxer::seek_to` (fragmented path): binary-searches the
+    target track's `tfra` entries (§8.8.10.3 guarantees increasing
+    `time`), picks the largest entry whose
+    `time <= target_pts`, locates the matching sync sample in the
+    flat queue by PTS-equality, and snaps `self.next`. Returns the
+    landed DTS (matching the non-fragmented branch's contract).
+    Fallback path when no `tfra` is present: linear scan of the
+    round-18 flattened `fragment_samples` queue picking the latest
+    sync sample at-or-before `pts`. Past-start lands on the first
+    sync sample; past-end lands on the last `tfra` entry.
+  - Open-time `tfra` back-patch: §8.8.10.3 makes `tfra` authoritative
+    for random-access points but ffmpeg's fragmented writer
+    sometimes omits `trun.first_sample_flags` on alternate moofs,
+    leaving those samples carrying the per-fragment "non-sync"
+    default. The walker now lifts the `keyframe` bit on every
+    sample whose PTS matches a `tfra` entry so seek can still snap
+    there.
+  - Tests:
+    - 6 new `fragment::tests` unit tests (`tfra` v0 / v1 / variable
+      widths / truncated; `mfro` round-trip + truncated; `tfdt`
+      v0 / v1 / truncated).
+    - `tests/round_next_fragmented_seek.rs` — 8 integration tests
+      against new ffmpeg-generated fixtures
+      (`h264_frag_with_mfra.mp4` carries 6 `tfra` entries for a
+      3 s × 10 fps × GOP=10 H.264 stream;
+      `h264_frag_nomfra.mp4` exercises the fallback path). Covers
+      tfra populated at open / absent leaves the field empty /
+      seek lands exactly on a tfra entry / seek to zero re-snaps
+      to the first moof / mid-gap snap-back to prior entry /
+      fallback queue-scan / non-fragmented regression / past-end
+      clamp.
+    - `tests/seek.rs::seek_in_fragmented_returns_unsupported` flipped
+      into `seek_in_fragmented_lands_at_keyframe`, asserting the
+      round-21 acceptance behaviour.
+
 - `MovDemuxer` now implements `oxideav_core::Demuxer::seek_to` for
   non-fragmented files. Walks the existing flattened sample queue
   filtered on the requested stream, picks the largest sync sample
@@ -18,8 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before the first keyframe land on the first sync sample. Algorithm
   per QTFF "Finding a Sample" (pp. 79–80); mirrors the in-tree
   `oxideav-mp4` reference at `crates/oxideav-mp4/src/demux.rs:2418`.
-  Fragmented streams (`is_fragmented()`) return `Error::Unsupported`
-  pending a follow-up `moof`/`tfra` seek strategy.
+  Round 21 adds the fragmented-MP4 seek path on top (see above).
 
 - Round 20 — fragmented MP4 / fMP4 / DASH muxer (ISO/IEC 14496-12
   §8.8 write side). Pairs with the round-18 `moof/traf/trun` decode
