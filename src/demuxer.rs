@@ -990,6 +990,95 @@ impl MovDemuxer {
     pub fn remaining(&self) -> usize {
         self.samples.len().saturating_sub(self.next)
     }
+
+    /// Inner implementation of [`Demuxer::seek_to`]. Lives on the
+    /// struct (not the trait impl) so it's reachable from the
+    /// standalone (no-`registry`) build's tests too without needing
+    /// the `Demuxer` trait in scope.
+    ///
+    /// `pts` is in the stream's mdhd timescale ticks (QTFF p. 56);
+    /// the stbl sub-tables (`stts`/`stss`) speak the same unit, so
+    /// no rescaling is required.
+    ///
+    /// Reports the actual landed *decode* timestamp (DTS), matching
+    /// the value `next_packet()` will surface in `Packet.dts`. We
+    /// chose DTS over composition PTS because B-frame-heavy video
+    /// reorders display order — `next_packet().pts` may exceed the
+    /// caller's request even though decode flow is correct. Reporting
+    /// DTS lets the pipeline trust `seek_to`'s return as a
+    /// "next packet's dts will equal this" contract.
+    #[cfg(feature = "registry")]
+    pub(crate) fn seek_to_impl(&mut self, stream_index: u32, pts: i64) -> Result<i64> {
+        // 1. Range + media-type gate.
+        let idx = stream_index as usize;
+        let track = self.tracks.get(idx).ok_or_else(|| {
+            Error::invalid(format!("MOV: stream index {stream_index} out of range"))
+        })?;
+        if !track.is_video() && !track.is_audio() {
+            return Err(Error::invalid(format!(
+                "MOV: stream {stream_index} is neither video nor audio; can't seek"
+            )));
+        }
+
+        // 2. Fragmented MP4: defer to a follow-up. The stbl tables are
+        // empty in the init segment so the rest of this function would
+        // either no-op or return wrong offsets.
+        if self.is_fragmented() {
+            return Err(Error::unsupported(
+                "MOV: seek in fragmented MP4 not yet implemented (use seek over per-moof tfra)",
+            ));
+        }
+
+        // 3. Walk the flattened sample queue, filtering by stream.
+        //    Find the largest sync sample whose `dts <= pts`. The
+        //    queue is already sorted by file offset, but per-track
+        //    sample-index ordering matches decode order (chunks lay
+        //    out samples sequentially), so the first such match per
+        //    track also has monotonically increasing dts.
+        //
+        //    Past-end: when no sync sample has `dts <= pts`, fall
+        //    back to the first sync sample in the track (typically
+        //    sample 0). Past-start: when `pts` is negative or
+        //    smaller than the first sample's dts, the first matching
+        //    keyframe is still the best landing.
+        let target_dts: i64 = pts.max(0);
+        let mut best_cursor: Option<usize> = None;
+        let mut best_dts: i64 = i64::MIN;
+        for (i, (sidx, s)) in self.samples.iter().enumerate() {
+            if *sidx != stream_index {
+                continue;
+            }
+            if !s.keyframe {
+                continue;
+            }
+            let s_dts = s.dts as i64;
+            if s_dts <= target_dts && s_dts >= best_dts {
+                best_cursor = Some(i);
+                best_dts = s_dts;
+            }
+        }
+        if best_cursor.is_none() {
+            // No keyframe at-or-before target. Land on the *first*
+            // keyframe of this stream (the spec guarantees sample 0
+            // is implicitly a sync sample whenever `stss` is empty;
+            // when `stss` is populated, the first listed entry is
+            // sample 1).
+            for (i, (sidx, s)) in self.samples.iter().enumerate() {
+                if *sidx == stream_index && s.keyframe {
+                    best_cursor = Some(i);
+                    best_dts = s.dts as i64;
+                    break;
+                }
+            }
+        }
+        let cursor = best_cursor.ok_or_else(|| {
+            Error::unsupported(format!(
+                "MOV: stream {stream_index} has no sync samples to seek to"
+            ))
+        })?;
+        self.next = cursor;
+        Ok(best_dts)
+    }
 }
 
 /// Build an "unsupported" error in a way that works under both the
@@ -1799,6 +1888,32 @@ impl Demuxer for MovDemuxer {
             return None;
         }
         Some((m.duration as i128 * 1_000_000 / m.time_scale as i128) as i64)
+    }
+
+    /// Seek to the nearest sync sample at or before `pts` for
+    /// `stream_index` (in the stream's `time_base`, i.e. mdhd
+    /// timescale ticks). Returns the actual decode timestamp of the
+    /// landed sample.
+    ///
+    /// Algorithm (QTFF "Finding a Sample", pp. 79–80, mirrors
+    /// `oxideav-mp4`'s `Mp4Demuxer::seek_to` at `crates/oxideav-mp4/
+    /// src/demux.rs:2418`):
+    ///
+    /// 1. Reject out-of-range / non-video / non-audio streams.
+    /// 2. Reject fragmented streams (`is_fragmented()`); a moof-based
+    ///    seek strategy is a follow-up.
+    /// 3. Walk `stts` to find the largest sample index whose
+    ///    cumulative `dts <= pts` (clamping past-end to the last
+    ///    sample).
+    /// 4. For video tracks with a non-empty `stss`, binary-search for
+    ///    the largest sync sample at-or-before the target. Audio tracks
+    ///    (and tracks that omit `stss` entirely, per QTFF p. 73) treat
+    ///    every sample as a sync sample.
+    /// 5. Locate that sample's position in the flat
+    ///    `(stream_index, SampleEntry)` queue and set `self.next` so
+    ///    that the next `next_packet()` call emits it.
+    fn seek_to(&mut self, stream_index: u32, pts: i64) -> Result<i64> {
+        self.seek_to_impl(stream_index, pts)
     }
 }
 

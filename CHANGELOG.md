@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `MovDemuxer` now implements `oxideav_core::Demuxer::seek_to` for
+  non-fragmented files. Walks the existing flattened sample queue
+  filtered on the requested stream, picks the largest sync sample
+  with `dts <= pts`, sets the per-demuxer `next` cursor so the
+  subsequent `next_packet()` call emits that sample, and returns
+  its DTS. Past-end requests clamp to the last sync sample; targets
+  before the first keyframe land on the first sync sample. Algorithm
+  per QTFF "Finding a Sample" (pp. 79–80); mirrors the in-tree
+  `oxideav-mp4` reference at `crates/oxideav-mp4/src/demux.rs:2418`.
+  Fragmented streams (`is_fragmented()`) return `Error::Unsupported`
+  pending a follow-up `moof`/`tfra` seek strategy.
+
 - Round 20 — fragmented MP4 / fMP4 / DASH muxer (ISO/IEC 14496-12
   §8.8 write side). Pairs with the round-18 `moof/traf/trun` decode
   path so the crate now round-trips fragmented streams in both

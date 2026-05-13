@@ -50,6 +50,14 @@ per-track `traf/tfhd/trun` + trailing `mdat`). Pairs with the
 round-18 decode path so fragmented streams round-trip in both
 directions.
 
+Seek support: `MovDemuxer::seek_to(stream, pts)` walks the per-track
+sample queue, snaps to the largest sync (`stss`) sample at-or-before
+the target DTS, and resets the demuxer cursor so the next
+`next_packet()` re-emits from that sample. Non-fragmented files only
+in this round; fragmented (`moof/traf/trun`) seek over `tfra` is a
+follow-up. Algorithm: QTFF "Finding a Sample" (pp. 79–80), mirroring
+`oxideav-mp4`'s `Mp4Demuxer::seek_to`.
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per
