@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Fragmented-MP4 seek polish: regression tests covering three
+  ISO/IEC 14496-12 §8.8 edge cases the round-21 ffmpeg fixtures
+  don't reach. All three were already correctly implemented in
+  rounds 18 + 21; this commit adds load-bearing coverage so future
+  refactors can't silently break them.
+  - `tests/synth_round_next_fragmented_seek_polish.rs` — 8 new
+    handcrafted in-memory fixtures (no `tests/fixtures/` files).
+    - **Multi-`trex` per fragment** (§8.8.3): two-track fixture
+      (video tid=1 dur=100 sz=200 + audio tid=2 dur=1024 sz=64) with
+      one `traf` per track in a single `moof`, both `tfhd`s carrying
+      only `default-base-is-moof`. Asserts each track's samples
+      consume the matching `trex` (not the first one). Bug-induction
+      check confirms the test fails when the lookup is replaced with
+      `trex_defaults.first()`.
+    - **Negative `composition_time_offset`** (§8.8.8.2): single-
+      fragment fixture with `trun` v=1 carrying CTS offsets
+      `[100, -100, 50, 0, 200]` that produce the canonical B-frame
+      reorder pattern (PTS[1] < PTS[0]). Asserts both `SampleEntry::
+      composition_offset` and `SampleEntry::pts()` thread through
+      correctly, plus that `next_packet().pts` matches. Bug-induction
+      check (sign-bit strip) confirms test fails.
+    - **Non-zero baseline `tfdt`** (§8.8.12): two-fragment fixture
+      with `tfdt`-v1 declared on each fragment plus a tail
+      `mfra/tfra/mfro` random-access index. Includes one variant
+      (`tfdt_with_gap_does_not_climb_from_running_cursor`) where
+      fragment 2's tfdt deliberately differs from the running DTS
+      cursor (300000 cursor vs 600000 declared) so a tfdt-ignoring
+      bug surfaces — without this guard the running cursor and the
+      declared baseline coincide and the test would pass even with
+      a buggy implementation. Seek tests confirm `seek_to(7s)` lands
+      inside fragment 2 rather than at the end of fragment 1, and
+      `seek_to(tfdt-baseline)` lands exactly on the fragment 2 first
+      sample.
+
 - Round 21 — fragmented-MP4 random-access seek via the ISO/IEC
   14496-12 §8.8.10 `tfra` index. `MovDemuxer::seek_to` now handles
   fragmented streams end-to-end instead of refusing them with
