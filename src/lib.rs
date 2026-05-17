@@ -19,6 +19,7 @@ pub mod edit;
 pub mod fragment;
 pub mod gmhd;
 pub mod header;
+pub mod heif_write;
 pub mod iprp;
 pub mod media_meta;
 pub mod muxer;
@@ -66,6 +67,7 @@ pub use fragment::{
 };
 pub use gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, Tcmi, TextHeader};
 pub use header::{BrandClass, Ftyp, Hdlr, Mdhd, Mvhd, Tkhd, TrackRotation};
+pub use heif_write::{HeifDerivation, HeifItem, HeifItemReference, HeifProperty, HeifWriter};
 pub use iprp::{
     parse_amve_payload, parse_auxc_payload, parse_cclv_payload, parse_clli_payload,
     parse_colr_payload, parse_iprp, parse_lsel_payload, parse_mdcv_payload, Amve, AuxC, Cclv, Clli,

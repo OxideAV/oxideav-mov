@@ -56,6 +56,26 @@ the target DTS, and resets the demuxer cursor so the next
 `next_packet()` re-emits from that sample. Algorithm: QTFF "Finding a
 Sample" (pp. 79–80), mirroring `oxideav-mp4`'s `Mp4Demuxer::seek_to`.
 
+Round 22 adds the **HEIF/HEIC image-item WRITE path**:
+[`HeifWriter`] emits a structurally-valid `.heic` / `.heif` /
+`.avif` file from a list of [`HeifItem`]s, where each item carries
+its coded bytes (HEVC / AV1 / JPEG / …), an item-id, an
+item_type FourCC, and a per-item property list ([`HeifProperty`]
+variants: `ispe`, `pixi`, `colr` nclx / rICC / prof, `auxC`,
+`lsel`, `irot`, `imir`, `clli`, `mdcv`, `cclv`, `amve`, plus an
+`Other { fourcc, payload }` fall-through for codec-config blobs
+like `hvcC` / `av1C`). Derived items ([`HeifDerivation`]: `grid`,
+`iovl`, `iden`, `tmap`) emit their derivation body into `idat`
+(construction-method 1) and auto-generate the matching `dimg`
+`iref` row from the caller-supplied `component_ids` list.
+Property de-duplication: structurally-equal properties across
+items collapse to one `ipco` entry referenced by N `ipma` rows.
+Two-pass layout so the `iloc` extents carry real absolute file
+offsets. Output round-trips through this crate's own
+[`parse_bmff_meta`] / [`iprp`] / [`derived`] surfaces with every
+item id, every property association, and every iref preserved,
+and `ffprobe -v warning` accepts the container structure.
+
 Round 21 adds **fragmented-MP4 seek** via the ISO/IEC 14496-12
 §8.8.10 `tfra` (Track Fragment Random Access Box) at open time. The
 demuxer walks `mfra/tfra/mfro` once and `seek_to` binary-searches

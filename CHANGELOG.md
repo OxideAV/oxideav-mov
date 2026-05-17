@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 22 — HEIF / HEIC image-item WRITE path. New
+  `oxideav_mov::HeifWriter` / `HeifItem` / `HeifProperty` /
+  `HeifDerivation` / `HeifItemReference` surface emits a
+  structurally-valid `.heic` / `.heif` / `.avif` byte-stream from a
+  caller-supplied list of coded-image items (HEVC / AV1 / JPEG / …)
+  + derived-image items (`grid` / `iovl` / `iden` / `tmap`).
+  - Property emission: writes one box per typed variant inside
+    `ipco` (`ispe`, `pixi`, `colr` nclx / rICC / prof, `auxC`,
+    `lsel`, `irot`, `imir`, `clli`, `mdcv`, `cclv`, `amve`, plus
+    `Other { fourcc, payload }` for codec-config blobs like
+    `hvcC` / `av1C`). Structurally-equal properties are de-duplicated
+    so multiple items can share the same `ipco` entry, with per-item
+    `ipma` rows pointing at the shared 1-based indices.
+  - Derived items: emits the algorithm body into `idat` and uses
+    `iloc` construction-method 1 to reference it; auto-generates
+    the `dimg` `iref` row from `component_ids`. Coded items use
+    `iloc` construction-method 0 with absolute file offsets into
+    a trailing `mdat`.
+  - Layout: two-pass build (sizing pass + emit pass) so `iloc`
+    extents carry real absolute file offsets; `ftyp` picks the
+    HEIC default brand set (`heic` major + `mif1`/`heic` compat)
+    with caller overrides via `with_major_brand` /
+    `with_compatible_brands`.
+  - Coverage: in-module unit tests + `tests/synth_round22_heif_writer.rs`
+    integration tests covering a 3-image HEIC (master + thumbnail +
+    `grid` of two tiles), full property catalogue sweep, deterministic
+    output, and external-validator acceptance (`ffprobe -v warning`
+    confirms container structural validity).
+  - Spec citations: ISO/IEC 14496-12 §8.11 (meta / pitm / iinf /
+    iloc / iref / iprp), ISO/IEC 23008-12 §6.5 (property catalogue) +
+    §6.6 (derived images), ISO/IEC 23000-22 (MIAF major brands).
+
 - Fragmented-MP4 seek polish: regression tests covering three
   ISO/IEC 14496-12 §8.8 edge cases the round-21 ffmpeg fixtures
   don't reach. All three were already correctly implemented in
