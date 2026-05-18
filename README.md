@@ -56,6 +56,20 @@ the target DTS, and resets the demuxer cursor so the next
 `next_packet()` re-emits from that sample. Algorithm: QTFF "Finding a
 Sample" (pp. 79–80), mirroring `oxideav-mp4`'s `Mp4Demuxer::seek_to`.
 
+Round 74 wires the **edit list** (`edts/elst`) into a presentation-time
+mapping API: `MovDemuxer::movie_pts_for(track, media_pts)` translates a
+sample's media-timescale PTS to its movie-timescale PTS by walking the
+typed [`EditSegment`] list — handling empty edits, dwell
+(`media_rate == 0`), the §8.6.6.1 composition-shift idiom, and the
+implicit trailing empty edit when `sum(elst.track_duration) <
+mvhd.duration` (QTFF pp. 46–48 / ISO/IEC 14496-12 §8.6.5–§8.6.6).
+Tracks without an `edts/elst` get a synthetic full-track media segment
+so the same mapper drives the no-edits "presentation starts
+immediately" case. Round 74 also surfaces `tkhd.flags`
+(`is_enabled` / `participates_in_movie` / `participates_in_preview` /
+`participates_in_poster`) and `alternate_group`, plus
+`MovDemuxer::presentation_tracks()` / `alternate_groups()`.
+
 Round 22 adds the **HEIF/HEIC image-item WRITE path**:
 [`HeifWriter`] emits a structurally-valid `.heic` / `.heif` /
 `.avif` file from a list of [`HeifItem`]s, where each item carries
@@ -92,19 +106,20 @@ Decoding stays in codec crates; this crate calls
 `CodecId`s and never opens a decoder itself (per
 `docs/IMPLEMENTOR_ROUND.md` §"Crate-purpose discipline").
 
-## Round 2 candidates
+## Follow-ups
 
-- Apple-specific atoms: `gama`, `clap`, `pasp`, the QT-pre-ICC
-  `colr`, the `tapt` track-aperture-mode (clef/prof/enof), the
-  `wave` audio sample-description extension, the `chan` audio
-  channel atom.
-- `tref` types (`chap`, `scpt`, `ssrc`, `tmcd`, `mpod`).
-- `edts`/`elst` edit-list semantics (including `media_time = -1`
-  empty edits).
-- Reference movies (`rmra`/`rmda`) and alias data references.
-- Apple-shaped `meta` atom layout.
-- Multi-track muxer + faststart (`moov` before `mdat`).
-- `ctts` (composition-time-to-sample) for B-frame-bearing video.
+- Edit-list mapper currently handles `media_rate ∈ {0, 0x0001_0000}`
+  (dwell + unity rate). Non-unity rates (typical authoring example:
+  segment played at 2.0×) surface in the `EditSegmentKind::Media`
+  variant but the mapper falls back to identity on them — a future
+  round needs the rate-scaled offset arithmetic and a fixture proving
+  non-unity rate against an ffmpeg-encoded reference.
+- A `next_packet`-side opt-in (`MovDemuxer::with_edit_list_pts()`?)
+  that swaps the emitted `Packet::pts` from media-time to movie-time
+  end-to-end, so consumers that don't want the explicit
+  `movie_pts_for` call site get spec-correct presentation timing for
+  free. Round 74 keeps the existing media-time PTS contract on
+  `next_packet` to avoid a silent behaviour change.
 
 ## Standalone build
 

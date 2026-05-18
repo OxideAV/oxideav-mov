@@ -1038,6 +1038,70 @@ impl MovDemuxer {
         self.samples.len().saturating_sub(self.next)
     }
 
+    /// Map a media-timescale presentation timestamp on `track_index`
+    /// through the track's edit list into the corresponding
+    /// movie-timescale presentation timestamp. Returns `None` when the
+    /// track index is out of range, when the sample's media-PTS falls
+    /// outside every non-empty edit segment (i.e. the sample is dropped
+    /// from the presentation timeline), or when the movie header is
+    /// absent (no `mvhd` was parsed).
+    ///
+    /// This honours the edit list per QTFF Chapter 2 (pp. 46–48) and
+    /// ISO/IEC 14496-12 §8.6.5 / §8.6.6 — including the empty-edit
+    /// composition shift, dwell semantics, and the implicit trailing
+    /// empty edit when `sum(elst.track_duration) < mvhd.duration`.
+    ///
+    /// `media_pts` is the value reported by `Packet::pts` / `Packet::dts`
+    /// from this demuxer's `next_packet()` (both are in mdhd
+    /// timescale). When the track carries no edit list, the call
+    /// behaves as a 1:1 identity rescaled by `mvhd.time_scale /
+    /// mdhd.time_scale`, matching the "no edits" rule (QTFF p. 47).
+    pub fn movie_pts_for(&self, track_index: usize, media_pts: i64) -> Option<i64> {
+        let track = self.tracks.get(track_index)?;
+        let mvhd = self.mvhd.as_ref()?;
+        track.media_pts_to_movie_pts(media_pts, mvhd.time_scale, Some(mvhd.duration))
+    }
+
+    /// Resolve the per-track edit segments for `track_index` against
+    /// the movie header. See [`crate::Track::edit_segments`].
+    pub fn edit_segments_for(&self, track_index: usize) -> Option<Vec<crate::EditSegment>> {
+        let track = self.tracks.get(track_index)?;
+        let mvhd = self.mvhd.as_ref()?;
+        Some(track.edit_segments(mvhd.time_scale, Some(mvhd.duration)))
+    }
+
+    /// Iterator over `(track_index, &Track)` for tracks that should
+    /// contribute to the *default presentation*: `tkhd` flag bit
+    /// `enabled` is set AND `in_movie` is set (per QTFF pp. 31–32 /
+    /// ISO/IEC 14496-12 §8.3.1.3). Chapter / hint / timecode tracks
+    /// are still returned if their `tkhd.flags` carries those bits;
+    /// callers that need a stricter "primary audio + video only"
+    /// filter can layer on `Track::is_video` / `is_audio`.
+    pub fn presentation_tracks(&self) -> impl Iterator<Item = (usize, &crate::Track)> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.is_enabled() && t.participates_in_movie())
+    }
+
+    /// Group the file's tracks by their `tkhd.alternate_group` field.
+    /// Tracks with `alternate_group == 0` are not considered group
+    /// members (per QTFF p. 33 / ISO/IEC 14496-12 §8.3.1.3) and are
+    /// returned together under group id `0` if present at all.
+    ///
+    /// The return is `Vec<(group_id, Vec<track_index>)>` sorted by
+    /// `group_id` ascending. Useful for muxers / players that need to
+    /// pick exactly one track per non-zero group at playback time
+    /// (e.g. one audio language track out of N).
+    pub fn alternate_groups(&self) -> Vec<(i16, Vec<usize>)> {
+        let mut by_group: std::collections::BTreeMap<i16, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (idx, t) in self.tracks.iter().enumerate() {
+            by_group.entry(t.alternate_group()).or_default().push(idx);
+        }
+        by_group.into_iter().collect()
+    }
+
     /// Inner implementation of [`Demuxer::seek_to`]. Lives on the
     /// struct (not the trait impl) so it's reachable from the
     /// standalone (no-`registry`) build's tests too without needing

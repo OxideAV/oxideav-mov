@@ -30,15 +30,31 @@ pub fn build_mvhd(ts: u32, dur: u32) -> Vec<u8> {
 /// Build a baseline `tkhd` v0 with `track_id`, `dur` (movie ts),
 /// `w_px` × `h_px` (video) — pass `0×0` for audio tracks.
 pub fn build_tkhd(track_id: u32, dur: u32, w_px: u32, h_px: u32) -> Vec<u8> {
+    build_tkhd_flags(track_id, dur, w_px, h_px, 0x07, 0)
+}
+
+/// Build a `tkhd` v0 with the caller-supplied 24-bit `flags`
+/// (`enabled|in_movie|in_preview|in_poster` = 0x07 / 0x0F is the usual
+/// default) and `alternate_group` (i16). Useful for r74 tests of
+/// disabled-track / alt-group semantics.
+pub fn build_tkhd_flags(
+    track_id: u32,
+    dur: u32,
+    w_px: u32,
+    h_px: u32,
+    flags_low_byte: u8,
+    alternate_group: i16,
+) -> Vec<u8> {
     // QTFF p. 41 Figure 2-7.
     let mut p = vec![0u8; 84];
-    p[3] = 0x07; // flags = enabled+in-movie+in-preview
+    p[3] = flags_low_byte;
     p[12..16].copy_from_slice(&track_id.to_be_bytes());
     p[20..24].copy_from_slice(&dur.to_be_bytes());
+    // alternate_group lives at v0 offset 34..36 (after duration:4,
+    // reserved:8, layer:2).
+    p[34..36].copy_from_slice(&alternate_group.to_be_bytes());
     // Identity 3×3 matrix at offset 40 (a=1.0, d=1.0, w=1.0 — 16.16 /
-    // 16.16 / 2.30); QTFF p. 199 Figure 4-1. Without this the parsed
-    // rotation classifies as "Other" since all-zero entries don't
-    // match any of the four cardinal orientations.
+    // 16.16 / 2.30); QTFF p. 199 Figure 4-1.
     p[40..44].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // a
     p[56..60].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // d
     p[72..76].copy_from_slice(&0x4000_0000u32.to_be_bytes()); // w

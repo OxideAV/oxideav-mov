@@ -9,7 +9,7 @@
 //! [`SampleDescription::extra`] for downstream codec crates.
 
 use crate::bmff_meta::BmffMeta;
-use crate::edit::EditList;
+use crate::edit::{media_pts_to_movie_pts, resolve_edit_segments, EditList, EditSegment};
 use crate::gmhd::Gmhd;
 use crate::header::{Hdlr, Mdhd, Tkhd};
 use crate::media_meta::{
@@ -270,6 +270,112 @@ impl Track {
         self.data_references
             .iter()
             .all(|d| matches!(d, DataReference::SelfRef))
+    }
+
+    /// True when the track's `tkhd.flags` bit 0 (`enabled`) is set.
+    /// Disabled tracks should not contribute to the default
+    /// presentation (QTFF p. 31, ISO/IEC 14496-12 §8.3.1.3). When the
+    /// track-header atom is absent (a malformed but tolerated case) we
+    /// default to `true` — most file producers always emit `tkhd` and
+    /// callers that need stricter handling can inspect `tkhd.flags`
+    /// directly.
+    pub fn is_enabled(&self) -> bool {
+        // QTFF "Track Header Atom" pp. 31–32 layout: the low byte of
+        // the 24-bit flags carries `0x01 = enabled`, `0x02 = in_movie`,
+        // `0x04 = in_preview`, `0x08 = in_poster`.
+        (self.tkhd.flags & 0x01) != 0
+    }
+
+    /// True when `tkhd.flags` bit 1 (`in_movie`) is set — the track
+    /// participates in the movie's main presentation. QTFF p. 32.
+    pub fn participates_in_movie(&self) -> bool {
+        (self.tkhd.flags & 0x02) != 0
+    }
+
+    /// True when `tkhd.flags` bit 2 (`in_preview`) is set — the track
+    /// participates in the movie's preview. QTFF p. 32.
+    pub fn participates_in_preview(&self) -> bool {
+        (self.tkhd.flags & 0x04) != 0
+    }
+
+    /// True when `tkhd.flags` bit 3 (`in_poster`) is set — the track
+    /// participates in the movie's poster (single-frame still). QTFF
+    /// p. 32.
+    pub fn participates_in_poster(&self) -> bool {
+        (self.tkhd.flags & 0x08) != 0
+    }
+
+    /// `tkhd.alternate_group` — non-zero when the track belongs to an
+    /// alternate group (one of several mutually-exclusive playback
+    /// options, e.g. multi-language audio tracks). Zero means "not a
+    /// member of any alternate group" (QTFF p. 33, ISO/IEC 14496-12
+    /// §8.3.1.3). The on-wire field is signed; we surface it raw.
+    pub fn alternate_group(&self) -> i16 {
+        self.tkhd.alternate_group
+    }
+
+    /// Resolve the track's `edts/elst` edit list into the sequence of
+    /// movie-timescale [`EditSegment`]s it describes. When the list is
+    /// empty (no `edts` atom present), returns a single synthetic
+    /// segment covering the entire track media — this is the spec's
+    /// "absence of an edit list" → "presentation starts immediately"
+    /// rule (QTFF p. 47 / ISO/IEC 14496-12 §8.6.5.1 last paragraph),
+    /// so callers can drive the same mapper path regardless of whether
+    /// the file declares an explicit elst.
+    ///
+    /// `movie_duration` lets the resolver append the implicit trailing
+    /// empty edit when the explicit edits sum to less than the movie
+    /// header's declared duration. Pass `None` to disable this (e.g.
+    /// when working with a single track in isolation).
+    pub fn edit_segments(
+        &self,
+        movie_timescale: u32,
+        movie_duration: Option<u64>,
+    ) -> Vec<EditSegment> {
+        if self.edits.is_empty() {
+            // Synthesize a one-segment list covering the track's full
+            // media duration. Convert `mdhd.duration` (in media-
+            // timescale ticks) into movie-timescale ticks.
+            if movie_timescale == 0 || self.mdhd.time_scale == 0 {
+                return Vec::new();
+            }
+            let dur_media = self.mdhd.duration;
+            let dur_movie = (dur_media as u128 * movie_timescale as u128
+                + (self.mdhd.time_scale as u128 / 2))
+                / self.mdhd.time_scale as u128;
+            let dur_movie = dur_movie as u64;
+            return vec![EditSegment {
+                movie_time_start: 0,
+                movie_time_end: dur_movie,
+                kind: crate::edit::EditSegmentKind::Media {
+                    media_time_start: 0,
+                    media_rate: 0x0001_0000,
+                },
+            }];
+        }
+        resolve_edit_segments(&self.edits, movie_duration)
+    }
+
+    /// Map a media-timescale presentation timestamp `media_pts` for
+    /// this track to its corresponding movie-timescale presentation
+    /// timestamp via the track's edit list. Returns `None` when the
+    /// sample is dropped by every non-empty edit segment (e.g. a
+    /// sample whose PTS falls outside every `[media_time, media_time +
+    /// segment_duration)` window).
+    ///
+    /// `movie_timescale` is the movie-header timescale
+    /// (`Mvhd::time_scale`). Callers that don't have an `mvhd`
+    /// available can pass the track's own `mdhd.time_scale`, but the
+    /// returned value will then be in *media-timescale* ticks (since
+    /// the empty-edit rescaling becomes a no-op).
+    pub fn media_pts_to_movie_pts(
+        &self,
+        media_pts: i64,
+        movie_timescale: u32,
+        movie_duration: Option<u64>,
+    ) -> Option<i64> {
+        let segs = self.edit_segments(movie_timescale, movie_duration);
+        media_pts_to_movie_pts(&segs, media_pts, movie_timescale, self.mdhd.time_scale)
     }
 }
 

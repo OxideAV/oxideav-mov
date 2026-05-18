@@ -54,7 +54,9 @@ pub use derived::{
     ImageGridLayout, ImageLayout, IspeMismatch, Overlay, OverlayLayer, OverlayLayout, TmapPayload,
     TransformChain, TransformOp,
 };
-pub use edit::{Edit, EditList};
+pub use edit::{
+    media_pts_to_movie_pts, resolve_edit_segments, Edit, EditList, EditSegment, EditSegmentKind,
+};
 pub use fragment::{
     parse_mehd, parse_mfhd, parse_mfra, parse_mfro, parse_moof, parse_mvex, parse_tfdt, parse_tfhd,
     parse_tfra, parse_traf, parse_trex, parse_trun, resolve_traf_samples, sample_flags_is_sync,

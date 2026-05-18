@@ -9,6 +9,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 74 — edit-list (`edts/elst`) **presentation-time honour**. The
+  `elst` parser landed in round 2 but the parsed list was inert; the
+  movie-time PTS of each sample was just the media-time PTS. Round 74
+  threads the list through a typed segment resolver and exposes a
+  mapping API so downstream callers (player / pipeline / muxer) can
+  produce spec-correct presentation timestamps without re-walking the
+  atom tree themselves.
+  - New `oxideav_mov::EditSegment` + `EditSegmentKind { Empty, Dwell,
+    Media }` types. An `EditSegment` carries
+    `[movie_time_start, movie_time_end)` in movie-timescale ticks plus
+    the kind classifying what the segment maps to (empty slot, dwell
+    on a single media-time tick, or normal media playback with
+    `media_time_start` + `media_rate`).
+  - New `oxideav_mov::resolve_edit_segments(edits, movie_duration)`
+    that walks an `EditList` and stamps absolute movie-time bounds on
+    each entry. Handles four QTFF / ISO BMFF idioms:
+    1. **Empty edits** (`media_time < 0`) → `EditSegmentKind::Empty`
+       (QTFF p. 47 / ISO/IEC 14496-12 §8.6.6.3).
+    2. **Dwell** (`media_rate == 0`, non-empty `media_time`) →
+       `EditSegmentKind::Dwell` per §8.6.6.3.
+    3. **Composition-shift** (zero `track_duration`, non-zero
+       `media_time`) → zero-length `EditSegmentKind::Media` segment
+       (§8.6.6.1 paragraph 2 — "in an empty initial movie of a
+       fragmented movie file").
+    4. **Implicit trailing empty edit** when `sum(track_duration) <
+       mvhd.duration` → auto-appended `Empty` segment covering the
+       gap (QTFF p. 47 last paragraph / §8.6.6.3).
+  - New `oxideav_mov::media_pts_to_movie_pts(segments, media_pts,
+    movie_timescale, media_timescale)` mapper. Walks the resolved
+    segments in order, finds the one whose
+    `[media_time_start, media_time_start + segment_media_duration)`
+    contains `media_pts`, and rescales the in-segment offset from
+    media-timescale ticks to movie-timescale ticks via the cross-rate
+    `movie_timescale / media_timescale`. Returns `None` when the
+    sample falls outside every non-empty segment (i.e. is dropped from
+    the presentation timeline by the edit list).
+  - New `Track::edit_segments(movie_timescale, movie_duration)` —
+    typed accessor that returns a synthetic full-track Media segment
+    when the track carries no `edts/elst` (matching the spec rule
+    "in the absence of an edit list, the presentation of a track
+    starts immediately"), so callers can drive a single code path
+    regardless.
+  - New `Track::media_pts_to_movie_pts(media_pts, movie_timescale,
+    movie_duration)` — convenience wrapper around the free function.
+  - New `MovDemuxer::movie_pts_for(track_index, media_pts)` and
+    `MovDemuxer::edit_segments_for(track_index)` — demuxer-level
+    convenience that picks up `mvhd.time_scale` + `mvhd.duration`
+    automatically.
+  - `Edit::is_dwell()` and `Edit::rate_f64()` helpers — `is_dwell`
+    classifies `media_rate == 0` per §8.6.6.3; `rate_f64` decodes
+    the 16.16 fixed-point rate into a plain `f64`.
+
+- Round 74 — `tkhd.flags` and `tkhd.alternate_group` typed surface.
+  The flags + alternate-group fields were parsed by round 1 but only
+  reachable as raw integers on `Track::tkhd`. Round 74 adds named
+  accessors so callers don't have to remember the QTFF p. 32 bit
+  layout.
+  - `Track::is_enabled()` — `tkhd.flags` bit 0 (the spec's `enabled`
+    flag). Disabled tracks should not contribute to the default
+    presentation per QTFF p. 31 / ISO/IEC 14496-12 §8.3.1.3.
+  - `Track::participates_in_movie()` — bit 1 (`in_movie`).
+  - `Track::participates_in_preview()` — bit 2 (`in_preview`).
+  - `Track::participates_in_poster()` — bit 3 (`in_poster`).
+  - `Track::alternate_group()` — surfaces `tkhd.alternate_group` (i16).
+    Tracks with the same non-zero group id are mutually exclusive
+    presentation candidates (typical case: multi-language audio
+    tracks).
+  - `MovDemuxer::presentation_tracks()` — iterator returning only
+    tracks whose `tkhd.flags` carries both `enabled` and `in_movie`.
+  - `MovDemuxer::alternate_groups()` — groups every track by its
+    `alternate_group` field, returning a sorted
+    `Vec<(group_id, Vec<track_index>)>` so a player can pick exactly
+    one track per non-zero group at playback time.
+
+- Round 74 — 10 new unit tests in `edit::tests` (`EditSegment` cumulative
+  bounds, implicit trailing empty edit, dwell classification, mapper
+  rescaling at differing timescales, drop-outside-edits, composition-
+  shift, dwell-only-at-held-time, 16.16 rate decode) plus 9 new
+  integration tests in `tests/synth_round74_edit_list_honour.rs`
+  (initial-empty-edit shift, no-elst identity, implicit trailing
+  empty, no-elst synthetic full-track segment, out-of-range track,
+  full `tkhd.flags` surface, disabled-track exclusion from
+  `presentation_tracks`, `alternate_groups` grouping, dwell mapper).
+  Test count rises from 246 → 265.
+
 - Round 22 — HEIF / HEIC image-item WRITE path. New
   `oxideav_mov::HeifWriter` / `HeifItem` / `HeifProperty` /
   `HeifDerivation` / `HeifItemReference` surface emits a
