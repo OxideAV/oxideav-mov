@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-mov/compare/v0.0.1...v0.0.2) - 2026-05-18
+
+### Other
+
+- Round 74 — edit list (edts/elst) presentation-time honour + tkhd flags / alt-group surface
+- Round 22 — HEIF / HEIC image-item WRITE path
+- Fragmented-MP4 seek polish: regression coverage for 3 §8.8 edge cases
+- Round 21 — fragmented-MP4 random-access seek via §8.8.10 tfra
+- Implement Demuxer::seek_to on MovDemuxer
+- Round 20 — fragmented MP4 / fMP4 / DASH muxer write side
+- Round 19 — non-fragmented MovMuxer write side: ftyp+mdat+moov
+- Round 18 — fragmented MP4 / fMP4 / DASH-init decode path
+- Round 17 — lsel + ipro typed surfaces, cm=2 grid via primary_image_layout_with_input
+- Round 16 — recursive cm=2 iloc resolver + index_size>0 + base iref
+- Round 15 — Identity output_extent over TransformChain, HDR clli/mdcv/cclv on layout, amve + tmap
+- Round 14 — HEIF auxC alpha-plane resolver + clli/mdcv/cclv HDR metadata
+- Round 13 — iden TransformChain on Identity layout, pixi/colr surfaced, MIAF brand classification
+- Round 12 — mdat-resident HEIF derivation payloads + per-tile/layer ispe validation
+- Round 11 — HEIF colr typed extraction + image composition layout plan
+- Round 10 — Windows file:// shape, dinf/dref item resolver, HEIF iden/iovl/grid renderers
+- Round 9 — gate file:// integration tests on cfg(unix)
+- Round 9 — HEIF grid/iovl payloads, primary-item helper, file:// opener
+- Round 8 — HEIF iprp/ipco/ipma, meta-only files, iref resolver helpers
+- Round 7 — ISO BMFF §8.11 meta box, multi-hop aliases, text-style trailers
+- Round 6 — alias-chain following, tmcd-in-stsd, encd encoding override
+- Round 5 — chapter resolution, gmhd extensions, mvhd v1 coverage
+- Round 4 — udta user-data, dinf/dref data references, tkhd rotation
+- Round 3 — chan layout map, tref accessors, rmra/mvex refusal, cslg
+
 ### Added
 
 - Round 74 — edit-list (`edts/elst`) **presentation-time honour**. The
