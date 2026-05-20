@@ -14,8 +14,9 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DINF, DREF,
     EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, MDAT, MDHD, MDIA, META, MFRA, MINF,
-    MOOF, MOOV, MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SKIP, SMHD, STBL,
-    STCO, STSC, STSD, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
+    MOOF, MOOV, MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SBGP, SGPD, SKIP,
+    SMHD, STBL, STCO, STSC, STSD, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD,
+    WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -25,6 +26,7 @@ use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
 use crate::header::{parse_ftyp, parse_hdlr, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd};
 use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
 use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
+use crate::sample_groups::{parse_sbgp, parse_sgpd};
 use crate::sample_table::{
     parse_co64, parse_ctts, parse_stco, parse_stsc, parse_stss, parse_stsz, parse_stts,
     SampleEntry, SampleTable,
@@ -1102,6 +1104,131 @@ impl MovDemuxer {
         by_group.into_iter().collect()
     }
 
+    /// Look up the `'roll'` (§10.1.1.2) recovery distance for a
+    /// specific sample on a track.
+    ///
+    /// Returns `None` when the track carries no `sbgp`/`sgpd` with
+    /// `grouping_type == 'roll'`, when the sample is outside the
+    /// grouping, or when the entry payload is malformed.
+    ///
+    /// Sign conventions per §10.1.1.3:
+    /// * `roll_distance > 0` — recovery is complete `N` samples
+    ///   **after** the marked sample (gradual-decoding-refresh).
+    /// * `roll_distance < 0` — `|N|` samples **before** the marked
+    ///   sample must be decoded first (audio whose output is only
+    ///   correct after pre-rolling). The value `0` is reserved and
+    ///   never emitted by a conforming encoder.
+    pub fn roll_distance_for(&self, track_index: usize, sample_zero_based: u32) -> Option<i16> {
+        let table = &self.tracks.get(track_index)?.sample_table;
+        let idx = table
+            .group_description_index_for_sample(&crate::atom::fourcc("roll"), sample_zero_based)?;
+        let (_sbgp, sgpd) = table.sample_group(&crate::atom::fourcc("roll"))?;
+        let entry = sgpd.entry(idx)?;
+        crate::sample_groups::decode_roll(&entry.payload)
+            .ok()
+            .map(|r| r.roll_distance)
+    }
+
+    /// Look up the `'prol'` AudioPreRollEntry distance (§10.1.1.2)
+    /// for a specific audio sample. This is the AAC / Opus codec-
+    /// priming convention used by CMAF and DASH: after seeking to a
+    /// sync sample, the player must back up by `|roll_distance|`
+    /// audio frames before the decoder's output is valid.
+    ///
+    /// Returns `None` when the track has no `'prol'` grouping.
+    pub fn audio_preroll_for(&self, track_index: usize, sample_zero_based: u32) -> Option<i16> {
+        let table = &self.tracks.get(track_index)?.sample_table;
+        let idx = table
+            .group_description_index_for_sample(&crate::atom::fourcc("prol"), sample_zero_based)?;
+        let (_sbgp, sgpd) = table.sample_group(&crate::atom::fourcc("prol"))?;
+        let entry = sgpd.entry(idx)?;
+        crate::sample_groups::decode_prol(&entry.payload)
+            .ok()
+            .map(|r| r.roll_distance)
+    }
+
+    /// Look up the `'rap '` VisualRandomAccessEntry (§10.4.2) for a
+    /// specific sample on a video track.
+    ///
+    /// Spec note (§10.4.1): samples marked by `'rap '` **must** be
+    /// random-access points, and may also be sync samples. So
+    /// callers building a seek index can union the `stss` table with
+    /// the `'rap '` grouping to enumerate every legitimate
+    /// random-access entry point — including "open GOP" IDR-likes
+    /// where some leading samples in decode order won't be decodable
+    /// when entry happens at the RAP.
+    ///
+    /// Returns `None` when the track has no `'rap '` grouping or
+    /// when the sample isn't covered.
+    pub fn visual_random_access_for(
+        &self,
+        track_index: usize,
+        sample_zero_based: u32,
+    ) -> Option<crate::sample_groups::VisualRandomAccess> {
+        let table = &self.tracks.get(track_index)?.sample_table;
+        let idx = table
+            .group_description_index_for_sample(&crate::atom::fourcc("rap "), sample_zero_based)?;
+        let (_sbgp, sgpd) = table.sample_group(&crate::atom::fourcc("rap "))?;
+        let entry = sgpd.entry(idx)?;
+        crate::sample_groups::decode_rap(&entry.payload).ok()
+    }
+
+    /// Return the union of sync samples (`stss`) and `'rap '`-marked
+    /// samples (§10.4.1) for a track, expressed as 0-based sample
+    /// indices in decode order.
+    ///
+    /// Both spec mechanisms identify legitimate random-access
+    /// entry-points — `stss` enumerates closed GOPs (every sample
+    /// after a sync point decodes correctly), and `'rap '` enumerates
+    /// open GOPs (with optional `num_leading_samples` that the player
+    /// must discard). A player can union the two lists to surface
+    /// every entry-point the file's authoring tool exposed; this
+    /// helper does it once for the caller.
+    ///
+    /// For tracks with an empty `stss` (the QTFF "every sample is a
+    /// sync sample" implicit case), the returned vector lists every
+    /// sample index. Empty otherwise.
+    pub fn random_access_points(&self, track_index: usize) -> Vec<u32> {
+        let track = match self.tracks.get(track_index) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        let table = &track.sample_table;
+        let total = table.stsz_count;
+
+        let mut points: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        if table.stss.is_empty() {
+            // QTFF p. 73 — empty stss means every sample is sync.
+            for i in 0..total {
+                points.insert(i);
+            }
+        } else {
+            // stss is 1-based per the spec; normalise to 0-based.
+            for &one_based in &table.stss {
+                if one_based >= 1 && one_based <= total {
+                    points.insert(one_based - 1);
+                }
+            }
+        }
+        // Union with 'rap ' grouping (open GOPs).
+        if let Some((sbgp, _)) = table.sample_group(&crate::atom::fourcc("rap ")) {
+            let mut cursor: u64 = 0;
+            for run in &sbgp.entries {
+                if run.group_description_index != 0 {
+                    let end = (cursor + run.sample_count as u64).min(total as u64);
+                    for i in cursor..end {
+                        points.insert(i as u32);
+                    }
+                }
+                cursor += run.sample_count as u64;
+                if cursor >= total as u64 {
+                    break;
+                }
+            }
+        }
+        points.into_iter().collect()
+    }
+
     /// Inner implementation of [`Demuxer::seek_to`]. Lives on the
     /// struct (not the trait impl) so it's reachable from the
     /// standalone (no-`registry`) build's tests too without needing
@@ -2081,6 +2208,33 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
             t if t == &CSLG => {
                 let body = read_payload(r, child)?;
                 track.cslg = Some(parse_cslg(&body)?);
+            }
+            t if t == &SBGP => {
+                let body = read_payload(r, child)?;
+                let sbgp = parse_sbgp(&body)?;
+                // §8.9.2.3 — at most one `sbgp` per
+                // `(grouping_type, grouping_type_parameter)` pair
+                // inside a Sample Table Box. Drop the duplicate
+                // silently rather than erroring; ffmpeg-authored
+                // sgpd-without-sbgp + secondary sbgp shapes appear
+                // in the wild.
+                if !table.sbgp.iter().any(|s| {
+                    s.grouping_type == sbgp.grouping_type
+                        && s.grouping_type_parameter == sbgp.grouping_type_parameter
+                }) {
+                    table.sbgp.push(sbgp);
+                }
+            }
+            t if t == &SGPD => {
+                let body = read_payload(r, child)?;
+                let sgpd = parse_sgpd(&body)?;
+                if !table
+                    .sgpd
+                    .iter()
+                    .any(|s| s.grouping_type == sgpd.grouping_type)
+                {
+                    table.sgpd.push(sgpd);
+                }
             }
             _ => {}
         }

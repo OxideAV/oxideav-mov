@@ -56,6 +56,38 @@ the target DTS, and resets the demuxer cursor so the next
 `next_packet()` re-emits from that sample. Algorithm: QTFF "Finding a
 Sample" (pp. 79–80), mirroring `oxideav-mp4`'s `Mp4Demuxer::seek_to`.
 
+Round 80 wires **sample groups** (`sbgp` / `sgpd`) — ISO/IEC 14496-12
+§8.9 — into the per-track sample table, and surfaces typed lookups
+for the three well-known grouping types in §10:
+
+- `'roll'` (§10.1.1.2) — VisualRollRecoveryEntry /
+  AudioRollRecoveryEntry. `MovDemuxer::roll_distance_for(track,
+  sample) -> Option<i16>` returns the signed roll distance for the
+  caller's sample. Positive values mark gradual-decoding-refresh
+  entry points; negative values mark audio streams whose decoder
+  output is only correct after pre-rolling `|N|` frames.
+- `'prol'` (§10.1.1.2) — AudioPreRollEntry, the AAC and Opus
+  codec-priming convention used by CMAF/DASH/HLS. After seeking to
+  a sync sample, the player must back up by
+  `audio_preroll_for(track, sample)` frames before the decoder's
+  output is valid.
+- `'rap '` (§10.4.2) — VisualRandomAccessEntry. Marks open-GOP
+  random-access points; the entry exposes `num_leading_samples`,
+  the count of decode-order samples following the RAP that the
+  player must discard when entering there.
+  `MovDemuxer::random_access_points(track)` unions `stss` with the
+  `'rap '` grouping so callers building a seek index get every
+  legitimate entry point at once.
+
+Sample-group parsing handles all three on-disk versions of `sgpd`:
+v0 (deprecated implicit-size; fallback to per-typed-entry catalogue),
+v1 (`default_length` or per-row `description_length`), and v2 (adds
+`default_sample_description_index` so samples uncovered by `sbgp`
+still resolve to a default group entry). Duplicate `sbgp`/`sgpd`
+boxes with the same `grouping_type` inside a single `stbl` are
+silently de-duped (spec §8.9.2.3 forbids them, but ffmpeg sometimes
+emits two; we keep the first).
+
 Round 74 wires the **edit list** (`edts/elst`) into a presentation-time
 mapping API: `MovDemuxer::movie_pts_for(track, media_pts)` translates a
 sample's media-timescale PTS to its movie-timescale PTS by walking the

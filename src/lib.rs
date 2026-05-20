@@ -25,6 +25,7 @@ pub mod media_meta;
 pub mod muxer;
 pub mod reference;
 pub mod render;
+pub mod sample_groups;
 pub mod sample_table;
 pub mod timecode;
 pub mod track;
@@ -83,6 +84,11 @@ pub use media_meta::{
 pub use muxer::{FragmentationMode, MovMuxer, MuxSample, MuxTrackKind};
 pub use reference::{parse_dref, DataReference, ReferenceMovie};
 pub use render::{ispe_dimensions, render_grid, render_iden, render_iovl, Rgba8Canvas};
+pub use sample_groups::{
+    decode_prol, decode_rap, decode_roll, parse_sbgp, parse_sgpd, AudioPreRoll, RollRecovery,
+    SampleGroupDescription, SampleGroupDescriptionEntry, SampleToGroup, SampleToGroupEntry,
+    VisualRandomAccess,
+};
 pub use sample_table::{SampleEntry, SampleTable};
 pub use timecode::{
     parse_tmcd_sample_description, Tmcd, TMCD_FLAG_24_HOUR, TMCD_FLAG_COUNTER,

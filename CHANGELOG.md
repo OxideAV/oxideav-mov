@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 80 — sample-group (`sbgp` / `sgpd`) parse + typed lookups
+  (ISO/IEC 14496-12 §8.9 + §10).
+  - New `oxideav_mov::sample_groups` module: `parse_sbgp`,
+    `parse_sgpd`, `SampleToGroup`, `SampleGroupDescription`,
+    `SampleGroupDescriptionEntry`. Handles all three on-disk
+    versions of `sgpd` (deprecated v0 implicit-size with a
+    per-typed-entry size catalogue; v1 `default_length` or
+    per-row `description_length`; v2
+    `default_sample_description_index`).
+  - Typed entry decoders: `RollRecovery` for `'roll'` (§10.1.1.2,
+    Visual / Audio RollRecoveryEntry), `AudioPreRoll` for
+    `'prol'` (AAC + Opus codec-priming), `VisualRandomAccess`
+    for `'rap '` (§10.4.2, open-GOP random-access points with
+    `num_leading_samples_known` + `num_leading_samples`).
+  - `SampleTable::sample_group` /
+    `SampleTable::group_description_index_for_sample` resolve a
+    sample's group_description_index (1-based) with v2
+    `default_sample_description_index` fall-back when the
+    `sbgp` returns 0 for a sample.
+  - `MovDemuxer::roll_distance_for(track, sample) -> Option<i16>`,
+    `MovDemuxer::audio_preroll_for(track, sample) -> Option<i16>`,
+    `MovDemuxer::visual_random_access_for(track, sample) ->
+    Option<VisualRandomAccess>`, and
+    `MovDemuxer::random_access_points(track) -> Vec<u32>`
+    (the latter unions `stss` with the `'rap '` grouping so
+    open-GOP RAPs join the seek index).
+  - 7 new integration tests in
+    `tests/synth_round80_sample_groups.rs`: AAC pre-roll (-2048),
+    Opus pre-roll (-3840), audio roll per-run runs, missing
+    `sgpd` returns `None` instead of erroring, open-GOP RAP
+    union with `stss`, no-`stss` "every sample is sync"
+    coverage, and v2 `sgpd` `default_sample_description_index`
+    fall-back.
+
 - Round 74 — edit-list (`edts/elst`) **presentation-time honour**. The
   `elst` parser landed in round 2 but the parsed list was inert; the
   movie-time PTS of each sample was just the media-time PTS. Round 74

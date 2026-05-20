@@ -299,6 +299,10 @@ pub const MFRO: [u8; 4] = fourcc("mfro"); // movie-fragment random-access offset
 // Round-3: Composition-shift-least-greatest atom.
 pub const CSLG: [u8; 4] = fourcc("cslg");
 
+// Round-80: Sample-group atoms (ISO/IEC 14496-12 §8.9).
+pub const SBGP: [u8; 4] = fourcc("sbgp"); // Sample-to-Group Box
+pub const SGPD: [u8; 4] = fourcc("sgpd"); // Sample-Group-Description Box
+
 // Round-4: Data information sub-atoms.
 pub const URL_: [u8; 4] = fourcc("url ");
 pub const URN_: [u8; 4] = fourcc("urn ");

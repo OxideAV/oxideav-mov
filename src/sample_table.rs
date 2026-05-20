@@ -30,6 +30,8 @@ use oxideav_core::{Error, Result};
 #[cfg(not(feature = "registry"))]
 use crate::standalone::{Error, Result};
 
+use crate::sample_groups::{SampleGroupDescription, SampleToGroup};
+
 /// `stts` time-to-sample table entry.
 #[derive(Clone, Copy, Debug)]
 pub struct SttsEntry {
@@ -78,6 +80,15 @@ pub struct SampleTable {
     /// `ctts` composition-time offsets per sample run. Empty means
     /// "no composition offsets" — DTS == PTS for every sample.
     pub ctts: Vec<CttsEntry>,
+    /// `sbgp` Sample-to-Group Boxes (ISO/IEC 14496-12 §8.9.2). One
+    /// per `(grouping_type, grouping_type_parameter)` pair found
+    /// inside `stbl`. Empty when the track carries no sample
+    /// groupings.
+    pub sbgp: Vec<SampleToGroup>,
+    /// `sgpd` Sample-Group-Description Boxes (ISO/IEC 14496-12
+    /// §8.9.3). Keyed by the same `grouping_type` as the matching
+    /// [`SampleToGroup`].
+    pub sgpd: Vec<SampleGroupDescription>,
 }
 
 /// One entry in the iterator output: enough to read the sample bytes
@@ -121,6 +132,56 @@ impl SampleTable {
     /// Iterate samples in decode order.
     pub fn iter_samples(&self) -> SampleIter<'_> {
         SampleIter::new(self)
+    }
+
+    /// Look up the [`SampleToGroup`] / [`SampleGroupDescription`] pair
+    /// for a specific `grouping_type` FourCC. Returns `(sbgp,
+    /// sgpd_for_group)` when present. The `sbgp` borrow alone is
+    /// enough to ask "which group index does sample N belong to";
+    /// the `sgpd` carries the typed payload for that group index.
+    ///
+    /// ISO/IEC 14496-12 §8.9.2 promises **at most one** `sbgp` /
+    /// `sgpd` per `grouping_type` inside a single Sample Table Box,
+    /// so the first match in each `Vec` is authoritative.
+    pub fn sample_group<'a>(
+        &'a self,
+        grouping_type: &[u8; 4],
+    ) -> Option<(&'a SampleToGroup, &'a SampleGroupDescription)> {
+        let sbgp = self
+            .sbgp
+            .iter()
+            .find(|s| &s.grouping_type == grouping_type)?;
+        let sgpd = self
+            .sgpd
+            .iter()
+            .find(|s| &s.grouping_type == grouping_type)?;
+        Some((sbgp, sgpd))
+    }
+
+    /// Resolve the 1-based `group_description_index` for the sample
+    /// at `sample_zero_based`, applying the §8.9.3.3
+    /// `default_sample_description_index` fall-back when the `sbgp`
+    /// returns 0. Returns `None` only when neither the `sbgp` nor
+    /// the v2 `sgpd` default associates this sample with a group.
+    pub fn group_description_index_for_sample(
+        &self,
+        grouping_type: &[u8; 4],
+        sample_zero_based: u32,
+    ) -> Option<u32> {
+        let (sbgp, sgpd) = self.sample_group(grouping_type)?;
+        let raw = sbgp.group_index_for_sample(sample_zero_based);
+        if raw != 0 {
+            return Some(raw);
+        }
+        // §8.9.3.3 — version-2 `sgpd` may specify a default index for
+        // samples with no explicit sbgp row. Pre-v2 boxes have this
+        // field forced to zero.
+        let default_idx = sgpd.default_sample_description_index;
+        if default_idx == 0 {
+            None
+        } else {
+            Some(default_idx)
+        }
     }
 }
 
@@ -596,6 +657,8 @@ mod tests {
             chunk_offsets: vec![512],
             stss: vec![],
             ctts: vec![],
+            sbgp: vec![],
+            sgpd: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 1);
@@ -665,6 +728,8 @@ mod tests {
                     composition_offset: 0,
                 },
             ],
+            sbgp: vec![],
+            sgpd: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 4);
@@ -694,6 +759,8 @@ mod tests {
             chunk_offsets: vec![1000, 2000],
             stss: vec![1, 3],
             ctts: vec![],
+            sbgp: vec![],
+            sgpd: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 4);
