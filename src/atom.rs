@@ -259,6 +259,8 @@ pub const WIDE: [u8; 4] = fourcc("wide");
 pub const UDTA: [u8; 4] = fourcc("udta");
 pub const TREF: [u8; 4] = fourcc("tref");
 pub const PNOT: [u8; 4] = fourcc("pnot");
+/// Round 89 — Track Load Settings atom (QTFF p. 48).
+pub const LOAD: [u8; 4] = fourcc("load");
 
 // Apple-specific / round-2 atoms.
 pub const GAMA: [u8; 4] = fourcc("gama");

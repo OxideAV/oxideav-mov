@@ -19,6 +19,7 @@ use crate::media_meta::{
 use crate::reference::DataReference;
 use crate::sample_table::{SampleEntry, SampleTable};
 use crate::timecode::{parse_tmcd_sample_description, Tmcd};
+use crate::track_load::Load;
 use crate::user_data::UserDataEntry;
 
 #[cfg(feature = "registry")]
@@ -170,6 +171,11 @@ pub struct Track {
     /// — `gmin`, `text`, `tmcd/tcmi` (round 5). `None` when the track
     /// uses a typed media header (`vmhd`/`smhd`) instead.
     pub gmhd: Option<Gmhd>,
+    /// Parsed `load` atom (Track Load Settings, QTFF p. 48). `None`
+    /// when the track has no `load` child; defaults to "no preload
+    /// hints declared" and the player should fall back to its own
+    /// heuristics. Round 89.
+    pub load: Option<Load>,
     /// Samples appended by `moof/traf/trun` fragment runs (ISO/IEC
     /// 14496-12 §8.8). Empty for non-fragmented streams. Each
     /// entry already has its absolute file offset, DTS, duration,
@@ -312,6 +318,14 @@ impl Track {
     /// §8.3.1.3). The on-wire field is signed; we surface it raw.
     pub fn alternate_group(&self) -> i16 {
         self.tkhd.alternate_group
+    }
+
+    /// Parsed [`Load`] (Track Load Settings, QTFF p. 48), when the
+    /// track carries a `load` atom. Players use it to decide whether
+    /// and when to preload the track into memory and how to budget
+    /// I/O against the `default_hints` bits.
+    pub fn load_settings(&self) -> Option<&Load> {
+        self.load.as_ref()
     }
 
     /// Resolve the track's `edts/elst` edit list into the sequence of

@@ -13,10 +13,10 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DINF, DREF,
-    EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, MDAT, MDHD, MDIA, META, MFRA, MINF,
-    MOOF, MOOV, MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SBGP, SGPD, SKIP,
-    SMHD, STBL, STCO, STSC, STSD, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD,
-    WIDE,
+    EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MDAT, MDHD, MDIA, META, MFRA,
+    MINF, MOOF, MOOV, MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SBGP, SGPD,
+    SKIP, SMHD, STBL, STCO, STSC, STSD, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA,
+    VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -32,6 +32,7 @@ use crate::sample_table::{
     SampleEntry, SampleTable,
 };
 use crate::track::{parse_stsd, Track, TrackRef, TrackRefKind};
+use crate::track_load::parse_load;
 use crate::user_data::{parse_udta, UserDataEntry};
 
 #[cfg(feature = "registry")]
@@ -1104,6 +1105,15 @@ impl MovDemuxer {
         by_group.into_iter().collect()
     }
 
+    /// Track Load Settings (QTFF p. 48) for `track_index`, when the
+    /// track carries a `load` atom. `None` is the spec's "no preload
+    /// hints declared" — the player should fall back to its own
+    /// heuristics. See [`crate::track_load::Load`] for the typed
+    /// preload-window + flag-bit accessors.
+    pub fn track_load(&self, track_index: usize) -> Option<&crate::track_load::Load> {
+        self.tracks.get(track_index)?.load_settings()
+    }
+
     /// Look up the `'roll'` (§10.1.1.2) recovery distance for a
     /// specific sample on a track.
     ///
@@ -1887,6 +1897,10 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
             }
             t if t == &TAPT => {
                 track.tapt = Some(parse_tapt(r, child)?);
+            }
+            t if t == &LOAD => {
+                let body = read_payload(r, child)?;
+                track.load = Some(parse_load(&body)?);
             }
             t if t == &CSLG => {
                 let body = read_payload(r, child)?;

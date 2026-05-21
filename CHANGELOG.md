@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 89 — Track Load Settings atom (`load`) parser, QTFF p. 48
+  Figure 2-12.
+  - New `oxideav_mov::track_load` module: `parse_load(payload)
+    -> Result<Load>`, the `Load` struct (`preload_start_time`,
+    `preload_duration`, `preload_flags`, `default_hints`), bit-flag
+    constants (`LOAD_PRELOAD_ALWAYS`, `LOAD_PRELOAD_IF_ENABLED`,
+    `LOAD_HINT_DOUBLE_BUFFER`, `LOAD_HINT_HIGH_QUALITY`), and the
+    `LOAD_PRELOAD_DURATION_TO_END` sentinel
+    (`0xFFFF_FFFF` = preload to end of track).
+  - Typed accessors on `Load`: `is_preload_to_end`,
+    `preload_always`, `preload_if_enabled`, `hint_double_buffer`,
+    `hint_high_quality`. Raw `default_hints` u32 preserved so
+    vendor-private bits survive.
+  - `Track::load: Option<Load>` field populated during `parse_trak`;
+    `Track::load_settings() -> Option<&Load>` accessor; mirror on
+    `MovDemuxer::track_load(track_index) -> Option<&Load>`.
+  - 7 unit tests in `track_load::tests` + 5 integration tests in
+    `tests/synth_round89_track_load.rs` covering canonical-field
+    round-trip, `preload_duration == -1` "to end" sentinel, the two
+    preload-flag bits, combined-hint bits with vendor extension,
+    truncated/trailing-byte payloads, and out-of-range track-index
+    handling.
+  - QuickTime-only atom (no ISO BMFF counterpart per ISO/IEC
+    14496-12).
+
 - Round 80 — sample-group (`sbgp` / `sgpd`) parse + typed lookups
   (ISO/IEC 14496-12 §8.9 + §10).
   - New `oxideav_mov::sample_groups` module: `parse_sbgp`,

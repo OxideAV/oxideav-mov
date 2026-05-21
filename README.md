@@ -122,6 +122,17 @@ offsets. Output round-trips through this crate's own
 item id, every property association, and every iref preserved,
 and `ffprobe -v warning` accepts the container structure.
 
+Round 89 wires the **Track Load Settings atom** (`load`) — QTFF p. 48,
+Figure 2-12 — into the per-track parse. The 16-byte body carries a
+movie-timescale preload window (`preload_start_time` +
+`preload_duration`, with `-1` → "to end of track"), a
+mutually-exclusive enable-mode flag pair (`PRELOAD_ALWAYS` /
+`PRELOAD_IF_ENABLED`), and a quality-hint bitfield (`DOUBLE_BUFFER` /
+`HIGH_QUALITY`; vendor-private bits survive on the raw u32). Surfaces
+on the demuxer via `MovDemuxer::track_load(track_index) -> Option<&Load>`
+and `Track::load_settings()`. The atom has no ISO BMFF counterpart —
+QuickTime only.
+
 Round 21 adds **fragmented-MP4 seek** via the ISO/IEC 14496-12
 §8.8.10 `tfra` (Track Fragment Random Access Box) at open time. The
 demuxer walks `mfra/tfra/mfro` once and `seek_to` binary-searches

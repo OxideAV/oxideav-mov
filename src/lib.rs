@@ -29,6 +29,7 @@ pub mod sample_groups;
 pub mod sample_table;
 pub mod timecode;
 pub mod track;
+pub mod track_load;
 pub mod user_data;
 
 #[cfg(feature = "registry")]
@@ -95,4 +96,8 @@ pub use timecode::{
     TMCD_FLAG_DROP_FRAME, TMCD_FLAG_NEGATIVES_OK,
 };
 pub use track::{SampleDescription, Track, TrackRef, TrackRefKind};
+pub use track_load::{
+    parse_load, Load, LOAD_HINT_DOUBLE_BUFFER, LOAD_HINT_HIGH_QUALITY, LOAD_PRELOAD_ALWAYS,
+    LOAD_PRELOAD_DURATION_TO_END, LOAD_PRELOAD_IF_ENABLED,
+};
 pub use user_data::{iso_language_tag, parse_udta, UserDataEntry, UserDataKind};
