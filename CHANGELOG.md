@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 91 — non-unity `media_rate` scaling in the edit-list mapper.
+  `media_pts_to_movie_pts` (and the `MovDemuxer::movie_pts_for` /
+  `Track::media_pts_to_movie_pts` wrappers on top of it) now honours
+  any strictly-positive 16.16 `media_rate`. A `media_rate = 2.0`
+  segment consumes twice as much media per movie tick — matching the
+  QTFF p. 226–227 worked example. Forward map:
+  `Δmovie = Δmedia × movie_ts × 65536 / (media_ts × rate_fp)`. Negative
+  or zero `media_rate` on a Media segment is rejected per QTFF p. 48.
+  Five unit tests in `edit::tests` and four integration tests in
+  `tests/synth_round91_media_rate_scaling.rs` cover 2.0×, 0.5×, the
+  full 3-segment QTFF example, the `media_rate ≤ 0` rejection path,
+  and 2.0× composed after an initial empty edit.
 - Round 89 — Track Load Settings atom (`load`) parser, QTFF p. 48
   Figure 2-12.
   - New `oxideav_mov::track_load` module: `parse_load(payload)

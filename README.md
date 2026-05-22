@@ -102,6 +102,19 @@ immediately" case. Round 74 also surfaces `tkhd.flags`
 `participates_in_poster`) and `alternate_group`, plus
 `MovDemuxer::presentation_tracks()` / `alternate_groups()`.
 
+Round 91 generalises the mapper to **non-unity `media_rate`**: a
+segment with `media_rate = 2.0` (16.16 fixed `0x0002_0000`) consumes
+twice as much media per movie tick — exactly the QTFF "Playing With
+Edit Lists" worked example on p. 226–227, where a 600 movie-tick edit
+at rate 2.0 consumes 200 media ticks (movie_ts = 600, media_ts = 100).
+Negative or zero `media_rate` on a `Media` segment is rejected on a
+per-segment basis (QTFF p. 48: "this rate value cannot be 0 or
+negative"); `media_rate == 0` paired with a non-empty `media_time`
+is dwell and is handled by the [`EditSegmentKind::Dwell`] arm. The
+fixed-point arithmetic is `Δmovie = Δmedia × movie_ts × 65536 /
+(media_ts × rate_fp)` with half-up rounding (no spec-mandated
+direction).
+
 Round 22 adds the **HEIF/HEIC image-item WRITE path**:
 [`HeifWriter`] emits a structurally-valid `.heic` / `.heif` /
 `.avif` file from a list of [`HeifItem`]s, where each item carries
@@ -151,18 +164,16 @@ Decoding stays in codec crates; this crate calls
 
 ## Follow-ups
 
-- Edit-list mapper currently handles `media_rate ∈ {0, 0x0001_0000}`
-  (dwell + unity rate). Non-unity rates (typical authoring example:
-  segment played at 2.0×) surface in the `EditSegmentKind::Media`
-  variant but the mapper falls back to identity on them — a future
-  round needs the rate-scaled offset arithmetic and a fixture proving
-  non-unity rate against an ffmpeg-encoded reference.
 - A `next_packet`-side opt-in (`MovDemuxer::with_edit_list_pts()`?)
   that swaps the emitted `Packet::pts` from media-time to movie-time
   end-to-end, so consumers that don't want the explicit
   `movie_pts_for` call site get spec-correct presentation timing for
   free. Round 74 keeps the existing media-time PTS contract on
   `next_packet` to avoid a silent behaviour change.
+- ffmpeg-encoded `media_rate` round-trip fixture: round 91 validates
+  the math against the QTFF worked example via synth fixtures, but a
+  real `ffmpeg -filter:v setpts=PTS*2` reference would harden against
+  rounding-convention drift.
 
 ## Standalone build
 

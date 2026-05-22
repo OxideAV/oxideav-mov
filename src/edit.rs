@@ -111,10 +111,14 @@ pub enum EditSegmentKind {
     },
     /// Normal media playback. `media_time_start` is the media-timescale
     /// tick the segment begins at; `media_rate` is the on-wire 16.16
-    /// fixed-point rate (see [`Edit::rate_f64`]). Round 74 only
-    /// guarantees correct `media_to_movie_pts` mapping for
-    /// `media_rate == 0x0001_0000` (1.0); other rates are surfaced but
-    /// the mapper falls back to the unscaled identity.
+    /// fixed-point rate (see [`Edit::rate_f64`]).
+    ///
+    /// Round 91 generalises [`media_pts_to_movie_pts`] to honour any
+    /// strictly-positive `media_rate`: a 2.0× segment consumes twice as
+    /// much media per movie tick (QTFF Chapter 5, "Playing With Edit
+    /// Lists" p. 226–227 — `Track duration[1] = 600` at `Media rate[1]
+    /// = 2.0` consumes 1200 media ticks worth of source frames). The
+    /// unity-rate fast path remains identity-scaled.
     Media {
         /// Inclusive media-timescale start tick.
         media_time_start: u64,
@@ -273,9 +277,7 @@ pub fn resolve_edit_segments(edits: &EditList, movie_duration: Option<u64>) -> V
 /// the resolved edit segments to its corresponding movie-timescale
 /// presentation timestamp. Returns `None` when the media-time falls
 /// outside every non-empty segment (the sample is not referenced by
-/// any edit and is dropped from the presentation timeline) or when
-/// the segment lookup hits a non-1.0 media_rate that the round-74
-/// mapper doesn't model.
+/// any edit and is dropped from the presentation timeline).
 ///
 /// Inputs:
 /// * `segments` — output of [`resolve_edit_segments`].
@@ -287,13 +289,15 @@ pub fn resolve_edit_segments(edits: &EditList, movie_duration: Option<u64>) -> V
 ///
 /// Algorithm: scan segments in order. For each
 /// [`EditSegmentKind::Media`], express its movie-time start and
-/// duration in *media-time* (via `segment.movie_time_end -
-/// segment.movie_time_start` rescaled by
-/// `media_timescale / movie_timescale`), test whether `media_pts`
-/// falls within `[media_time_start, media_time_start +
-/// segment_media_duration)`, and if so return
-/// `segment.movie_time_start + (media_pts - media_time_start) *
-/// movie_timescale / media_timescale`.
+/// duration in *media-time*. With unity rate the conversion is a pure
+/// timescale ratio. With non-unity rate, the segment consumes
+/// `rate × (movie_duration × media_ts / movie_ts)` media ticks per the
+/// QTFF §"Playing With Edit Lists" example (p. 226–227: 600 movie
+/// ticks at `Media rate = 2.0` consume 1200 media ticks). The forward
+/// mapping inverts that: a media-time delta `Δm` inside the segment
+/// translates to a movie-time delta `Δm × movie_ts / (media_ts ×
+/// rate)`. Rate is 16.16 fixed-point so the arithmetic stays integer
+/// — `Δmovie = Δmedia × movie_ts × 65536 / (media_ts × rate_fp)`.
 ///
 /// Empty edits contribute movie-time gaps; dwell edits map the entire
 /// segment to `media_time` (any `media_pts == media_time` lands at
@@ -301,7 +305,15 @@ pub fn resolve_edit_segments(edits: &EditList, movie_duration: Option<u64>) -> V
 /// duration, non-zero media_time) are skipped on a per-segment basis
 /// but their `media_time_start` is honoured as the base for the
 /// preceding sample if the following Media segment's media-time
-/// matches it (see §8.6.6.1).
+/// matches it (see §8.6.6.1). Negative or zero `media_rate` on a
+/// Media segment is rejected on a per-segment basis (QTFF p. 48
+/// — "this rate value cannot be 0 or negative") and the scan
+/// continues to the next segment.
+///
+/// Rounding for the half-step inside both the media-duration and the
+/// movie-delta computation is half-up via `(num + denom/2) / denom`,
+/// matching the convention already used in this module for the
+/// timescale ratio. QTFF does not prescribe a rounding direction.
 pub fn media_pts_to_movie_pts(
     segments: &[EditSegment],
     media_pts: i64,
@@ -313,6 +325,7 @@ pub fn media_pts_to_movie_pts(
     }
     let mvs = movie_timescale as i128;
     let mds = media_timescale as i128;
+    const RATE_ONE: i128 = 0x0001_0000;
     for seg in segments {
         match seg.kind {
             EditSegmentKind::Empty => continue,
@@ -325,22 +338,26 @@ pub fn media_pts_to_movie_pts(
                 media_time_start,
                 media_rate,
             } => {
-                // Round-74 mapper only models rate=1.0; surface a
-                // best-effort identity-scaled mapping otherwise (see
-                // module docs).
-                if media_rate != 0x0001_0000 && media_rate != 0 {
-                    // continue scanning — a downstream segment may
-                    // still match at unity rate.
+                // QTFF p. 48: `media_rate` "cannot be 0 or negative".
+                // Reject those segments; continue scanning in case a
+                // following segment matches.
+                if media_rate <= 0 {
                     continue;
                 }
+                let rate_fp = media_rate as i128;
                 let seg_dur_movie = seg.movie_time_end as i128 - seg.movie_time_start as i128;
                 if seg_dur_movie < 0 {
                     continue;
                 }
-                // Convert the segment's movie-time duration into the
-                // equivalent media-time tick span. Round nearest-even
-                // (banker's rounding via simple half-up).
-                let seg_dur_media = (seg_dur_movie * mds + mvs / 2) / mvs;
+                // Equivalent media-time tick span consumed by this
+                // movie-time slice at the segment's rate. With unity
+                // rate this collapses to `seg_dur_movie * mds / mvs`.
+                // With non-unity rate the QTFF example on p. 226–227
+                // sets the convention: rate 2.0 doubles media
+                // consumption, rate 0.5 halves it.
+                let num = seg_dur_movie * mds * rate_fp;
+                let denom = mvs * RATE_ONE;
+                let seg_dur_media = (num + denom / 2) / denom;
                 let media_start = media_time_start as i128;
                 let media_end = media_start + seg_dur_media;
                 // Zero-duration segments are the §8.6.6.1
@@ -354,7 +371,10 @@ pub fn media_pts_to_movie_pts(
                 }
                 if (media_pts as i128) >= media_start && (media_pts as i128) < media_end {
                     let delta_media = media_pts as i128 - media_start;
-                    let delta_movie = (delta_media * mvs + mds / 2) / mds;
+                    // Δmovie = Δmedia × movie_ts × 65536 / (media_ts × rate_fp)
+                    let num = delta_media * mvs * RATE_ONE;
+                    let denom = mds * rate_fp;
+                    let delta_movie = (num + denom / 2) / denom;
                     return Some(seg.movie_time_start as i64 + delta_movie as i64);
                 }
             }
@@ -620,5 +640,137 @@ mod tests {
             media_rate: 0x0002_8000, // 2.5
         };
         assert!((e.rate_f64() - 2.5).abs() < 1e-9);
+    }
+
+    // ─────────────── round 91: non-unity media_rate scaling ───────────────
+
+    #[test]
+    fn map_media_to_movie_pts_double_speed_segment_consumes_double_media() {
+        // QTFF p. 226–227 worked example: 600 movie ticks at media_rate
+        // 2.0 with movie_ts=600 / media_ts=100 consumes 200 media ticks
+        // (1 second of source → ½ second of movie). Map a couple of
+        // media_pts inside that window.
+        let edits = vec![Edit {
+            track_duration: 600, // 1.0 s @ movie_ts 600
+            media_time: 0,
+            media_rate: 0x0002_0000, // 2.0
+        }];
+        let segs = resolve_edit_segments(&edits, None);
+        // media_pts 0 lands at movie 0.
+        assert_eq!(media_pts_to_movie_pts(&segs, 0, 600, 100), Some(0));
+        // media_pts 100 (= 1 s of source) lands at movie 300 (= ½ s).
+        assert_eq!(media_pts_to_movie_pts(&segs, 100, 600, 100), Some(300));
+        // media_pts 199 (last consumed media tick) maps inside.
+        assert_eq!(media_pts_to_movie_pts(&segs, 199, 600, 100), Some(597));
+        // media_pts 200 is past the consumed window → None.
+        assert_eq!(media_pts_to_movie_pts(&segs, 200, 600, 100), None);
+    }
+
+    #[test]
+    fn map_media_to_movie_pts_half_speed_segment_consumes_half_media() {
+        // Half-speed: 600 movie ticks at media_rate 0.5 consumes 50
+        // media ticks (½ s of source stretched over 1 s of movie time).
+        let edits = vec![Edit {
+            track_duration: 600,
+            media_time: 0,
+            media_rate: 0x0000_8000, // 0.5
+        }];
+        let segs = resolve_edit_segments(&edits, None);
+        assert_eq!(media_pts_to_movie_pts(&segs, 0, 600, 100), Some(0));
+        // media_pts 25 (= ¼ s of source) lands at movie 300 (= ½ s of
+        // movie time).
+        assert_eq!(media_pts_to_movie_pts(&segs, 25, 600, 100), Some(300));
+        // media_pts 49 is the last consumed media tick.
+        assert_eq!(media_pts_to_movie_pts(&segs, 49, 600, 100), Some(588));
+        // media_pts 50 is past the consumed window.
+        assert_eq!(media_pts_to_movie_pts(&segs, 50, 600, 100), None);
+    }
+
+    #[test]
+    fn map_media_to_movie_pts_three_segment_qtff_example_roundtrip() {
+        // The full QTFF p. 226–227 example: 3 segments totalling 6000
+        // movie ticks, two 600-tick double-speed runs followed by a
+        // 4800-tick unity-rate tail starting at media_time 200.
+        let edits = vec![
+            Edit {
+                track_duration: 600,
+                media_time: 0,
+                media_rate: 0x0002_0000,
+            },
+            Edit {
+                track_duration: 600,
+                media_time: 0,
+                media_rate: 0x0002_0000,
+            },
+            Edit {
+                track_duration: 4800,
+                media_time: 200,
+                media_rate: 0x0001_0000,
+            },
+        ];
+        let segs = resolve_edit_segments(&edits, None);
+        // Within segment[0]: 200 media ticks consumed across 600 movie
+        // ticks. media_pts 0..199 maps into [0, 600). The first
+        // matching segment wins, so media_pts 0 → movie 0 (not 600).
+        assert_eq!(media_pts_to_movie_pts(&segs, 0, 600, 100), Some(0));
+        assert_eq!(media_pts_to_movie_pts(&segs, 100, 600, 100), Some(300));
+        // Segment[2] is unity rate starting at media_time 200; covers
+        // 4800 movie ticks → 800 media ticks. media_pts 200 lands at
+        // segment start = 600 + 600 = 1200.
+        assert_eq!(media_pts_to_movie_pts(&segs, 200, 600, 100), Some(1200));
+        // media_pts 1000 = 800 ticks into segment[2] → end of segment.
+        // We treat the window as half-open so 1000 is just outside.
+        assert_eq!(media_pts_to_movie_pts(&segs, 1000, 600, 100), None);
+        // media_pts 999 lands one movie tick shy of segment end.
+        assert_eq!(media_pts_to_movie_pts(&segs, 999, 600, 100), Some(5994));
+    }
+
+    #[test]
+    fn map_media_to_movie_pts_rejects_negative_or_zero_rate_on_media_segment() {
+        // media_rate = 0 with non-empty media_time is dwell (handled
+        // elsewhere). Construct a Media segment manually with rate 0
+        // and -1.0 and confirm both are rejected per QTFF p. 48.
+        let segs = vec![
+            EditSegment {
+                movie_time_start: 0,
+                movie_time_end: 100,
+                kind: EditSegmentKind::Media {
+                    media_time_start: 0,
+                    media_rate: 0, // forbidden by QTFF
+                },
+            },
+            EditSegment {
+                movie_time_start: 100,
+                movie_time_end: 200,
+                kind: EditSegmentKind::Media {
+                    media_time_start: 0,
+                    media_rate: -0x0001_0000, // -1.0, forbidden
+                },
+            },
+        ];
+        assert_eq!(media_pts_to_movie_pts(&segs, 50, 100, 100), None);
+    }
+
+    #[test]
+    fn map_media_to_movie_pts_double_speed_with_initial_offset() {
+        // Double-speed segment after a 100-tick empty edit. Same
+        // 600/100 timescales; media segment runs 200 media ticks.
+        let edits = vec![
+            Edit {
+                track_duration: 100,
+                media_time: -1,
+                media_rate: 0x0001_0000,
+            },
+            Edit {
+                track_duration: 600,
+                media_time: 0,
+                media_rate: 0x0002_0000,
+            },
+        ];
+        let segs = resolve_edit_segments(&edits, None);
+        // media_pts 0 lands at movie 100 (after the empty edit).
+        assert_eq!(media_pts_to_movie_pts(&segs, 0, 600, 100), Some(100));
+        // media_pts 100 lands at movie 100 + 300 = 400.
+        assert_eq!(media_pts_to_movie_pts(&segs, 100, 600, 100), Some(400));
     }
 }
