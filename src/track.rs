@@ -20,6 +20,7 @@ use crate::reference::DataReference;
 use crate::sample_table::{SampleEntry, SampleTable};
 use crate::timecode::{parse_tmcd_sample_description, Tmcd};
 use crate::track_load::Load;
+use crate::track_selection::TrackSelection;
 use crate::user_data::UserDataEntry;
 
 #[cfg(feature = "registry")]
@@ -176,6 +177,11 @@ pub struct Track {
     /// hints declared" and the player should fall back to its own
     /// heuristics. Round 89.
     pub load: Option<Load>,
+    /// Parsed `tsel` Track Selection box (ISO/IEC 14496-12 §8.10.3),
+    /// found inside the track-level `udta`. `None` when no `tsel` is
+    /// present — equivalent to "no switching information declared"
+    /// per §8.10.3.4. Round 95.
+    pub track_selection: Option<TrackSelection>,
     /// Samples appended by `moof/traf/trun` fragment runs (ISO/IEC
     /// 14496-12 §8.8). Empty for non-fragmented streams. Each
     /// entry already has its absolute file offset, DTS, duration,
@@ -326,6 +332,15 @@ impl Track {
     /// I/O against the `default_hints` bits.
     pub fn load_settings(&self) -> Option<&Load> {
         self.load.as_ref()
+    }
+
+    /// Parsed [`TrackSelection`] (ISO/IEC 14496-12 §8.10.3), when the
+    /// track's `udta` carries a `tsel` child. The box refines
+    /// [`Self::alternate_group`] with a finer-grained switch group and
+    /// a list of typed attribute FourCCs the player can use to rank
+    /// peer tracks at session start and during runtime switching.
+    pub fn track_selection(&self) -> Option<&TrackSelection> {
+        self.track_selection.as_ref()
     }
 
     /// Resolve the track's `edts/elst` edit list into the sequence of

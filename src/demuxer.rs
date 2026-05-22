@@ -1114,6 +1114,48 @@ impl MovDemuxer {
         self.tracks.get(track_index)?.load_settings()
     }
 
+    /// Track Selection box (ISO/IEC 14496-12 §8.10.3) for
+    /// `track_index`, when the track's `udta` carries a `tsel` child.
+    /// `None` is the spec's "no switching information" sentinel: the
+    /// player should fall back to ranking by `tkhd.alternate_group` +
+    /// codec preference only. See
+    /// [`crate::track_selection::TrackSelection`] for the typed
+    /// `switch_group` + `attributes` accessors.
+    pub fn track_selection(
+        &self,
+        track_index: usize,
+    ) -> Option<&crate::track_selection::TrackSelection> {
+        self.tracks.get(track_index)?.track_selection()
+    }
+
+    /// Group the file's tracks by ISO/IEC 14496-12 §8.10.3
+    /// `switch_group`. Returns `Vec<(switch_group_id, Vec<track_index>)>`
+    /// sorted ascending by switch-group id. Tracks without a `tsel`
+    /// child OR with `tsel.switch_group == 0` are *excluded* — the
+    /// spec is explicit (§8.10.3.4) that those values carry no
+    /// switching information, so it would be wrong to bucket them
+    /// together at switch-group 0.
+    ///
+    /// Switch groups nest *inside* alternate groups: two tracks with
+    /// the same `switch_group` id but different
+    /// `tkhd.alternate_group` values are a malformed input
+    /// (§8.10.3.4 last sentence) and the caller is responsible for
+    /// detecting that case. This helper just lists what the file
+    /// declares; pair it with [`Self::alternate_groups`] for the full
+    /// hierarchy.
+    pub fn switch_groups(&self) -> Vec<(i32, Vec<usize>)> {
+        let mut by_group: std::collections::BTreeMap<i32, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (idx, t) in self.tracks.iter().enumerate() {
+            if let Some(ts) = t.track_selection() {
+                if ts.switch_group != 0 {
+                    by_group.entry(ts.switch_group).or_default().push(idx);
+                }
+            }
+        }
+        by_group.into_iter().collect()
+    }
+
     /// Look up the `'roll'` (§10.1.1.2) recovery distance for a
     /// specific sample on a track.
     ///
@@ -1916,6 +1958,12 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
             t if t == &UDTA => {
                 let body = read_payload(r, child)?;
                 track.user_data = parse_udta(&body)?;
+                // ISO/IEC 14496-12 §8.10.3 — `tsel` (Track Selection
+                // box) lives inside track-level udta. We re-walk the
+                // same buffer once to extract it as a typed surface
+                // rather than leaving the raw bytes inside the flat
+                // user_data list.
+                track.track_selection = crate::track_selection::find_tsel_in_udta(&body)?;
             }
             _ => {}
         }

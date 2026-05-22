@@ -146,6 +146,23 @@ on the demuxer via `MovDemuxer::track_load(track_index) -> Option<&Load>`
 and `Track::load_settings()`. The atom has no ISO BMFF counterpart —
 QuickTime only.
 
+Round 95 wires the **Track Selection box** (`tsel`) — ISO/IEC 14496-12
+§8.10.3 (pp. 72–74) — into the per-track parse. `tsel` lives inside the
+track-level `udta` and refines `tkhd.alternate_group` with a signed
+32-bit switch-group id plus a list of attribute FourCCs that describe
+or differentiate tracks inside that switch group. The §8.10.3.5
+attribute set is enumerated as six descriptive (`tesc/fgsc/cgsc/spsc/
+resc/vwsc`) + eight differentiating (`cdec/scsz/mpsz/mtyp/mela/bitr/
+frar/nvws`); each entry classifies via [`TsAttributeRole`] and unknown
+FourCCs survive raw so vendor / future-spec entries don't get lost.
+Surfaces on the demuxer via `MovDemuxer::track_selection(track_index)`
+and `Track::track_selection()`; `MovDemuxer::switch_groups()` returns a
+bucket map sorted ascending by switch-group id (tracks without a `tsel`
+AND tracks with `switch_group == 0` are excluded — both equivalent to
+"no switching information declared" per §8.10.3.4). Pairs with the r74
+`alternate_groups()` surface to expose the full alternate ⊇ switch
+hierarchy. QTFF doesn't define this box; it is ISO BMFF-only.
+
 Round 21 adds **fragmented-MP4 seek** via the ISO/IEC 14496-12
 §8.8.10 `tfra` (Track Fragment Random Access Box) at open time. The
 demuxer walks `mfra/tfra/mfro` once and `seek_to` binary-searches

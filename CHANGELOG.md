@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 95 — Track Selection box (`tsel`) parser, ISO/IEC 14496-12
+  §8.10.3 (pp. 72–74).
+  - New `oxideav_mov::track_selection` module: `parse_tsel(payload)
+    -> Result<TrackSelection>`, the `TrackSelection` struct
+    (`switch_group: i32` per the spec's `template int(32)`, plus
+    `attributes: Vec<[u8; 4]>` read to the end of the box), and the
+    `find_tsel_in_udta(udta_payload) -> Result<Option<TrackSelection>>`
+    helper that locates a `tsel` child inside a track-level `udta` body.
+  - `TsAttributeRole` enum (`Descriptive` / `Differentiating` /
+    `Unknown`) + the `ts_attribute_role(fourcc)` classifier function
+    covering every §8.10.3.5 enumerated FourCC: six descriptive
+    (`TSEL_ATTR_TEMPORAL_SCALABILITY` `tesc`,
+    `TSEL_ATTR_FINE_GRAIN_SNR_SCALABILITY` `fgsc`,
+    `TSEL_ATTR_COARSE_GRAIN_SNR_SCALABILITY` `cgsc`,
+    `TSEL_ATTR_SPATIAL_SCALABILITY` `spsc`,
+    `TSEL_ATTR_REGION_OF_INTEREST_SCALABILITY` `resc`,
+    `TSEL_ATTR_VIEW_SCALABILITY` `vwsc`) + eight differentiating
+    (`TSEL_ATTR_CODEC` `cdec`, `TSEL_ATTR_SCREEN_SIZE` `scsz`,
+    `TSEL_ATTR_MAX_PACKET_SIZE` `mpsz`, `TSEL_ATTR_MEDIA_TYPE` `mtyp`,
+    `TSEL_ATTR_MEDIA_LANGUAGE` `mela`, `TSEL_ATTR_BITRATE` `bitr`,
+    `TSEL_ATTR_FRAME_RATE` `frar`, `TSEL_ATTR_NUMBER_OF_VIEWS` `nvws`).
+  - Typed accessors on `TrackSelection`: `is_informative`,
+    `has_attribute(&fourcc)`, `typed_attributes()` iterator returning
+    `(fourcc, role)` pairs. Unknown attribute FourCCs are preserved
+    verbatim so vendor / future-spec entries survive.
+  - `Track::track_selection: Option<TrackSelection>` field populated
+    during `parse_trak` (read from the track-level `udta` body in the
+    same pass that builds `Track::user_data`);
+    `Track::track_selection() -> Option<&TrackSelection>` accessor;
+    mirror on `MovDemuxer::track_selection(track_index)
+    -> Option<&TrackSelection>`.
+  - `MovDemuxer::switch_groups() -> Vec<(i32, Vec<usize>)>` aggregates
+    tracks by their `tsel.switch_group` for player ranking; tracks
+    without a `tsel` AND tracks with `switch_group == 0` are excluded
+    per §8.10.3.4 ("if this field is 0 … there is no information on
+    whether the track can be used for switching"). Pairs with the
+    existing `MovDemuxer::alternate_groups()` to expose the full
+    spec hierarchy.
+  - Parse-time guards: `Error::invalid` on payload < 8 bytes, on a
+    non-zero `version` field (spec fixes `version = 0`), and on an
+    attribute-list tail length that isn't a multiple of 4 (each
+    attribute is exactly an `unsigned int(32)`). FullBox flags are
+    accepted and ignored.
+  - 15 unit tests in `track_selection::tests` + 8 integration tests in
+    `tests/synth_round95_track_selection.rs` covering switch_group
+    sign handling, descriptive/differentiating/unknown attribute
+    classification, vendor-extension FourCC preservation, the
+    `udta` walker (including zero-terminator handling and inner
+    parse-error propagation), structural-error rejection, the
+    "tsel present but uninformative" zero-state, the demuxer
+    `switch_groups()` bucket map, and out-of-range track-index
+    handling.
+  - ISO BMFF-only box — QTFF does not define `tsel`.
+
 - Round 91 — non-unity `media_rate` scaling in the edit-list mapper.
   `media_pts_to_movie_pts` (and the `MovDemuxer::movie_pts_for` /
   `Track::media_pts_to_movie_pts` wrappers on top of it) now honours

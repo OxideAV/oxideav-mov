@@ -30,6 +30,7 @@ pub mod sample_table;
 pub mod timecode;
 pub mod track;
 pub mod track_load;
+pub mod track_selection;
 pub mod user_data;
 
 #[cfg(feature = "registry")]
@@ -99,5 +100,13 @@ pub use track::{SampleDescription, Track, TrackRef, TrackRefKind};
 pub use track_load::{
     parse_load, Load, LOAD_HINT_DOUBLE_BUFFER, LOAD_HINT_HIGH_QUALITY, LOAD_PRELOAD_ALWAYS,
     LOAD_PRELOAD_DURATION_TO_END, LOAD_PRELOAD_IF_ENABLED,
+};
+pub use track_selection::{
+    find_tsel_in_udta, parse_tsel, ts_attribute_role, TrackSelection, TsAttributeRole,
+    TSEL_ATTR_BITRATE, TSEL_ATTR_COARSE_GRAIN_SNR_SCALABILITY, TSEL_ATTR_CODEC,
+    TSEL_ATTR_FINE_GRAIN_SNR_SCALABILITY, TSEL_ATTR_FRAME_RATE, TSEL_ATTR_MAX_PACKET_SIZE,
+    TSEL_ATTR_MEDIA_LANGUAGE, TSEL_ATTR_MEDIA_TYPE, TSEL_ATTR_NUMBER_OF_VIEWS,
+    TSEL_ATTR_REGION_OF_INTEREST_SCALABILITY, TSEL_ATTR_SCREEN_SIZE, TSEL_ATTR_SPATIAL_SCALABILITY,
+    TSEL_ATTR_TEMPORAL_SCALABILITY, TSEL_ATTR_VIEW_SCALABILITY,
 };
 pub use user_data::{iso_language_tag, parse_udta, UserDataEntry, UserDataKind};
