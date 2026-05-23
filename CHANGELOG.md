@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 98 — Independent and Disposable Samples Box (`sdtp`) parser,
+  ISO/IEC 14496-12 §8.6.4.
+  - `parse_sdtp(payload, sample_count) -> Result<Vec<SdtpEntry>>` in
+    the `sample_table` module. The box carries no on-disk count field
+    (§8.6.4.1 sizes it from the `stsz`/`stz2` sample count), so the
+    demuxer defers the parse until after the `stbl` walk; a body
+    shorter than the sample count is rejected.
+  - `SdtpEntry` struct with the four 2-bit fields unpacked MSB-first
+    into typed enums: `IsLeading`, `SampleDependsOn`,
+    `SampleIsDependedOn`, `SampleHasRedundancy` (each covering all
+    four §8.6.4.3 code-points, reserved included). Convenience
+    predicates `SdtpEntry::is_independent()` (I-picture) and
+    `SdtpEntry::is_disposable()` (skippable while rolling forward).
+  - `MovDemuxer::sample_dependency(track, sample) -> Option<SdtpEntry>`
+    and `SampleTable::sample_dependency(sample)` accessors; new
+    `sdtp` field on `SampleTable`.
+
 - Round 95 — Track Selection box (`tsel`) parser, ISO/IEC 14496-12
   §8.10.3 (pp. 72–74).
   - New `oxideav_mov::track_selection` module: `parse_tsel(payload)

@@ -88,6 +88,29 @@ boxes with the same `grouping_type` inside a single `stbl` are
 silently de-duped (spec §8.9.2.3 forbids them, but ffmpeg sometimes
 emits two; we keep the first).
 
+Round 98 parses the **Independent and Disposable Samples Box**
+(`sdtp`) — ISO/IEC 14496-12 §8.6.4 — into the per-track sample table.
+The box carries one packed byte per sample (no on-disk count field;
+its row count equals the `stsz`/`stz2` sample count per §8.6.4.1, so
+the parse is deferred until after the `stbl` walk regardless of child
+order). Each byte unpacks MSB-first into four 2-bit fields
+([`SdtpEntry`]): `is_leading`, `sample_depends_on`,
+`sample_is_depended_on`, and `sample_has_redundancy`, each surfaced as
+a typed enum ([`IsLeading`] / [`SampleDependsOn`] /
+[`SampleIsDependedOn`] / [`SampleHasRedundancy`]) covering all four
+§8.6.4.3 code-points including the reserved value. Two convenience
+predicates ride along: `SdtpEntry::is_independent()`
+(`sample_depends_on == 2`, a codec-agnostic I-picture flag that pairs
+with `stss` as a random-access hint) and `SdtpEntry::is_disposable()`
+(`sample_is_depended_on == 2`, samples that trick-mode roll-forward
+may skip because no other sample depends on them). Surfaces on the
+demuxer via `MovDemuxer::sample_dependency(track, sample) ->
+Option<SdtpEntry>` and on the table via
+`SampleTable::sample_dependency(sample)`. An `sdtp` body shorter than
+the sample count is rejected at open time. The box is shared with QTFF
+(it predates the ISO standardisation as the QuickTime sample-table
+extension of the same name).
+
 Round 74 wires the **edit list** (`edts/elst`) into a presentation-time
 mapping API: `MovDemuxer::movie_pts_for(track, media_pts)` translates a
 sample's media-timescale PTS to its movie-timescale PTS by walking the

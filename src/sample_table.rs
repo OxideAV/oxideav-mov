@@ -60,6 +60,131 @@ pub struct CttsEntry {
     pub composition_offset: i32,
 }
 
+/// `is_leading` field of an `sdtp` entry (ISO/IEC 14496-12 §8.6.4.3).
+/// A *leading* sample has a composition time before its reference
+/// I-picture; whether it is decodable when entering at the reference
+/// sample depends on its decode-dependencies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IsLeading {
+    /// `0` — the leading nature of this sample is unknown.
+    Unknown,
+    /// `1` — leading sample with a dependency before the referenced
+    /// I-picture (therefore *not* decodable from the reference).
+    LeadingUndecodable,
+    /// `2` — not a leading sample.
+    NotLeading,
+    /// `3` — leading sample with no dependency before the referenced
+    /// I-picture (therefore decodable from the reference).
+    LeadingDecodable,
+}
+
+/// `sample_depends_on` field of an `sdtp` entry (§8.6.4.3): does this
+/// sample depend on others for its decoding?
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SampleDependsOn {
+    /// `0` — the dependency of this sample is unknown.
+    Unknown,
+    /// `1` — this sample does depend on others (not an I-picture).
+    DependsOnOthers,
+    /// `2` — this sample does not depend on others (an I-picture).
+    Independent,
+    /// `3` — reserved.
+    Reserved,
+}
+
+/// `sample_is_depended_on` field of an `sdtp` entry (§8.6.4.3): do
+/// other samples depend on this one? When `Disposable`, the sample
+/// may be dropped during trick-mode roll-forward.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SampleIsDependedOn {
+    /// `0` — the dependency of other samples on this one is unknown.
+    Unknown,
+    /// `1` — other samples may depend on this one (not disposable).
+    NotDisposable,
+    /// `2` — no other sample depends on this one (disposable).
+    Disposable,
+    /// `3` — reserved.
+    Reserved,
+}
+
+/// `sample_has_redundancy` field of an `sdtp` entry (§8.6.4.3): does
+/// this sample carry redundant (multiple) codings of the data at this
+/// time-instant?
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SampleHasRedundancy {
+    /// `0` — it is unknown whether redundant coding is present.
+    Unknown,
+    /// `1` — there is redundant coding in this sample.
+    Redundant,
+    /// `2` — there is no redundant coding in this sample.
+    NotRedundant,
+    /// `3` — reserved.
+    Reserved,
+}
+
+/// One per-sample row of the `sdtp` (Independent and Disposable
+/// Samples) Box — ISO/IEC 14496-12 §8.6.4. Each on-disk byte packs
+/// the four 2-bit fields, MSB-first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SdtpEntry {
+    pub is_leading: IsLeading,
+    pub sample_depends_on: SampleDependsOn,
+    pub sample_is_depended_on: SampleIsDependedOn,
+    pub sample_has_redundancy: SampleHasRedundancy,
+}
+
+impl SdtpEntry {
+    /// Decode one packed `sdtp` byte: `is_leading` in bits 7..6,
+    /// `sample_depends_on` in bits 5..4, `sample_is_depended_on` in
+    /// bits 3..2, `sample_has_redundancy` in bits 1..0 (§8.6.4.2).
+    pub fn from_byte(b: u8) -> Self {
+        let il = match (b >> 6) & 0x3 {
+            0 => IsLeading::Unknown,
+            1 => IsLeading::LeadingUndecodable,
+            2 => IsLeading::NotLeading,
+            _ => IsLeading::LeadingDecodable,
+        };
+        let sdo = match (b >> 4) & 0x3 {
+            0 => SampleDependsOn::Unknown,
+            1 => SampleDependsOn::DependsOnOthers,
+            2 => SampleDependsOn::Independent,
+            _ => SampleDependsOn::Reserved,
+        };
+        let sido = match (b >> 2) & 0x3 {
+            0 => SampleIsDependedOn::Unknown,
+            1 => SampleIsDependedOn::NotDisposable,
+            2 => SampleIsDependedOn::Disposable,
+            _ => SampleIsDependedOn::Reserved,
+        };
+        let shr = match b & 0x3 {
+            0 => SampleHasRedundancy::Unknown,
+            1 => SampleHasRedundancy::Redundant,
+            2 => SampleHasRedundancy::NotRedundant,
+            _ => SampleHasRedundancy::Reserved,
+        };
+        Self {
+            is_leading: il,
+            sample_depends_on: sdo,
+            sample_is_depended_on: sido,
+            sample_has_redundancy: shr,
+        }
+    }
+
+    /// True when this sample is independently decodable (an I-picture):
+    /// `sample_depends_on == 2` (§8.6.4.3). Pairs with `stss` as a
+    /// codec-agnostic random-access hint.
+    pub fn is_independent(&self) -> bool {
+        self.sample_depends_on == SampleDependsOn::Independent
+    }
+
+    /// True when no other sample depends on this one
+    /// (`sample_is_depended_on == 2`); such samples may be skipped
+    /// while rolling forward during trick-mode (§8.6.4.1, §8.6.4.3).
+    pub fn is_disposable(&self) -> bool {
+        self.sample_is_depended_on == SampleIsDependedOn::Disposable
+    }
+}
+
 /// Parsed sample table for a single track.
 #[derive(Clone, Debug, Default)]
 pub struct SampleTable {
@@ -89,6 +214,12 @@ pub struct SampleTable {
     /// §8.9.3). Keyed by the same `grouping_type` as the matching
     /// [`SampleToGroup`].
     pub sgpd: Vec<SampleGroupDescription>,
+    /// `sdtp` Independent and Disposable Samples Box rows (ISO/IEC
+    /// 14496-12 §8.6.4). One [`SdtpEntry`] per sample, in decode
+    /// order. Empty when the track carries no `sdtp` box. The on-disk
+    /// table has no count field — its length equals the `stsz`/`stz2`
+    /// sample count (§8.6.4.1).
+    pub sdtp: Vec<SdtpEntry>,
 }
 
 /// One entry in the iterator output: enough to read the sample bytes
@@ -132,6 +263,13 @@ impl SampleTable {
     /// Iterate samples in decode order.
     pub fn iter_samples(&self) -> SampleIter<'_> {
         SampleIter::new(self)
+    }
+
+    /// `sdtp` row for a 0-based decode-order sample index, or `None`
+    /// when the track carries no `sdtp` box (or the index is past the
+    /// table). ISO/IEC 14496-12 §8.6.4.
+    pub fn sample_dependency(&self, sample_idx: u32) -> Option<SdtpEntry> {
+        self.sdtp.get(sample_idx as usize).copied()
     }
 
     /// Look up the [`SampleToGroup`] / [`SampleGroupDescription`] pair
@@ -322,6 +460,24 @@ pub fn parse_ctts(payload: &[u8]) -> Result<Vec<CttsEntry>> {
         });
     }
     Ok(out)
+}
+
+/// Parse `sdtp` (Independent and Disposable Samples Box) payload.
+///
+/// Layout per ISO/IEC 14496-12 §8.6.4.2: `[version:1][flags:3]` then
+/// one packed byte per sample (no on-disk count field — the row count
+/// equals the `stsz`/`stz2` `sample_count`, §8.6.4.1). `sample_count`
+/// is passed in by the caller from the already-parsed sample-size
+/// table. The body must hold at least `sample_count` bytes; trailing
+/// padding (some muxers round up) is ignored.
+pub fn parse_sdtp(payload: &[u8], sample_count: u32) -> Result<Vec<SdtpEntry>> {
+    need(payload, 0, 4, "sdtp header")?;
+    let body = &payload[4..];
+    let n = sample_count as usize;
+    if body.len() < n {
+        return Err(Error::invalid("MOV: sdtp truncated table"));
+    }
+    Ok(body[..n].iter().map(|&b| SdtpEntry::from_byte(b)).collect())
 }
 
 /// Parse `stss` sync-sample table (1-based sample numbers).
@@ -659,6 +815,7 @@ mod tests {
             ctts: vec![],
             sbgp: vec![],
             sgpd: vec![],
+            sdtp: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 1);
@@ -730,6 +887,7 @@ mod tests {
             ],
             sbgp: vec![],
             sgpd: vec![],
+            sdtp: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 4);
@@ -761,6 +919,7 @@ mod tests {
             ctts: vec![],
             sbgp: vec![],
             sgpd: vec![],
+            sdtp: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 4);
@@ -776,5 +935,87 @@ mod tests {
         assert!(!v[1].keyframe);
         assert!(v[2].keyframe);
         assert!(!v[3].keyframe);
+    }
+
+    #[test]
+    fn sdtp_entry_field_packing_msb_first() {
+        // is_leading=2, depends_on=1, is_depended_on=2, redundancy=2
+        //   → 0b10_01_10_10 = 0x9A (§8.6.4.2 — fields MSB-first).
+        let e = SdtpEntry::from_byte(0b10_01_10_10);
+        assert_eq!(e.is_leading, IsLeading::NotLeading);
+        assert_eq!(e.sample_depends_on, SampleDependsOn::DependsOnOthers);
+        assert_eq!(e.sample_is_depended_on, SampleIsDependedOn::Disposable);
+        assert_eq!(e.sample_has_redundancy, SampleHasRedundancy::NotRedundant);
+        assert!(!e.is_independent());
+        assert!(e.is_disposable());
+    }
+
+    #[test]
+    fn sdtp_entry_all_zero_is_all_unknown() {
+        let e = SdtpEntry::from_byte(0);
+        assert_eq!(e.is_leading, IsLeading::Unknown);
+        assert_eq!(e.sample_depends_on, SampleDependsOn::Unknown);
+        assert_eq!(e.sample_is_depended_on, SampleIsDependedOn::Unknown);
+        assert_eq!(e.sample_has_redundancy, SampleHasRedundancy::Unknown);
+        assert!(!e.is_independent());
+        assert!(!e.is_disposable());
+    }
+
+    #[test]
+    fn sdtp_entry_i_picture_independent() {
+        // depends_on=2 (I-picture), is_depended_on=1 (not disposable):
+        //   0b00_10_01_00 = 0x24.
+        let e = SdtpEntry::from_byte(0b00_10_01_00);
+        assert!(e.is_independent());
+        assert!(!e.is_disposable());
+    }
+
+    #[test]
+    fn parse_sdtp_sized_from_stsz_count() {
+        // FullBox header + 3 packed bytes, sized by the caller's count.
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes()); // ver=0 + flags
+        p.push(0b00_10_01_00); // I-frame, not disposable
+        p.push(0b00_01_10_00); // P-frame, disposable
+        p.push(0b00_01_01_00); // P-frame, not disposable
+        let v = parse_sdtp(&p, 3).unwrap();
+        assert_eq!(v.len(), 3);
+        assert!(v[0].is_independent());
+        assert!(!v[0].is_disposable());
+        assert!(!v[1].is_independent());
+        assert!(v[1].is_disposable());
+        assert!(!v[2].is_independent());
+        assert!(!v[2].is_disposable());
+    }
+
+    #[test]
+    fn parse_sdtp_ignores_trailing_padding() {
+        // 2 samples but 4 padded bytes present — only the first 2 count.
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.push(0b00_10_01_00);
+        p.push(0b00_01_10_00);
+        p.push(0); // padding
+        p.push(0); // padding
+        let v = parse_sdtp(&p, 2).unwrap();
+        assert_eq!(v.len(), 2);
+        assert!(v[0].is_independent());
+        assert!(v[1].is_disposable());
+    }
+
+    #[test]
+    fn parse_sdtp_truncated_table_errors() {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.push(0b00_10_01_00); // only 1 byte, claim 3 samples
+        assert!(parse_sdtp(&p, 3).is_err());
+    }
+
+    #[test]
+    fn parse_sdtp_zero_samples_is_empty() {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        let v = parse_sdtp(&p, 0).unwrap();
+        assert!(v.is_empty());
     }
 }

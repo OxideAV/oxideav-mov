@@ -14,9 +14,9 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DINF, DREF,
     EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MDAT, MDHD, MDIA, META, MFRA,
-    MINF, MOOF, MOOV, MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SBGP, SGPD,
-    SKIP, SMHD, STBL, STCO, STSC, STSD, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA,
-    VMHD, WIDE,
+    MINF, MOOF, MOOV, MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SBGP, SDTP,
+    SGPD, SKIP, SMHD, STBL, STCO, STSC, STSD, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF,
+    UDTA, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -28,7 +28,7 @@ use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, Met
 use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
 use crate::sample_groups::{parse_sbgp, parse_sgpd};
 use crate::sample_table::{
-    parse_co64, parse_ctts, parse_stco, parse_stsc, parse_stss, parse_stsz, parse_stts,
+    parse_co64, parse_ctts, parse_sdtp, parse_stco, parse_stsc, parse_stss, parse_stsz, parse_stts,
     SampleEntry, SampleTable,
 };
 use crate::track::{parse_stsd, Track, TrackRef, TrackRefKind};
@@ -1281,6 +1281,28 @@ impl MovDemuxer {
         points.into_iter().collect()
     }
 
+    /// Look up the `sdtp` (Independent and Disposable Samples Box,
+    /// ISO/IEC 14496-12 §8.6.4) row for a 0-based decode-order sample
+    /// on a track.
+    ///
+    /// Returns `None` when the track carries no `sdtp` box or the
+    /// sample index is past the table. The returned [`SdtpEntry`]
+    /// exposes the four 2-bit fields plus the convenience predicates
+    /// [`SdtpEntry::is_independent`] (I-picture, codec-agnostically)
+    /// and [`SdtpEntry::is_disposable`] (no other sample depends on
+    /// this one, so it may be skipped while rolling forward in
+    /// trick-mode — §8.6.4.1).
+    pub fn sample_dependency(
+        &self,
+        track_index: usize,
+        sample_zero_based: u32,
+    ) -> Option<crate::sample_table::SdtpEntry> {
+        self.tracks
+            .get(track_index)?
+            .sample_table
+            .sample_dependency(sample_zero_based)
+    }
+
     /// Inner implementation of [`Demuxer::seek_to`]. Lives on the
     /// struct (not the trait impl) so it's reachable from the
     /// standalone (no-`registry`) build's tests too without needing
@@ -2230,6 +2252,10 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
 
     let mut stsd_payload: Option<Vec<u8>> = None;
+    // `sdtp` carries no on-disk count — it is sized from `stsz`/`stz2`
+    // (ISO/IEC 14496-12 §8.6.4.1). Defer its parse until after the walk
+    // so the sample count is known regardless of child order.
+    let mut sdtp_payload: Option<Vec<u8>> = None;
     let mut table = SampleTable::default();
     walk_children(r, Some(body_end), |r, child| {
         match &child.fourcc {
@@ -2267,6 +2293,9 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
                 let body = read_payload(r, child)?;
                 table.ctts = parse_ctts(&body)?;
             }
+            t if t == &SDTP => {
+                sdtp_payload = Some(read_payload(r, child)?);
+            }
             t if t == &CSLG => {
                 let body = read_payload(r, child)?;
                 track.cslg = Some(parse_cslg(&body)?);
@@ -2302,6 +2331,12 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
         }
         Ok(())
     })?;
+
+    // `sdtp` is sized from the sample-size table (§8.6.4.1), which is
+    // now fully parsed regardless of stbl child order.
+    if let Some(payload) = sdtp_payload {
+        table.sdtp = parse_sdtp(&payload, table.stsz_count)?;
+    }
 
     // stsd parses last because it needs `track.hdlr` to discriminate
     // video vs audio — `hdlr` has already been populated by

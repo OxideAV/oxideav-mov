@@ -91,7 +91,10 @@ pub use sample_groups::{
     SampleGroupDescription, SampleGroupDescriptionEntry, SampleToGroup, SampleToGroupEntry,
     VisualRandomAccess,
 };
-pub use sample_table::{SampleEntry, SampleTable};
+pub use sample_table::{
+    parse_sdtp, IsLeading, SampleDependsOn, SampleEntry, SampleHasRedundancy, SampleIsDependedOn,
+    SampleTable, SdtpEntry,
+};
 pub use timecode::{
     parse_tmcd_sample_description, Tmcd, TMCD_FLAG_24_HOUR, TMCD_FLAG_COUNTER,
     TMCD_FLAG_DROP_FRAME, TMCD_FLAG_NEGATIVES_OK,
