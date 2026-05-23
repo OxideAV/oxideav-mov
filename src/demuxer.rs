@@ -15,8 +15,8 @@ use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DINF, DREF,
     EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MDAT, MDHD, MDIA, META, MFRA,
     MINF, MOOF, MOOV, MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SBGP, SDTP,
-    SGPD, SKIP, SMHD, STBL, STCO, STSC, STSD, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF,
-    UDTA, VMHD, WIDE,
+    SGPD, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD, TRAK,
+    TREF, UDTA, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -28,8 +28,8 @@ use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, Met
 use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
 use crate::sample_groups::{parse_sbgp, parse_sgpd};
 use crate::sample_table::{
-    parse_co64, parse_ctts, parse_sdtp, parse_stco, parse_stsc, parse_stss, parse_stsz, parse_stts,
-    SampleEntry, SampleTable,
+    parse_co64, parse_ctts, parse_sdtp, parse_stco, parse_stsc, parse_stsh, parse_stss, parse_stsz,
+    parse_stts, SampleEntry, SampleTable,
 };
 use crate::track::{parse_stsd, Track, TrackRef, TrackRefKind};
 use crate::track_load::parse_load;
@@ -1303,6 +1303,29 @@ impl MovDemuxer {
             .sample_dependency(sample_zero_based)
     }
 
+    /// Look up the alternative sync sample for a shadowed sample via the
+    /// `stsh` (Shadow Sync Sample Box, ISO/IEC 14496-12 §8.6.3).
+    ///
+    /// `shadowed_sample_number` is **1-based** (matching the `stss`
+    /// numbering convention this box shares). Returns the 1-based
+    /// `sync_sample_number` whose media data substitutes for the
+    /// shadowed sample when a sync sample is needed at, or before, it —
+    /// or `None` when the track carries no `stsh` box, or no entry
+    /// shadows exactly that sample. The shadow sync sample *replaces*
+    /// the shadowed one: after substitution the next sample sent is
+    /// `shadowed_sample_number + 1` (§8.6.3.1). This is optional
+    /// seeking metadata; a track plays and seeks correctly without it.
+    pub fn shadow_sync_sample(
+        &self,
+        track_index: usize,
+        shadowed_sample_number: u32,
+    ) -> Option<u32> {
+        self.tracks
+            .get(track_index)?
+            .sample_table
+            .shadow_sync_for(shadowed_sample_number)
+    }
+
     /// Inner implementation of [`Demuxer::seek_to`]. Lives on the
     /// struct (not the trait impl) so it's reachable from the
     /// standalone (no-`registry`) build's tests too without needing
@@ -2288,6 +2311,10 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
             t if t == &STSS => {
                 let body = read_payload(r, child)?;
                 table.stss = parse_stss(&body)?;
+            }
+            t if t == &STSH => {
+                let body = read_payload(r, child)?;
+                table.stsh = parse_stsh(&body)?;
             }
             t if t == &CTTS => {
                 let body = read_payload(r, child)?;

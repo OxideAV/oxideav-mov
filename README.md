@@ -111,6 +111,22 @@ the sample count is rejected at open time. The box is shared with QTFF
 (it predates the ISO standardisation as the QuickTime sample-table
 extension of the same name).
 
+Round 102 parses the **Shadow Sync Sample Box** (`stsh`) — ISO/IEC
+14496-12 §8.6.3 — into the per-track sample table. The box is an
+optional seeking aid: each [`StshEntry`] pairs a *shadowed*
+(normally non-sync) sample with the alternative *sync* sample whose
+media data substitutes for it when a sync sample is needed at, or
+before, the shadowed one. Both numbers are 1-based, sharing `stss`'s
+sample-numbering convention. The shadow sync sample *replaces*, not
+augments, the sample it shadows (§8.6.3.1): after substitution the next
+sample sent is `shadowed_sample_number + 1`. Surfaces on the demuxer
+via `MovDemuxer::shadow_sync_sample(track, shadowed_sample_number) ->
+Option<u32>` and on the table via `SampleTable::shadow_sync_for(...)`,
+which binary-searches the (spec-required) ascending table for an exact
+shadowed-sample match. A non-strictly-increasing or duplicate-keyed
+table is rejected at open time. The box is purely a seek optimisation —
+a track plays and seeks correctly when it is ignored.
+
 Round 74 wires the **edit list** (`edts/elst`) into a presentation-time
 mapping API: `MovDemuxer::movie_pts_for(track, media_pts)` translates a
 sample's media-timescale PTS to its movie-timescale PTS by walking the

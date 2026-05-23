@@ -185,6 +185,28 @@ impl SdtpEntry {
     }
 }
 
+/// One entry of the `stsh` (Shadow Sync Sample Box) — ISO/IEC
+/// 14496-12 §8.6.3. Each entry pairs a *shadowed* (non-sync) sample
+/// with the *sync* sample whose media data can be substituted when a
+/// sync sample is needed at, or before, the shadowed one.
+///
+/// Both numbers are 1-based, matching `stss`'s sample-numbering
+/// convention. Per §8.6.3.1 the shadow sync sample *replaces*, not
+/// augments, the sample it shadows: after substitution the next
+/// sample sent is `shadowed_sample_number + 1`, and the shadow sample
+/// is treated as if it occurred at the shadowed sample's time with the
+/// shadowed sample's duration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StshEntry {
+    /// 1-based number of the (normally non-sync) sample that this
+    /// shadow sync is defined for.
+    pub shadowed_sample_number: u32,
+    /// 1-based number of the alternative sync sample whose media data
+    /// is used when a sync sample is needed at or before the shadowed
+    /// sample.
+    pub sync_sample_number: u32,
+}
+
 /// Parsed sample table for a single track.
 #[derive(Clone, Debug, Default)]
 pub struct SampleTable {
@@ -220,6 +242,11 @@ pub struct SampleTable {
     /// table has no count field — its length equals the `stsz`/`stz2`
     /// sample count (§8.6.4.1).
     pub sdtp: Vec<SdtpEntry>,
+    /// `stsh` Shadow Sync Sample Box entries (ISO/IEC 14496-12
+    /// §8.6.3), sorted ascending by `shadowed_sample_number`. Empty
+    /// when the track carries no `stsh` box. Optional metadata: a
+    /// track plays and seeks correctly when it is ignored (§8.6.3.1).
+    pub stsh: Vec<StshEntry>,
 }
 
 /// One entry in the iterator output: enough to read the sample bytes
@@ -270,6 +297,21 @@ impl SampleTable {
     /// table). ISO/IEC 14496-12 §8.6.4.
     pub fn sample_dependency(&self, sample_idx: u32) -> Option<SdtpEntry> {
         self.sdtp.get(sample_idx as usize).copied()
+    }
+
+    /// Look up the alternative *sync* sample (1-based) that shadows the
+    /// 1-based `shadowed_sample_number`, per the `stsh` Shadow Sync
+    /// Sample Box (ISO/IEC 14496-12 §8.6.3). Returns `None` when the
+    /// track carries no `stsh` box, or when no entry shadows exactly
+    /// that sample number.
+    ///
+    /// The table is sorted ascending by `shadowed_sample_number`
+    /// (§8.6.3.1), so this binary-searches for an exact match.
+    pub fn shadow_sync_for(&self, shadowed_sample_number: u32) -> Option<u32> {
+        self.stsh
+            .binary_search_by(|e| e.shadowed_sample_number.cmp(&shadowed_sample_number))
+            .ok()
+            .map(|i| self.stsh[i].sync_sample_number)
     }
 
     /// Look up the [`SampleToGroup`] / [`SampleGroupDescription`] pair
@@ -491,6 +533,43 @@ pub fn parse_stss(payload: &[u8]) -> Result<Vec<u32>> {
     let mut out = Vec::with_capacity(n as usize);
     for i in 0..(n as usize) {
         out.push(read_u32(&body[i * 4..]));
+    }
+    Ok(out)
+}
+
+/// Parse `stsh` (Shadow Sync Sample Box) payload.
+///
+/// Layout per ISO/IEC 14496-12 §8.6.3.2: `[version:1][flags:3]
+/// [entry_count:4]` then `entry_count × {shadowed_sample_number:4,
+/// sync_sample_number:4}` (both 1-based, like `stss`). The spec
+/// requires entries sorted ascending by `shadowed_sample_number`
+/// (§8.6.3.1); a non-monotonic table is rejected so the
+/// binary-search accessor stays correct.
+pub fn parse_stsh(payload: &[u8]) -> Result<Vec<StshEntry>> {
+    need(payload, 0, 8, "stsh header")?;
+    let n = read_u32(&payload[4..]);
+    let body = &payload[8..];
+    if body.len() < (n as usize) * 8 {
+        return Err(Error::invalid("MOV: stsh truncated table"));
+    }
+    let mut out = Vec::with_capacity(n as usize);
+    for i in 0..(n as usize) {
+        let off = i * 8;
+        out.push(StshEntry {
+            shadowed_sample_number: read_u32(&body[off..]),
+            sync_sample_number: read_u32(&body[off + 4..]),
+        });
+    }
+    // §8.6.3.1 — "The entries in the ShadowSyncBox shall be sorted
+    // based on the shadowed-sample-number field." Reject a
+    // non-strictly-increasing table; duplicate shadowed numbers would
+    // make the lookup ambiguous.
+    for w in out.windows(2) {
+        if w[1].shadowed_sample_number <= w[0].shadowed_sample_number {
+            return Err(Error::invalid(
+                "MOV: stsh shadowed_sample_number not strictly increasing",
+            ));
+        }
     }
     Ok(out)
 }
@@ -816,6 +895,7 @@ mod tests {
             sbgp: vec![],
             sgpd: vec![],
             sdtp: vec![],
+            stsh: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 1);
@@ -888,6 +968,7 @@ mod tests {
             sbgp: vec![],
             sgpd: vec![],
             sdtp: vec![],
+            stsh: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 4);
@@ -920,6 +1001,7 @@ mod tests {
             sbgp: vec![],
             sgpd: vec![],
             sdtp: vec![],
+            stsh: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 4);
@@ -1017,5 +1099,98 @@ mod tests {
         p.extend_from_slice(&0u32.to_be_bytes());
         let v = parse_sdtp(&p, 0).unwrap();
         assert!(v.is_empty());
+    }
+
+    fn build_stsh_payload(pairs: &[(u32, u32)]) -> Vec<u8> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+        p.extend_from_slice(&(pairs.len() as u32).to_be_bytes());
+        for (shadowed, sync) in pairs {
+            p.extend_from_slice(&shadowed.to_be_bytes());
+            p.extend_from_slice(&sync.to_be_bytes());
+        }
+        p
+    }
+
+    #[test]
+    fn parse_stsh_round_trip() {
+        // Two shadows: sample 4 → sync 1, sample 8 → sync 5.
+        let p = build_stsh_payload(&[(4, 1), (8, 5)]);
+        let v = parse_stsh(&p).unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].shadowed_sample_number, 4);
+        assert_eq!(v[0].sync_sample_number, 1);
+        assert_eq!(v[1].shadowed_sample_number, 8);
+        assert_eq!(v[1].sync_sample_number, 5);
+    }
+
+    #[test]
+    fn parse_stsh_empty_table() {
+        let p = build_stsh_payload(&[]);
+        let v = parse_stsh(&p).unwrap();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn parse_stsh_truncated_table_errors() {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&2u32.to_be_bytes()); // claim 2 entries
+        p.extend_from_slice(&4u32.to_be_bytes()); // only 1 partial entry
+        assert!(parse_stsh(&p).is_err());
+    }
+
+    #[test]
+    fn parse_stsh_rejects_non_increasing_shadowed_number() {
+        // §8.6.3.1 — entries must be sorted by shadowed_sample_number.
+        let p = build_stsh_payload(&[(8, 5), (4, 1)]);
+        assert!(parse_stsh(&p).is_err());
+    }
+
+    #[test]
+    fn parse_stsh_rejects_duplicate_shadowed_number() {
+        let p = build_stsh_payload(&[(4, 1), (4, 2)]);
+        assert!(parse_stsh(&p).is_err());
+    }
+
+    #[test]
+    fn parse_stsh_short_header_errors() {
+        // Header alone (ver+flags) without an entry_count is too short.
+        let p = vec![0u8; 4];
+        assert!(parse_stsh(&p).is_err());
+    }
+
+    #[test]
+    fn shadow_sync_for_binary_search() {
+        let table = SampleTable {
+            stsh: vec![
+                StshEntry {
+                    shadowed_sample_number: 4,
+                    sync_sample_number: 1,
+                },
+                StshEntry {
+                    shadowed_sample_number: 8,
+                    sync_sample_number: 5,
+                },
+                StshEntry {
+                    shadowed_sample_number: 12,
+                    sync_sample_number: 9,
+                },
+            ],
+            ..SampleTable::default()
+        };
+        assert_eq!(table.shadow_sync_for(4), Some(1));
+        assert_eq!(table.shadow_sync_for(8), Some(5));
+        assert_eq!(table.shadow_sync_for(12), Some(9));
+        // Not a shadowed sample number.
+        assert_eq!(table.shadow_sync_for(5), None);
+        assert_eq!(table.shadow_sync_for(0), None);
+        assert_eq!(table.shadow_sync_for(100), None);
+    }
+
+    #[test]
+    fn shadow_sync_for_empty_table_is_none() {
+        let table = SampleTable::default();
+        assert_eq!(table.shadow_sync_for(1), None);
     }
 }

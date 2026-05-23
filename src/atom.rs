@@ -247,6 +247,7 @@ pub const STBL: [u8; 4] = fourcc("stbl");
 pub const STSD: [u8; 4] = fourcc("stsd");
 pub const STTS: [u8; 4] = fourcc("stts");
 pub const STSS: [u8; 4] = fourcc("stss");
+pub const STSH: [u8; 4] = fourcc("stsh"); // Shadow Sync Sample Box
 pub const STSC: [u8; 4] = fourcc("stsc");
 pub const STSZ: [u8; 4] = fourcc("stsz");
 pub const STCO: [u8; 4] = fourcc("stco");

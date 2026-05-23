@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 102 — Shadow Sync Sample Box (`stsh`) parser, ISO/IEC
+  14496-12 §8.6.3.
+  - `parse_stsh(payload) -> Result<Vec<StshEntry>>` in the
+    `sample_table` module. Layout per §8.6.3.2: FullBox header +
+    `entry_count` + `entry_count × {shadowed_sample_number:4,
+    sync_sample_number:4}`, both 1-based (the box shares `stss`'s
+    sample-numbering convention). Entries that are not strictly
+    increasing by `shadowed_sample_number` are rejected — §8.6.3.1
+    requires the table sorted ascending, and duplicate shadowed
+    numbers would make the lookup ambiguous.
+  - `StshEntry` struct (`shadowed_sample_number`,
+    `sync_sample_number`); new `stsh: Vec<StshEntry>` field on
+    `SampleTable`.
+  - `SampleTable::shadow_sync_for(shadowed_sample_number) ->
+    Option<u32>` binary-searches the sorted table for an exact
+    shadowed-sample match and returns the alternative sync sample's
+    1-based number; `MovDemuxer::shadow_sync_sample(track,
+    shadowed_sample_number) -> Option<u32>` mirrors it. The shadow
+    sync sample *replaces* the shadowed one per §8.6.3.1 — after
+    substitution the next sample sent is `shadowed_sample_number + 1`.
+    This is optional seeking metadata; a track plays and seeks
+    correctly when it is ignored.
+  - 8 unit tests in `sample_table::tests` (round-trip, empty table,
+    truncated table, short header, non-increasing / duplicate
+    rejection, binary-search lookup, empty-table lookup) + 3
+    integration tests in `tests/synth_round102_stsh.rs` (demuxer
+    `shadow_sync_sample` lookup, empty-`stsh` no-op, non-monotonic
+    rejection at open time).
+
 - Round 98 — Independent and Disposable Samples Box (`sdtp`) parser,
   ISO/IEC 14496-12 §8.6.4.
   - `parse_sdtp(payload, sample_count) -> Result<Vec<SdtpEntry>>` in
