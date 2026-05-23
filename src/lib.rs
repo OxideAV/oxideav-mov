@@ -23,6 +23,7 @@ pub mod heif_write;
 pub mod iprp;
 pub mod media_meta;
 pub mod muxer;
+pub mod pdin;
 pub mod reference;
 pub mod render;
 pub mod sample_groups;
@@ -84,6 +85,7 @@ pub use media_meta::{
     Cslg, MetaKeyValue, Pasp, Tapt,
 };
 pub use muxer::{FragmentationMode, MovMuxer, MuxSample, MuxTrackKind};
+pub use pdin::{parse_pdin, Pdin, PdinEntry};
 pub use reference::{parse_dref, DataReference, ReferenceMovie};
 pub use render::{ispe_dimensions, render_grid, render_iden, render_iovl, Rgba8Canvas};
 pub use sample_groups::{

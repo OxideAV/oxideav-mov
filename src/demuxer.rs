@@ -14,9 +14,9 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DINF, DREF,
     EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MDAT, MDHD, MDIA, META, MFRA,
-    MINF, MOOF, MOOV, MVEX, MVHD, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SBGP, SDTP,
-    SGPD, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD, TRAK,
-    TREF, UDTA, VMHD, WIDE,
+    MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SBGP,
+    SDTP, SGPD, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD,
+    TRAK, TREF, UDTA, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -25,6 +25,7 @@ use crate::fragment::{parse_mfra, parse_mvex, resolve_traf_samples, Mehd, Tfra, 
 use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
 use crate::header::{parse_ftyp, parse_hdlr, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd};
 use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
+use crate::pdin::{parse_pdin, Pdin};
 use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
 use crate::sample_groups::{parse_sbgp, parse_sgpd};
 use crate::sample_table::{
@@ -87,6 +88,12 @@ pub struct MovDemuxer {
     /// `moov`, indicating the file is laid out for streaming
     /// ("faststart").
     faststart: bool,
+    /// Progressive Download Information Box (ISO/IEC 14496-12 §8.1.3)
+    /// when the file's top-level carries a `pdin`. `None` for QTFF and
+    /// for any ISO BMFF file that omits this optional box. Spec
+    /// recommends `pdin` appear as early as possible in the file for
+    /// maximum utility (§8.1.3.1).
+    pub pdin: Option<Pdin>,
     /// Pre-flattened sample queue, sorted by file offset for friendly
     /// I/O patterns. Each entry is `(stream_index, sample)`.
     samples: Vec<(u32, SampleEntry)>,
@@ -313,6 +320,11 @@ impl MovDemuxer {
         let mut trex_defaults: Vec<TrexDefaults> = Vec::new();
         let mut fragment_sequence_numbers: Vec<u32> = Vec::new();
         let mut tfra_indexes: Vec<Tfra> = Vec::new();
+        // ISO/IEC 14496-12 §8.1.3 Progressive Download Information
+        // Box (`pdin`). File-level, optional, at most one per file.
+        // QTFF doesn't define this box; it stays `None` for `.mov`
+        // inputs and most legacy MP4s.
+        let mut file_pdin: Option<Pdin> = None;
         // Per-track running media-time cursor (DTS) for fragmented
         // playback. Indexed by track-id (not by track index); only
         // populated for tracks that actually receive `traf` runs.
@@ -348,6 +360,18 @@ impl MovDemuxer {
                 t if t == &FTYP => {
                     let payload = read_payload(input.as_mut(), &hdr)?;
                     ftyp = Some(parse_ftyp(&payload)?);
+                }
+                t if t == &PDIN => {
+                    // ISO/IEC 14496-12 §8.1.3 — at most one `pdin`
+                    // per file. Silently keep the first when a writer
+                    // emits duplicates (spec doesn't define
+                    // override semantics, and dropping would lose
+                    // earlier-is-better information per §8.1.3.1).
+                    let payload = read_payload(input.as_mut(), &hdr)?;
+                    let parsed = parse_pdin(&payload)?;
+                    if file_pdin.is_none() {
+                        file_pdin = Some(parsed);
+                    }
                 }
                 t if t == &MOOV => {
                     if !seen_mdat {
@@ -553,6 +577,7 @@ impl MovDemuxer {
             bmff_meta: movie_bmff_meta,
             file_bmff_meta,
             faststart: seen_moov_before_mdat,
+            pdin: file_pdin,
             samples,
             next: 0,
             trex_defaults,

@@ -111,6 +111,31 @@ the sample count is rejected at open time. The box is shared with QTFF
 (it predates the ISO standardisation as the QuickTime sample-table
 extension of the same name).
 
+Round 105 parses the **Progressive Download Information Box** (`pdin`)
+— ISO/IEC 14496-12 §8.1.3 — at file scope. The FullBox (`version = 0`,
+`flags = 0`) carries `(rate, initial_delay)` pairs to end-of-box,
+where `rate` is a download throughput estimate in bytes/sec and
+`initial_delay` is the suggested initial playback delay in
+milliseconds such that, if the download continues at `rate`, playback
+will not stall (§8.1.3.3). The list has no on-disk count field — it
+runs to end-of-box per the spec's `for (i=0; ; i++)` syntax in
+§8.1.3.2 — so the parse sizes itself from the post-FullBox-header body
+length and rejects a partial trailing entry (body length not a
+multiple of 8). Surfaces on the demuxer via `MovDemuxer::pdin:
+Option<Pdin>`. The `Pdin::initial_delay_for(download_rate)` accessor
+implements §8.1.3.1's "linear interpolation between pairs, or …
+extrapolation from the first or last entry" rule: it brackets on a
+rate-sorted scratch view (§8.1.3.3 doesn't mandate any particular
+ordering, so writer-emitted pairs may be out of order), interpolates
+linearly on the `(rate, delay)` line for an observed rate inside the
+bracket, and clamps to the first / last entry's delay when the
+observed rate falls outside the table — keeping the spec's
+"*upper* estimate" promise (lowest rate ↔ longest delay). The first
+`pdin` box wins when a malformed writer emits duplicates (spec
+§8.1.3.1 recommends `pdin` appear as early as possible, so the first
+one is the more informative). Unknown version is rejected at open
+time. QTFF doesn't define this box; it is ISO BMFF-only.
+
 Round 102 parses the **Shadow Sync Sample Box** (`stsh`) — ISO/IEC
 14496-12 §8.6.3 — into the per-track sample table. The box is an
 optional seeking aid: each [`StshEntry`] pairs a *shadowed*

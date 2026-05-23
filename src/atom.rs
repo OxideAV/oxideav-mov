@@ -229,6 +229,9 @@ pub const fn fourcc(s: &str) -> [u8; 4] {
 // walker but parsed in later rounds.
 pub const FTYP: [u8; 4] = fourcc("ftyp");
 pub const MOOV: [u8; 4] = fourcc("moov");
+/// Round 105 — Progressive Download Information Box (ISO/IEC 14496-12
+/// §8.1.3). File-level FullBox of `(rate, initial_delay)` pairs.
+pub const PDIN: [u8; 4] = fourcc("pdin");
 pub const MVHD: [u8; 4] = fourcc("mvhd");
 pub const TRAK: [u8; 4] = fourcc("trak");
 pub const TKHD: [u8; 4] = fourcc("tkhd");

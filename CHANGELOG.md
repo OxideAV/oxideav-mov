@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 105 — Progressive Download Information Box (`pdin`) parser,
+  ISO/IEC 14496-12 §8.1.3.
+  - `parse_pdin(payload) -> Result<Pdin>` in the new `pdin` module.
+    Layout per §8.1.3.2: FullBox header (`version = 0`, `flags = 0`)
+    + `(rate:4, initial_delay:4) × N` pairs to end-of-box. No on-disk
+    count field — the entry count is `body_len / 8`. Unknown version
+    is rejected; a body length not a multiple of 8 (partial trailing
+    entry) is rejected.
+  - `Pdin` / `PdinEntry` structs surfaced from `lib.rs`. The
+    `entries` list is preserved in writer order; §8.1.3.3 does not
+    require any particular ordering by `rate`.
+  - `MovDemuxer::pdin: Option<Pdin>` field. The file-level walker
+    recognises `pdin` as a top-level box (next to `ftyp` / `moov` /
+    `mdat`) regardless of placement; spec §8.1.3.1 recommends "as
+    early as possible" but does not mandate it. A second `pdin` in
+    the same file is ignored — the first one wins, preserving the
+    spec's "early = more useful" guarantee.
+  - `Pdin::initial_delay_for(download_rate) -> Option<u32>`
+    implements §8.1.3.1's "linear interpolation between pairs, or …
+    extrapolation from the first or last entry" rule. It brackets on
+    a rate-sorted scratch view (so out-of-order writer pairs still
+    interpolate correctly), interpolates linearly on the
+    `(rate, delay)` line for an observed rate inside the bracket,
+    and clamps to the first / last entry's delay when the observed
+    rate falls outside the table — preserving the spec's "*upper*
+    estimate" guarantee (lowest rate ↔ longest delay).
+  - 12 unit tests in `pdin::tests` (round-trip with two entries,
+    empty table, unknown version reject, truncated header reject,
+    partial trailing entry reject, exact-match lookup, inside-bracket
+    interpolation, below- and above-range clamping, lookup against
+    empty table, unordered writer input still brackets correctly,
+    parse→struct round-trip) + 7 integration tests in
+    `tests/synth_round105_pdin.rs` (pre-`moov` placement, post-`moov`
+    placement, no-`pdin` is `None`, file-level interpolation at
+    observed rate, truncated payload rejection at open time, partial
+    trailing entry rejection at open time, duplicate `pdin` keeps
+    first).
+  - `PDIN` FourCC constant added to `atom.rs`. QTFF does not define
+    this box; it is ISO BMFF-only and never appears in `.mov` inputs.
+
 - Round 102 — Shadow Sync Sample Box (`stsh`) parser, ISO/IEC
   14496-12 §8.6.3.
   - `parse_stsh(payload) -> Result<Vec<StshEntry>>` in the
