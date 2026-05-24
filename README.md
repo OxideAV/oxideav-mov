@@ -136,6 +136,35 @@ observed rate falls outside the table — keeping the spec's
 one is the more informative). Unknown version is rejected at open
 time. QTFF doesn't define this box; it is ISO BMFF-only.
 
+Round 114 parses the **Segment Index Box** (`sidx`) — ISO/IEC
+14496-12 §8.16.3 — at file scope. The FullBox (`version` 0 or 1)
+provides a compact index of one media stream's subsegments for
+adaptive-streaming (DASH / CMAF) random access. It carries
+`reference_ID` (the indexed stream / track), `timescale`, an
+`earliest_presentation_time` + `first_offset` pair (32-bit under v0,
+64-bit under v1 — both widened to `u64` in [`Sidx`]), then a
+`reference_count`-long list of 12-byte references. Each
+[`SidxReference`] unpacks the three bit-packed words into a typed
+[`ReferenceType`] (`Media` direct-to-bytes vs `Index` nested-`sidx`),
+a 31-bit `referenced_size`, a 32-bit `subsegment_duration`, and the
+SAP triple `starts_with_sap` / `sap_type` (3 bit) / `sap_delta_time`
+(28 bit) per §8.16.3.3 Table 4. Unknown version (> 1) is rejected at
+open time, as is a body length that does not equal
+`reference_count × 12` (a partial trailing reference or a count
+overrun). Surfaces on the demuxer via `MovDemuxer::sidx: Vec<Sidx>` —
+the file-level walker recognises `sidx` as a top-level box regardless
+of placement and collects every one in file order, because the box is
+`Quantity: Zero or more` (§8.16.3.1) and a segment may carry one per
+indexed stream plus nested `sidx`-of-`sidx` references. Three
+accessors resolve the index against the box's anchor point (the first
+byte after the box, §8.16.3.1): `Sidx::material_start(anchor)` adds
+`first_offset`; `Sidx::subsegment_offset(anchor, index)` accumulates
+`referenced_size` along the file-contiguous reference chain; and
+`Sidx::subsegment_start_time(index)` accumulates
+`subsegment_duration` from `earliest_presentation_time` along the
+presentation-time-contiguous timeline. QTFF doesn't define this box;
+it is ISO BMFF-only and stays absent for plain `.mov` inputs.
+
 Round 102 parses the **Shadow Sync Sample Box** (`stsh`) — ISO/IEC
 14496-12 §8.6.3 — into the per-track sample table. The box is an
 optional seeking aid: each [`StshEntry`] pairs a *shadowed*

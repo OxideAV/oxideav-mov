@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 114 — Segment Index Box (`sidx`) parser, ISO/IEC 14496-12
+  §8.16.3.
+  - `parse_sidx(payload) -> Result<Sidx>` in the new `sidx` module.
+    Layout per §8.16.3.2: FullBox header (`version` 0 or 1) +
+    `reference_ID` + `timescale` + a version-width
+    `(earliest_presentation_time, first_offset)` pair (32-bit for v0,
+    64-bit for v1) + `reserved` + `reference_count`, then a 12-byte
+    reference triple per subsegment packing `reference_type` (1 bit) /
+    `referenced_size` (31 bit), `subsegment_duration` (32 bit), and
+    `starts_with_SAP` (1 bit) / `SAP_type` (3 bit) / `SAP_delta_time`
+    (28 bit). Unknown version (> 1) is rejected; a body whose length
+    does not equal `reference_count × 12` (partial trailing reference
+    or count overrun) is rejected.
+  - `Sidx` / `SidxReference` / `ReferenceType` structs surfaced from
+    `lib.rs`. The `references` list is preserved in file order;
+    `earliest_presentation_time` / `first_offset` are widened to `u64`
+    so the v0 and v1 widths share one type.
+  - `MovDemuxer::sidx: Vec<Sidx>` field. The file-level walker
+    recognises `sidx` as a top-level box (next to `ftyp` / `moov` /
+    `mdat` / `moof` / `mfra`) regardless of placement; the box has
+    `Quantity: Zero or more` (§8.16.3.1) so every one is collected in
+    file order to support per-stream and hierarchical
+    (`sidx`-of-`sidx`) indexes.
+  - `Sidx::material_start(anchor)`, `Sidx::subsegment_offset(anchor,
+    index)`, and `Sidx::subsegment_start_time(index)` accessors. The
+    anchor is the first byte after the box (§8.16.3.1); subsegment
+    byte offsets accumulate `referenced_size` from
+    `material_start` (references are file-contiguous, §8.16.3.1) and
+    subsegment presentation times accumulate `subsegment_duration`
+    from `earliest_presentation_time` (durations are contiguous in
+    presentation time, §8.16.3.1). Each guards against overflow and
+    out-of-range index.
+  - 12 unit tests in `sidx::tests` (v0 two-reference parse, v1 wide
+    fields, `reference_type` index-bit decode, max-width bitfield
+    round-trip, empty reference list, unknown-version reject,
+    truncated-fixed-header reject, count-overrun reject,
+    partial-trailing-reference reject, plus the three accessor
+    walkers) and 2 demuxer-level tests (`top_level_sidx_collected_in_file_order`,
+    `files_without_sidx_have_empty_vec`).
+  - `SIDX` FourCC constant added to `atom`.
+
 - Round 105 — Progressive Download Information Box (`pdin`) parser,
   ISO/IEC 14496-12 §8.1.3.
   - `parse_pdin(payload) -> Result<Pdin>` in the new `pdin` module.

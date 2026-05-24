@@ -28,6 +28,7 @@ pub mod reference;
 pub mod render;
 pub mod sample_groups;
 pub mod sample_table;
+pub mod sidx;
 pub mod timecode;
 pub mod track;
 pub mod track_load;
@@ -97,6 +98,7 @@ pub use sample_table::{
     parse_sdtp, parse_stsh, IsLeading, SampleDependsOn, SampleEntry, SampleHasRedundancy,
     SampleIsDependedOn, SampleTable, SdtpEntry, StshEntry,
 };
+pub use sidx::{parse_sidx, ReferenceType, Sidx, SidxReference};
 pub use timecode::{
     parse_tmcd_sample_description, Tmcd, TMCD_FLAG_24_HOUR, TMCD_FLAG_COUNTER,
     TMCD_FLAG_DROP_FRAME, TMCD_FLAG_NEGATIVES_OK,

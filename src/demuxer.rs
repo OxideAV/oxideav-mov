@@ -15,8 +15,8 @@ use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DINF, DREF,
     EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MDAT, MDHD, MDIA, META, MFRA,
     MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SBGP,
-    SDTP, SGPD, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS, TAPT, TEXT, TKHD, TMCD,
-    TRAK, TREF, UDTA, VMHD, WIDE,
+    SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS, TAPT, TEXT, TKHD,
+    TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -32,6 +32,7 @@ use crate::sample_table::{
     parse_co64, parse_ctts, parse_sdtp, parse_stco, parse_stsc, parse_stsh, parse_stss, parse_stsz,
     parse_stts, SampleEntry, SampleTable,
 };
+use crate::sidx::{parse_sidx, Sidx};
 use crate::track::{parse_stsd, Track, TrackRef, TrackRefKind};
 use crate::track_load::parse_load;
 use crate::user_data::{parse_udta, UserDataEntry};
@@ -94,6 +95,13 @@ pub struct MovDemuxer {
     /// recommends `pdin` appear as early as possible in the file for
     /// maximum utility (§8.1.3.1).
     pub pdin: Option<Pdin>,
+    /// Top-level Segment Index Boxes (ISO/IEC 14496-12 §8.16.3), in
+    /// file order. Each `sidx` indexes one media stream's subsegments
+    /// for adaptive-streaming (DASH / CMAF) random access. A media
+    /// segment may carry several (one per indexed stream, plus nested
+    /// `sidx`-of-`sidx` references); the box has `Quantity: Zero or
+    /// more`. Empty for QTFF and for non-segmented MP4s.
+    pub sidx: Vec<Sidx>,
     /// Pre-flattened sample queue, sorted by file offset for friendly
     /// I/O patterns. Each entry is `(stream_index, sample)`.
     samples: Vec<(u32, SampleEntry)>,
@@ -325,6 +333,10 @@ impl MovDemuxer {
         // QTFF doesn't define this box; it stays `None` for `.mov`
         // inputs and most legacy MP4s.
         let mut file_pdin: Option<Pdin> = None;
+        // ISO/IEC 14496-12 §8.16.3 Segment Index Boxes (`sidx`).
+        // File-level, "Zero or more" — collected in file order. QTFF
+        // doesn't define this box; it stays empty for `.mov` inputs.
+        let mut file_sidx: Vec<Sidx> = Vec::new();
         // Per-track running media-time cursor (DTS) for fragmented
         // playback. Indexed by track-id (not by track index); only
         // populated for tracks that actually receive `traf` runs.
@@ -372,6 +384,15 @@ impl MovDemuxer {
                     if file_pdin.is_none() {
                         file_pdin = Some(parsed);
                     }
+                }
+                t if t == &SIDX => {
+                    // ISO/IEC 14496-12 §8.16.3 — Segment Index Box.
+                    // File-level, "Zero or more"; preserve every one in
+                    // file order so callers can resolve hierarchical
+                    // ("daisy-chain") indexes and per-stream indexes
+                    // that share the segment.
+                    let payload = read_payload(input.as_mut(), &hdr)?;
+                    file_sidx.push(parse_sidx(&payload)?);
                 }
                 t if t == &MOOV => {
                     if !seen_mdat {
@@ -578,6 +599,7 @@ impl MovDemuxer {
             file_bmff_meta,
             faststart: seen_moov_before_mdat,
             pdin: file_pdin,
+            sidx: file_sidx,
             samples,
             next: 0,
             trex_defaults,
@@ -2696,6 +2718,61 @@ mod tests {
         assert!(pkt.flags.keyframe);
         // Past-the-end yields Eof
         assert!(matches!(d.next_packet(), Err(Error::Eof)));
+    }
+
+    /// Build a v0 `sidx` payload with a single media reference so the
+    /// top-level walker test can inject it into a synthetic file.
+    fn build_sidx_box() -> Vec<u8> {
+        let mut body = Vec::new();
+        body.push(0); // version 0
+        body.extend_from_slice(&[0, 0, 0]); // flags
+        body.extend_from_slice(&1u32.to_be_bytes()); // reference_ID = track 1
+        body.extend_from_slice(&600u32.to_be_bytes()); // timescale
+        body.extend_from_slice(&0u32.to_be_bytes()); // earliest_presentation_time
+        body.extend_from_slice(&0u32.to_be_bytes()); // first_offset
+        body.extend_from_slice(&[0, 0]); // reserved
+        body.extend_from_slice(&1u16.to_be_bytes()); // reference_count = 1
+                                                     // One media reference, starts with a SAP of type 1.
+        let w0 = 0x0000_1000u32; // reference_type=0, referenced_size=4096
+        let w2 = (1u32 << 31) | (1u32 << 28); // starts_with_SAP=1, SAP_type=1
+        body.extend_from_slice(&w0.to_be_bytes());
+        body.extend_from_slice(&30u32.to_be_bytes()); // subsegment_duration
+        body.extend_from_slice(&w2.to_be_bytes());
+        let mut out = Vec::new();
+        push_atom(&mut out, *b"sidx", &body);
+        out
+    }
+
+    #[cfg(feature = "registry")]
+    #[test]
+    fn top_level_sidx_collected_in_file_order() {
+        // Prepend a `sidx` ahead of the minimal QT body. The walker
+        // must collect it as a top-level box regardless of placement,
+        // and the rest of the file must still demux normally.
+        let mut bytes = build_sidx_box();
+        bytes.extend_from_slice(&build_minimal_qt());
+        let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+        let d = MovDemuxer::open(cur).unwrap();
+        assert_eq!(d.sidx.len(), 1);
+        let s = &d.sidx[0];
+        assert_eq!(s.version, 0);
+        assert_eq!(s.reference_id, 1);
+        assert_eq!(s.timescale, 600);
+        assert_eq!(s.references.len(), 1);
+        assert_eq!(s.references[0].referenced_size, 4096);
+        assert_eq!(s.references[0].subsegment_duration, 30);
+        assert!(s.references[0].starts_with_sap);
+        assert_eq!(s.references[0].sap_type, 1);
+        // The track still parsed.
+        assert_eq!(d.tracks.len(), 1);
+    }
+
+    #[test]
+    fn files_without_sidx_have_empty_vec() {
+        let bytes = build_minimal_qt();
+        let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+        let d = MovDemuxer::open(cur).unwrap();
+        assert!(d.sidx.is_empty());
     }
 
     #[cfg(feature = "registry")]

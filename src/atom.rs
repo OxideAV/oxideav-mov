@@ -303,6 +303,10 @@ pub const MFRA: [u8; 4] = fourcc("mfra"); // movie-fragment random-access box (e
 pub const TFRA: [u8; 4] = fourcc("tfra"); // track-fragment random-access entries (per track)
 pub const MFRO: [u8; 4] = fourcc("mfro"); // movie-fragment random-access offset (size_of_mfra)
 
+// Round-114: Segment Index Box (ISO/IEC 14496-12 §8.16.3). File-level
+// FullBox indexing one media stream's subsegments for DASH / CMAF.
+pub const SIDX: [u8; 4] = fourcc("sidx");
+
 // Round-3: Composition-shift-least-greatest atom.
 pub const CSLG: [u8; 4] = fourcc("cslg");
 
