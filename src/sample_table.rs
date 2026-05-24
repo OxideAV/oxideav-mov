@@ -207,6 +207,57 @@ pub struct StshEntry {
     pub sync_sample_number: u32,
 }
 
+/// One sub-sample of a sample carrying `subs` (Sub-Sample Information
+/// Box) structure — ISO/IEC 14496-12 §8.7.7. A *sub-sample* is a
+/// contiguous byte range of a sample; the specific definition (e.g. NAL
+/// unit boundaries for AVC/HEVC) is supplied by the coding system. The
+/// `subs` box does not name the codec, so the meaning of
+/// `codec_specific_parameters` is interpreted by the caller against the
+/// sample-description FourCC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SubSampleEntry {
+    /// Size of this sub-sample in bytes (§8.7.7.3). 16-bit on disk for
+    /// `version == 0`, 32-bit for `version == 1`; widened to `u32` here
+    /// so both versions share one type.
+    pub subsample_size: u32,
+    /// Degradation priority — higher values mark sub-samples more
+    /// important to decoded quality (§8.7.7.3).
+    pub subsample_priority: u8,
+    /// `0` — required to decode the sample; `1` — not required (may be
+    /// dropped, e.g. SEI) (§8.7.7.3).
+    pub discardable: u8,
+    /// Codec-defined parameters; `0` when the coding system gives no
+    /// definition (§8.7.7.3).
+    pub codec_specific_parameters: u32,
+}
+
+impl SubSampleEntry {
+    /// True when `discardable == 1`: the sub-sample is not required to
+    /// decode its sample and may be dropped (§8.7.7.3).
+    pub fn is_discardable(&self) -> bool {
+        self.discardable == 1
+    }
+}
+
+/// One row of the `subs` (Sub-Sample Information Box) table — ISO/IEC
+/// 14496-12 §8.7.7. The table is *sparsely* coded: each row names a
+/// sample (via a delta from the previous row's sample number) and lists
+/// that sample's sub-samples. Samples not named by any row have no
+/// sub-sample structure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubSampleInfo {
+    /// 1-based number of the sample whose sub-sample structure this row
+    /// describes. The on-disk `sample_delta` is accumulated into an
+    /// absolute sample number at parse time (§8.7.7.3): the first row's
+    /// delta is the difference from zero, each subsequent row's delta is
+    /// the difference from the previous row's sample number.
+    pub sample_number: u32,
+    /// The sample's sub-samples, in byte order. A row with
+    /// `subsample_count == 0` carries no array and leaves this empty —
+    /// such a row still advances the running sample number.
+    pub subsamples: Vec<SubSampleEntry>,
+}
+
 /// Parsed sample table for a single track.
 #[derive(Clone, Debug, Default)]
 pub struct SampleTable {
@@ -247,6 +298,13 @@ pub struct SampleTable {
     /// when the track carries no `stsh` box. Optional metadata: a
     /// track plays and seeks correctly when it is ignored (§8.6.3.1).
     pub stsh: Vec<StshEntry>,
+    /// `subs` Sub-Sample Information Box rows (ISO/IEC 14496-12
+    /// §8.7.7), sorted ascending by `sample_number`. Empty when the
+    /// track carries no `subs` box. The table is sparse — only samples
+    /// with sub-sample structure appear. A single track may carry more
+    /// than one `subs` box (distinguished by `flags`, §8.7.7.1); rows
+    /// from every box are merged and kept in ascending sample order.
+    pub subs: Vec<SubSampleInfo>,
 }
 
 /// One entry in the iterator output: enough to read the sample bytes
@@ -312,6 +370,22 @@ impl SampleTable {
             .binary_search_by(|e| e.shadowed_sample_number.cmp(&shadowed_sample_number))
             .ok()
             .map(|i| self.stsh[i].sync_sample_number)
+    }
+
+    /// Look up the [`SubSampleEntry`] list for a **1-based**
+    /// `sample_number`, per the `subs` Sub-Sample Information Box
+    /// (ISO/IEC 14496-12 §8.7.7). Returns `None` when the track carries
+    /// no `subs` box, or when this sample is not named by any row (i.e.
+    /// the sample has no sub-sample structure).
+    ///
+    /// The table is sorted ascending by `sample_number`, so this
+    /// binary-searches for an exact match. A row that exists but lists
+    /// zero sub-samples (`subsample_count == 0`) returns `Some(&[])`.
+    pub fn sub_samples_for(&self, sample_number: u32) -> Option<&[SubSampleEntry]> {
+        self.subs
+            .binary_search_by(|r| r.sample_number.cmp(&sample_number))
+            .ok()
+            .map(|i| self.subs[i].subsamples.as_slice())
     }
 
     /// Look up the [`SampleToGroup`] / [`SampleGroupDescription`] pair
@@ -574,6 +648,76 @@ pub fn parse_stsh(payload: &[u8]) -> Result<Vec<StshEntry>> {
     Ok(out)
 }
 
+/// Parse a single `subs` (Sub-Sample Information Box) payload —
+/// ISO/IEC 14496-12 §8.7.7.2.
+///
+/// Layout: `[version:1][flags:3][entry_count:4]` then, for each of
+/// `entry_count` rows, `[sample_delta:4][subsample_count:2]` followed
+/// by `subsample_count` sub-sample records. Each record is
+/// `[subsample_size:(2 if version==0 else 4)][subsample_priority:1]
+/// [discardable:1][codec_specific_parameters:4]`.
+///
+/// The `sample_delta` field is accumulated into an absolute 1-based
+/// `sample_number`: the first row's delta is the difference from zero,
+/// each subsequent row's delta is the difference from the previous
+/// row's sample number (§8.7.7.3). A `sample_delta` of zero (other than
+/// the implicit first-from-zero) would place two rows on the same
+/// sample, which the sparse coding cannot represent; such a table is
+/// rejected so the binary-search accessor stays correct. `version` must
+/// be 0 or 1 (§8.7.7.3).
+pub fn parse_subs(payload: &[u8]) -> Result<Vec<SubSampleInfo>> {
+    need(payload, 0, 8, "subs header")?;
+    let version = payload[0];
+    if version > 1 {
+        return Err(Error::invalid("MOV: subs unsupported version"));
+    }
+    let size_width = if version == 1 { 4 } else { 2 };
+    let record_len = size_width + 1 + 1 + 4; // size + priority + discardable + csp
+    let entry_count = read_u32(&payload[4..]);
+    let mut pos = 8usize;
+    let mut out: Vec<SubSampleInfo> = Vec::with_capacity(entry_count as usize);
+    let mut running_sample: u32 = 0;
+    for _ in 0..entry_count {
+        need(payload, pos, 6, "subs entry header")?;
+        let sample_delta = read_u32(&payload[pos..]);
+        let subsample_count = read_u16(&payload[pos + 4..]);
+        pos += 6;
+        // Accumulate the sparse sample-number delta. A zero delta after
+        // the first row would duplicate the previous row's sample
+        // number; the first row's delta is "difference from zero" so a
+        // first-row delta of zero is likewise invalid (sample numbers
+        // are 1-based, §8.7.7.3).
+        running_sample = running_sample
+            .checked_add(sample_delta)
+            .ok_or_else(|| Error::invalid("MOV: subs sample number overflow"))?;
+        if sample_delta == 0 {
+            return Err(Error::invalid("MOV: subs zero sample_delta"));
+        }
+        let mut subsamples = Vec::with_capacity(subsample_count as usize);
+        for _ in 0..subsample_count {
+            need(payload, pos, record_len, "subs sub-sample record")?;
+            let subsample_size = if version == 1 {
+                read_u32(&payload[pos..])
+            } else {
+                read_u16(&payload[pos..]) as u32
+            };
+            let p = pos + size_width;
+            subsamples.push(SubSampleEntry {
+                subsample_size,
+                subsample_priority: payload[p],
+                discardable: payload[p + 1],
+                codec_specific_parameters: read_u32(&payload[p + 2..]),
+            });
+            pos += record_len;
+        }
+        out.push(SubSampleInfo {
+            sample_number: running_sample,
+            subsamples,
+        });
+    }
+    Ok(out)
+}
+
 /// Iterator over samples in decode order. Walks `stsc` and the
 /// chunk-offset table to compute per-sample byte offsets, summing
 /// `stsz` sizes inside each chunk. `stts` runs are unwound to feed
@@ -780,6 +924,11 @@ impl Iterator for SampleIter<'_> {
 // ─────────────── helpers ───────────────
 
 #[inline]
+fn read_u16(b: &[u8]) -> u16 {
+    u16::from_be_bytes([b[0], b[1]])
+}
+
+#[inline]
 fn read_u32(b: &[u8]) -> u32 {
     u32::from_be_bytes([b[0], b[1], b[2], b[3]])
 }
@@ -896,6 +1045,7 @@ mod tests {
             sgpd: vec![],
             sdtp: vec![],
             stsh: vec![],
+            subs: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 1);
@@ -969,6 +1119,7 @@ mod tests {
             sgpd: vec![],
             sdtp: vec![],
             stsh: vec![],
+            subs: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 4);
@@ -1002,6 +1153,7 @@ mod tests {
             sgpd: vec![],
             sdtp: vec![],
             stsh: vec![],
+            subs: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 4);
@@ -1192,5 +1344,152 @@ mod tests {
     fn shadow_sync_for_empty_table_is_none() {
         let table = SampleTable::default();
         assert_eq!(table.shadow_sync_for(1), None);
+    }
+
+    /// One sub-sample record `(size, priority, discardable, csp)` for
+    /// the `subs` payload builder.
+    type SubsRecord = (u32, u8, u8, u32);
+    /// One `subs` row `(sample_delta, &[record])`.
+    type SubsRow<'a> = (u32, &'a [SubsRecord]);
+
+    /// Build a `subs` payload from a list of rows.
+    fn build_subs_payload(version: u8, rows: &[SubsRow<'_>]) -> Vec<u8> {
+        let mut p = Vec::new();
+        p.push(version);
+        p.extend_from_slice(&[0, 0, 0]); // flags
+        p.extend_from_slice(&(rows.len() as u32).to_be_bytes());
+        for (delta, subs) in rows {
+            p.extend_from_slice(&delta.to_be_bytes());
+            p.extend_from_slice(&(subs.len() as u16).to_be_bytes());
+            for (size, prio, disc, csp) in *subs {
+                if version == 1 {
+                    p.extend_from_slice(&size.to_be_bytes());
+                } else {
+                    p.extend_from_slice(&(*size as u16).to_be_bytes());
+                }
+                p.push(*prio);
+                p.push(*disc);
+                p.extend_from_slice(&csp.to_be_bytes());
+            }
+        }
+        p
+    }
+
+    #[test]
+    fn parse_subs_v0_sparse_sample_numbers() {
+        // Row 1: delta 3 → sample 3, two sub-samples.
+        // Row 2: delta 5 → sample 8, one sub-sample.
+        let p = build_subs_payload(
+            0,
+            &[
+                (3, &[(100, 7, 0, 0), (40, 1, 1, 0xDEAD_BEEF)]),
+                (5, &[(200, 2, 0, 0)]),
+            ],
+        );
+        let v = parse_subs(&p).unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].sample_number, 3);
+        assert_eq!(v[0].subsamples.len(), 2);
+        assert_eq!(v[0].subsamples[0].subsample_size, 100);
+        assert_eq!(v[0].subsamples[0].subsample_priority, 7);
+        assert!(!v[0].subsamples[0].is_discardable());
+        assert_eq!(v[0].subsamples[1].subsample_size, 40);
+        assert!(v[0].subsamples[1].is_discardable());
+        assert_eq!(v[0].subsamples[1].codec_specific_parameters, 0xDEAD_BEEF);
+        assert_eq!(v[1].sample_number, 8);
+        assert_eq!(v[1].subsamples[0].subsample_size, 200);
+    }
+
+    #[test]
+    fn parse_subs_v1_uses_32bit_sizes() {
+        // A size that overflows 16 bits is only representable under v1.
+        let big = 0x0001_2345u32;
+        let p = build_subs_payload(1, &[(1, &[(big, 0, 0, 0)])]);
+        let v = parse_subs(&p).unwrap();
+        assert_eq!(v[0].sample_number, 1);
+        assert_eq!(v[0].subsamples[0].subsample_size, big);
+    }
+
+    #[test]
+    fn parse_subs_zero_subsample_count_keeps_row() {
+        // A row may name a sample yet list zero sub-samples; it still
+        // advances the running sample number (§8.7.7.1).
+        let p = build_subs_payload(0, &[(2, &[]), (3, &[(10, 0, 0, 0)])]);
+        let v = parse_subs(&p).unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].sample_number, 2);
+        assert!(v[0].subsamples.is_empty());
+        assert_eq!(v[1].sample_number, 5); // 2 + 3
+    }
+
+    #[test]
+    fn parse_subs_empty_table() {
+        let p = build_subs_payload(0, &[]);
+        let v = parse_subs(&p).unwrap();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn parse_subs_rejects_zero_sample_delta() {
+        // A zero delta would place two rows on the same sample number
+        // (or, on the first row, a 0 sample number — invalid).
+        let p = build_subs_payload(0, &[(0, &[(10, 0, 0, 0)])]);
+        assert!(parse_subs(&p).is_err());
+    }
+
+    #[test]
+    fn parse_subs_rejects_unknown_version() {
+        let mut p = build_subs_payload(0, &[(1, &[(10, 0, 0, 0)])]);
+        p[0] = 2;
+        assert!(parse_subs(&p).is_err());
+    }
+
+    #[test]
+    fn parse_subs_truncated_record_errors() {
+        // Declare one sub-sample but cut the record short.
+        let mut p = build_subs_payload(0, &[(1, &[(10, 0, 0, 0)])]);
+        p.truncate(p.len() - 2);
+        assert!(parse_subs(&p).is_err());
+    }
+
+    #[test]
+    fn parse_subs_short_header_errors() {
+        let p = vec![0u8; 6]; // ver+flags+partial entry_count
+        assert!(parse_subs(&p).is_err());
+    }
+
+    #[test]
+    fn sub_samples_for_binary_search() {
+        let table = SampleTable {
+            subs: vec![
+                SubSampleInfo {
+                    sample_number: 3,
+                    subsamples: vec![SubSampleEntry {
+                        subsample_size: 100,
+                        subsample_priority: 0,
+                        discardable: 0,
+                        codec_specific_parameters: 0,
+                    }],
+                },
+                SubSampleInfo {
+                    sample_number: 8,
+                    subsamples: vec![],
+                },
+            ],
+            ..SampleTable::default()
+        };
+        assert_eq!(table.sub_samples_for(3).map(|s| s.len()), Some(1));
+        // A row listed with zero sub-samples returns Some(&[]).
+        assert_eq!(table.sub_samples_for(8).map(|s| s.len()), Some(0));
+        // Samples not named by any row.
+        assert!(table.sub_samples_for(1).is_none());
+        assert!(table.sub_samples_for(5).is_none());
+        assert!(table.sub_samples_for(100).is_none());
+    }
+
+    #[test]
+    fn sub_samples_for_empty_table_is_none() {
+        let table = SampleTable::default();
+        assert!(table.sub_samples_for(1).is_none());
     }
 }

@@ -257,6 +257,7 @@ pub const STCO: [u8; 4] = fourcc("stco");
 pub const CO64: [u8; 4] = fourcc("co64");
 pub const CTTS: [u8; 4] = fourcc("ctts");
 pub const SDTP: [u8; 4] = fourcc("sdtp"); // Independent and Disposable Samples Box
+pub const SUBS: [u8; 4] = fourcc("subs"); // Sub-Sample Information Box
 pub const MDAT: [u8; 4] = fourcc("mdat");
 pub const FREE: [u8; 4] = fourcc("free");
 pub const SKIP: [u8; 4] = fourcc("skip");

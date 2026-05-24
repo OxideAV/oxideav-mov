@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round 118 — Sub-Sample Information Box (`subs`) parser, ISO/IEC
+  14496-12 §8.7.7.
+  - `parse_subs(payload) -> Result<Vec<SubSampleInfo>>` in the
+    `sample_table` module. Layout per §8.7.7.2: FullBox header
+    (`version` 0 or 1) + `entry_count`, then per row a
+    `[sample_delta:4][subsample_count:2]` header followed by
+    `subsample_count` sub-sample records of
+    `[subsample_size:(2 if v0 else 4)][subsample_priority:1]
+    [discardable:1][codec_specific_parameters:4]`. The sparse
+    `sample_delta` is accumulated into an absolute 1-based
+    `sample_number` (§8.7.7.3): the first row's delta is the difference
+    from zero, each later row's from the previous row. A zero
+    `sample_delta` (which would duplicate a sample number, or produce a
+    0-numbered first sample) is rejected; unknown `version` (> 1) and a
+    truncated record are rejected.
+  - `SubSampleInfo` (one sparse row: `sample_number` + `subsamples`) and
+    `SubSampleEntry` (`subsample_size` widened to `u32` across both
+    versions, `subsample_priority`, `discardable`,
+    `codec_specific_parameters`, plus `is_discardable()`) surfaced from
+    `lib.rs`.
+  - `SampleTable.subs: Vec<SubSampleInfo>` field, sorted ascending by
+    `sample_number`. The `stbl` walker recognises `subs` as a child box;
+    §8.7.7.1 permits more than one `subs` box per track (distinguished by
+    `flags`), so rows from every box are merged — rows for the same
+    sample concatenate their sub-sample lists in box order.
+  - `SampleTable::sub_samples_for(sample_number)` (binary-searches the
+    sorted table; a row that names a sample but lists zero sub-samples
+    returns `Some(&[])`) and `MovDemuxer::sub_samples(track_index,
+    sample_number)`. `sample_number` is **1-based**. QTFF does not define
+    this box; it is ISO BMFF-only.
+
 ## [0.0.2](https://github.com/OxideAV/oxideav-mov/compare/v0.0.1...v0.0.2) - 2026-05-24
 
 ### Other

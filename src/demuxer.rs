@@ -15,8 +15,8 @@ use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DINF, DREF,
     EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MDAT, MDHD, MDIA, META, MFRA,
     MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SBGP,
-    SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS, TAPT, TEXT, TKHD,
-    TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
+    SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS, SUBS, TAPT, TEXT,
+    TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -30,7 +30,7 @@ use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
 use crate::sample_groups::{parse_sbgp, parse_sgpd};
 use crate::sample_table::{
     parse_co64, parse_ctts, parse_sdtp, parse_stco, parse_stsc, parse_stsh, parse_stss, parse_stsz,
-    parse_stts, SampleEntry, SampleTable,
+    parse_stts, parse_subs, SampleEntry, SampleTable, SubSampleInfo,
 };
 use crate::sidx::{parse_sidx, Sidx};
 use crate::track::{parse_stsd, Track, TrackRef, TrackRefKind};
@@ -1373,6 +1373,28 @@ impl MovDemuxer {
             .shadow_sync_for(shadowed_sample_number)
     }
 
+    /// Look up the sub-sample structure of a **1-based** `sample_number`
+    /// via the `subs` (Sub-Sample Information Box, ISO/IEC 14496-12
+    /// §8.7.7). A sub-sample is a contiguous byte range of the sample
+    /// whose precise meaning (e.g. NAL-unit boundaries for AVC/HEVC) is
+    /// defined by the coding system named in the sample description.
+    ///
+    /// Returns `None` when the track carries no `subs` box, or when this
+    /// sample is not named by any row (it has no sub-sample structure).
+    /// A sample explicitly listed with zero sub-samples returns
+    /// `Some(&[])`. This is optional metadata: a track decodes correctly
+    /// when it is ignored.
+    pub fn sub_samples(
+        &self,
+        track_index: usize,
+        sample_number: u32,
+    ) -> Option<&[crate::sample_table::SubSampleEntry]> {
+        self.tracks
+            .get(track_index)?
+            .sample_table
+            .sub_samples_for(sample_number)
+    }
+
     /// Inner implementation of [`Demuxer::seek_to`]. Lives on the
     /// struct (not the trait impl) so it's reachable from the
     /// standalone (no-`registry`) build's tests too without needing
@@ -2313,6 +2335,23 @@ fn parse_dinf<R: Read + Seek + ?Sized>(
     })
 }
 
+/// Merge the rows of one parsed `subs` box into a track's running
+/// (sample-number-sorted) table. A row whose `sample_number` already
+/// exists — another `subs` box in the same `stbl` describing the same
+/// sample (legal per §8.7.7.1 when `flags` differ) — appends its
+/// sub-samples to the existing row in box order. Otherwise the row is
+/// inserted at its sorted position so `sub_samples_for` can
+/// binary-search. The per-box rows arrive already ascending, so each
+/// insertion is at-or-after the previous one.
+fn merge_subs(dst: &mut Vec<SubSampleInfo>, rows: Vec<SubSampleInfo>) {
+    for row in rows {
+        match dst.binary_search_by(|r| r.sample_number.cmp(&row.sample_number)) {
+            Ok(i) => dst[i].subsamples.extend(row.subsamples),
+            Err(i) => dst.insert(i, row),
+        }
+    }
+}
+
 fn parse_stbl<R: Read + Seek + ?Sized>(
     r: &mut R,
     hdr: &AtomHeader,
@@ -2362,6 +2401,17 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
             t if t == &STSH => {
                 let body = read_payload(r, child)?;
                 table.stsh = parse_stsh(&body)?;
+            }
+            t if t == &SUBS => {
+                // §8.7.7.1 permits more than one `subs` box per track
+                // (distinguished by `flags`). Merge every box's rows by
+                // sample number: rows for the same sample concatenate
+                // their sub-sample lists in box order; the merged table
+                // is sorted ascending so `sub_samples_for` can
+                // binary-search. (Brands that require "only one `subs`
+                // box per track" — E.4 — are a strict subset of this.)
+                let body = read_payload(r, child)?;
+                merge_subs(&mut table.subs, parse_subs(&body)?);
             }
             t if t == &CTTS => {
                 let body = read_payload(r, child)?;

@@ -95,8 +95,9 @@ pub use sample_groups::{
     VisualRandomAccess,
 };
 pub use sample_table::{
-    parse_sdtp, parse_stsh, IsLeading, SampleDependsOn, SampleEntry, SampleHasRedundancy,
-    SampleIsDependedOn, SampleTable, SdtpEntry, StshEntry,
+    parse_sdtp, parse_stsh, parse_subs, IsLeading, SampleDependsOn, SampleEntry,
+    SampleHasRedundancy, SampleIsDependedOn, SampleTable, SdtpEntry, StshEntry, SubSampleEntry,
+    SubSampleInfo,
 };
 pub use sidx::{parse_sidx, ReferenceType, Sidx, SidxReference};
 pub use timecode::{

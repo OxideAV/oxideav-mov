@@ -181,6 +181,32 @@ shadowed-sample match. A non-strictly-increasing or duplicate-keyed
 table is rejected at open time. The box is purely a seek optimisation —
 a track plays and seeks correctly when it is ignored.
 
+Round 118 parses the **Sub-Sample Information Box** (`subs`) — ISO/IEC
+14496-12 §8.7.7 — into the per-track sample table. A *sub-sample* is a
+contiguous byte range of a sample (e.g. a NAL-unit boundary for
+AVC/HEVC); the precise meaning is defined by the coding system named in
+the sample description, so this crate surfaces the byte ranges and
+leaves interpretation to the caller. The box is *sparsely* coded: each
+row names a sample via a `sample_delta` from the previous row's sample
+number and lists that sample's sub-samples; samples not named by any row
+have no sub-sample structure. The parser accumulates the deltas into
+absolute 1-based `sample_number`s (§8.7.7.3 — the first row's delta is
+the difference from zero) and rejects a zero `sample_delta` (which would
+duplicate a sample number or yield a 0-numbered first sample), an unknown
+`version` (> 1), and a truncated record. Each [`SubSampleEntry`] carries
+the `subsample_size` (16-bit under v0, 32-bit under v1 — both widened to
+`u32`), `subsample_priority`, `discardable`, and
+`codec_specific_parameters`, with an `is_discardable()` predicate
+(§8.7.7.3 — a discardable sub-sample is not required to decode the
+sample, e.g. SEI). §8.7.7.1 permits more than one `subs` box per track
+(distinguished by `flags`); rows from every box are merged into one
+ascending table, concatenating sub-sample lists for any shared sample.
+Surfaces on the demuxer via `MovDemuxer::sub_samples(track,
+sample_number) -> Option<&[SubSampleEntry]>` and on the table via
+`SampleTable::sub_samples_for(sample_number)`, which binary-searches the
+sorted table; a row naming a sample with zero sub-samples returns
+`Some(&[])`. QTFF doesn't define this box; it is ISO BMFF-only.
+
 Round 74 wires the **edit list** (`edts/elst`) into a presentation-time
 mapping API: `MovDemuxer::movie_pts_for(track, media_pts)` translates a
 sample's media-timescale PTS to its movie-timescale PTS by walking the
