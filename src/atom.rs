@@ -308,6 +308,13 @@ pub const MFRO: [u8; 4] = fourcc("mfro"); // movie-fragment random-access offset
 // FullBox indexing one media stream's subsegments for DASH / CMAF.
 pub const SIDX: [u8; 4] = fourcc("sidx");
 
+// Round-125: Segment Type Box (ISO/IEC 14496-12 §8.16.2). File-level
+// box that identifies a DASH / CMAF media segment — same on-disk shape
+// as `ftyp`, distinguished by the box-type FourCC alone. `Quantity:
+// Zero or more`; when present, "shall be the first box in a segment"
+// (§8.16.2.1).
+pub const STYP: [u8; 4] = fourcc("styp");
+
 // Round-3: Composition-shift-least-greatest atom.
 pub const CSLG: [u8; 4] = fourcc("cslg");
 

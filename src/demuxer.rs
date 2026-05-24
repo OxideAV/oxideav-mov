@@ -15,8 +15,8 @@ use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DINF, DREF,
     EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MDAT, MDHD, MDIA, META, MFRA,
     MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SBGP,
-    SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS, SUBS, TAPT, TEXT,
-    TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
+    SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS, STYP, SUBS, TAPT,
+    TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -33,6 +33,7 @@ use crate::sample_table::{
     parse_stts, parse_subs, SampleEntry, SampleTable, SubSampleInfo,
 };
 use crate::sidx::{parse_sidx, Sidx};
+use crate::styp::{parse_styp, Styp};
 use crate::track::{parse_stsd, Track, TrackRef, TrackRefKind};
 use crate::track_load::parse_load;
 use crate::user_data::{parse_udta, UserDataEntry};
@@ -102,6 +103,14 @@ pub struct MovDemuxer {
     /// `sidx`-of-`sidx` references); the box has `Quantity: Zero or
     /// more`. Empty for QTFF and for non-segmented MP4s.
     pub sidx: Vec<Sidx>,
+    /// Top-level Segment Type Boxes (ISO/IEC 14496-12 §8.16.2), in
+    /// file order. The first entry — when present — is the conformance
+    /// declaration for a DASH / CMAF / HLS-fMP4 media segment; spec
+    /// §8.16.2.1 says any `styp` that isn't first in its file "may be
+    /// ignored", but we preserve them all so callers building a
+    /// diagnostic view of a concatenated segment stream don't lose
+    /// information. Empty for QTFF and for non-segmented MP4s.
+    pub styp: Vec<Styp>,
     /// Pre-flattened sample queue, sorted by file offset for friendly
     /// I/O patterns. Each entry is `(stream_index, sample)`.
     samples: Vec<(u32, SampleEntry)>,
@@ -337,6 +346,14 @@ impl MovDemuxer {
         // File-level, "Zero or more" — collected in file order. QTFF
         // doesn't define this box; it stays empty for `.mov` inputs.
         let mut file_sidx: Vec<Sidx> = Vec::new();
+        // ISO/IEC 14496-12 §8.16.2 Segment Type Boxes (`styp`).
+        // File-level, "Zero or more" — collected in file order so a
+        // caller can inspect a concatenated segment stream's every
+        // boundary marker (§8.16.2.1 says any `styp` not first in its
+        // file "may be ignored", but we preserve them for diagnostics).
+        // QTFF doesn't define this box; it stays empty for `.mov`
+        // inputs and non-segmented MP4s.
+        let mut file_styp: Vec<Styp> = Vec::new();
         // Per-track running media-time cursor (DTS) for fragmented
         // playback. Indexed by track-id (not by track index); only
         // populated for tracks that actually receive `traf` runs.
@@ -393,6 +410,17 @@ impl MovDemuxer {
                     // that share the segment.
                     let payload = read_payload(input.as_mut(), &hdr)?;
                     file_sidx.push(parse_sidx(&payload)?);
+                }
+                t if t == &STYP => {
+                    // ISO/IEC 14496-12 §8.16.2 — Segment Type Box.
+                    // File-level, "Zero or more"; same on-disk shape
+                    // as `ftyp`. Preserve every one in file order even
+                    // though §8.16.2.1 lets the parser ignore any that
+                    // aren't first in their file — the writer's intent
+                    // is still useful when inspecting a concatenated
+                    // segment stream for boundary markers.
+                    let payload = read_payload(input.as_mut(), &hdr)?;
+                    file_styp.push(parse_styp(&payload)?);
                 }
                 t if t == &MOOV => {
                     if !seen_mdat {
@@ -600,6 +628,7 @@ impl MovDemuxer {
             faststart: seen_moov_before_mdat,
             pdin: file_pdin,
             sidx: file_sidx,
+            styp: file_styp,
             samples,
             next: 0,
             trex_defaults,
@@ -664,6 +693,34 @@ impl MovDemuxer {
     /// conformance per HEIF §10 / AVIF §3).
     pub fn is_miaf(&self) -> bool {
         self.ftyp.as_ref().map(|f| f.is_miaf()).unwrap_or(false)
+    }
+
+    /// The first Segment Type Box (`styp`) in the file, when present.
+    /// Per ISO/IEC 14496-12 §8.16.2.1, a valid `styp` "shall be the
+    /// first box in a segment"; this accessor surfaces that first
+    /// declaration directly so DASH / CMAF callers don't have to index
+    /// [`Self::styp`] by hand. Returns `None` for QTFF / non-segmented
+    /// MP4s and for any file that omits `styp` entirely.
+    pub fn first_styp(&self) -> Option<&Styp> {
+        self.styp.first()
+    }
+
+    /// Whether the file's first Segment Type Box declares any of the
+    /// DASH segment-conformance brands (`msdh` / `msix` / `risx`). A
+    /// quick "is this a DASH media segment" classifier paired with
+    /// [`Self::is_fragmented`].
+    pub fn is_dash_segment(&self) -> bool {
+        self.first_styp()
+            .map(|s| s.is_dash_segment())
+            .unwrap_or(false)
+    }
+
+    /// Whether the file's first Segment Type Box declares the CMAF
+    /// segment-conformance brand `cmfs`.
+    pub fn is_cmaf_segment(&self) -> bool {
+        self.first_styp()
+            .map(|s| s.is_cmaf_segment())
+            .unwrap_or(false)
     }
 
     // Stub used by `open()` to validate the container before we

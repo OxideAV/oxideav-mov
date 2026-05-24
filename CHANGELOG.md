@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 125 — Segment Type Box (`styp`) parser, ISO/IEC 14496-12 §8.16.2.
+  - `parse_styp(payload) -> Result<Styp>` in the new `styp` module.
+    Layout per §8.16.2 (identical to §4.3 `ftyp` with the box-type
+    FourCC switched): `major_brand[4]` + `minor_version[4]` +
+    `compatible_brands[4]*` to end-of-box. Payloads shorter than the
+    8-byte fixed header are rejected at open time, as is a
+    `compatible_brands` tail length that is not a multiple of 4. An
+    empty compatible-brands list is legal — a bare `[major][minor]`
+    body is a valid segment-type box.
+  - `Styp { major_brand: [u8;4], minor_version: u32, compatible_brands:
+    Vec<[u8;4]> }` exposes the on-disk fields verbatim. Helpers:
+    `has_brand(&[u8;4])` (major or compatible match);
+    `is_dash_segment()` (true when any of `msdh` / `msix` / `risx`
+    appear); `is_cmaf_segment()` (true when `cmfs` appears);
+    `major_brand_class() -> BrandClass` shortcut into the existing
+    classifier; `to_ftyp() -> Ftyp` conversion that lifts the box into
+    the [`Ftyp`] shape so the rich `is_heic` / `is_avif` / `is_miaf`
+    machinery defined on [`Ftyp`] becomes available for segment-level
+    queries.
+  - `MovDemuxer.styp: Vec<Styp>` field, populated by the top-level
+    walker. `Quantity: Zero or more` (§8.16.2.1); collected in file
+    order so a caller inspecting a concatenated segment stream can
+    see every segment-boundary marker even though §8.16.2.1 permits
+    ignoring any `styp` that isn't first.
+  - `MovDemuxer::first_styp() -> Option<&Styp>` surfaces the
+    §8.16.2.1 conformance declaration (the first `styp`, which is
+    the only one a strict reader needs). `MovDemuxer::is_dash_segment()`
+    and `MovDemuxer::is_cmaf_segment()` query the first `styp` for
+    the DASH and CMAF segment-conformance brand families respectively.
+  - `atom::STYP` FourCC constant added. The top-level walker
+    dispatches on it alongside `FTYP`, `PDIN`, `SIDX`.
+  - Seven synthetic-fixture integration tests
+    (`tests/synth_round125_styp.rs`): DASH-major round-trip; multi-
+    `styp` file-order preservation across a concatenated segment
+    boundary; absence yields empty `Vec` + `false` classifiers;
+    CMAF classifier on both major-brand and compatible-brand
+    placement; truncated payload rejected at open time; unaligned
+    compatible-brand tail rejected; empty compatible-brand list is
+    legal. Plus 10 unit tests on the parser covering the header /
+    tail bounds, `has_brand` match logic, DASH and CMAF classifier
+    routes, `BrandClass` shortcut, `Ftyp` round-trip, and brand-
+    order preservation.
+
 - Round 122 — Track Kind box (`kind`) parser, ISO/IEC 14496-12 §8.10.4.
   - `parse_kind(payload) -> Result<KindEntry>` in the new `kind`
     module. Layout per §8.10.4.2: FullBox header (`version = 0`,

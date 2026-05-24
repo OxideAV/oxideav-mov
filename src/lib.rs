@@ -30,6 +30,7 @@ pub mod render;
 pub mod sample_groups;
 pub mod sample_table;
 pub mod sidx;
+pub mod styp;
 pub mod timecode;
 pub mod track;
 pub mod track_load;
@@ -102,6 +103,7 @@ pub use sample_table::{
     SubSampleInfo,
 };
 pub use sidx::{parse_sidx, ReferenceType, Sidx, SidxReference};
+pub use styp::{parse_styp, Styp};
 pub use timecode::{
     parse_tmcd_sample_description, Tmcd, TMCD_FLAG_24_HOUR, TMCD_FLAG_COUNTER,
     TMCD_FLAG_DROP_FRAME, TMCD_FLAG_NEGATIVES_OK,

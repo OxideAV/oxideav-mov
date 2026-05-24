@@ -282,6 +282,34 @@ AND tracks with `switch_group == 0` are excluded — both equivalent to
 `alternate_groups()` surface to expose the full alternate ⊇ switch
 hierarchy. QTFF doesn't define this box; it is ISO BMFF-only.
 
+Round 125 parses the **Segment Type Box** (`styp`) — ISO/IEC 14496-12
+§8.16.2 — at file scope. The box has the same on-disk shape as `ftyp`
+(`major_brand[4]` + `minor_version[4]` + `compatible_brands[4]*`),
+distinguished by the box-type FourCC alone, and identifies a DASH /
+CMAF / HLS-fMP4 media segment plus the specifications it conforms to
+(§8.16.2.1: "If segments are stored in separate files … it is
+recommended that these 'segment files' contain a segment-type box, …
+to enable identification of those files, and declaration of the
+specifications with which they are compliant"). `Quantity: Zero or
+more`; the spec says any `styp` not first in its file "may be
+ignored", but we collect every one in file order so a caller
+inspecting a concatenated segment stream can see every
+segment-boundary marker. Surfaces on the demuxer via
+`MovDemuxer::styp: Vec<Styp>` (file order) plus three convenience
+accessors: `first_styp()` (the §8.16.2.1 conformance declaration),
+`is_dash_segment()` (true when the first `styp`'s brand list includes
+any of `msdh` / `msix` / `risx`), and `is_cmaf_segment()` (true when
+it includes `cmfs`). Each [`Styp`] exposes `major_brand` /
+`minor_version` / `compatible_brands` plus a `has_brand(&[u8; 4])`
+predicate, a `to_ftyp()` conversion that re-uses the [`Ftyp`]
+brand-class machinery, and a `major_brand_class()` shortcut into
+[`BrandClass`]. Payloads shorter than the 8-byte fixed header or
+whose `compatible_brands` tail is not 4-aligned are rejected at open
+time; an empty compatible-brands list is legal (a bare
+`[major][minor]` body is a valid segment-type box). QTFF doesn't
+define this box; it is ISO BMFF-only and stays absent for plain
+`.mov` inputs.
+
 Round 122 wires the **Track Kind box** (`kind`) — ISO/IEC 14496-12
 §8.10.4 (p. 74) — into the per-track parse. `kind` lives inside the
 track-level `udta` (`moov/trak/udta/kind`) and labels the track with a
