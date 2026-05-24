@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 122 — Track Kind box (`kind`) parser, ISO/IEC 14496-12 §8.10.4.
+  - `parse_kind(payload) -> Result<KindEntry>` in the new `kind`
+    module. Layout per §8.10.4.2: FullBox header (`version = 0`,
+    `flags = 0`) followed by two NULL-terminated C strings —
+    `schemeURI` and `value`. Unknown `version` (> 0) is rejected at
+    open time; non-zero `flags` are accepted and ignored (consistent
+    with how `parse_tsel` treats the §8.10.3.3 fixed-zero flags).
+  - `KindEntry { scheme_uri: String, value: Option<String> }` —
+    `value` surfaces as `None` when the box carries only a schemeURI
+    (on-disk shape `[uri]\0\0`, the spec's §8.10.4.3 "URI identifies
+    the kind itself" shape). A missing trailing NULL on either string
+    is tolerated (the field runs to end-of-slice). UTF-8 decoding is
+    best-effort via `String::from_utf8_lossy`, replacing malformed
+    sequences with U+FFFD rather than rejecting the box.
+  - `KindEntry::has_value()` — convenience predicate for "Some and
+    non-empty", letting callers distinguish "URI-only kind" from
+    "scheme + named value" in one call.
+  - `find_kinds_in_udta(udta_payload) -> Result<Vec<KindEntry>>`
+    collects every `kind` child of a track-level `udta` in file order.
+    Unlike `find_tsel_in_udta` (which is first-match because `tsel` is
+    `Quantity: Zero or one`), `kind` is `Quantity: Zero or more`
+    (§8.10.4.1) so a track may legitimately carry multiple `kind`
+    entries — one per role taxonomy (WebVTT, DASH, vendor-specific).
+  - `Track.kinds: Vec<KindEntry>` field, populated by the per-`trak`
+    walker. The `udta` body is re-walked for both `tsel` and `kind`
+    in the same pass so the typed surfaces stay aligned with
+    `Track.user_data` (which keeps the raw flat list for forensics).
+  - `Track::track_kinds() -> &[KindEntry]` and
+    `MovDemuxer::track_kinds(track_index) -> &[KindEntry]` accessors;
+    the latter returns an empty slice for out-of-range indices and for
+    `.mov` inputs (QTFF defines no `kind` equivalent — the box is ISO
+    BMFF-only).
+  - Six synthetic-fixture integration tests
+    (`tests/synth_round122_track_kind.rs`): DASH role round-trip,
+    WebVTT role round-trip, scheme-only / no-value, multi-entry
+    file-order preservation, absence-from-udta yields empty slice,
+    out-of-range index yields empty slice. Plus 14 unit tests on the
+    parser covering version-rejection, truncated header, UTF-8
+    fallback, NULL-terminator edge cases, and the udta-walker
+    error-propagation contract.
+
 - Round 118 — Sub-Sample Information Box (`subs`) parser, ISO/IEC
   14496-12 §8.7.7.
   - `parse_subs(payload) -> Result<Vec<SubSampleInfo>>` in the

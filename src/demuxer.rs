@@ -1175,6 +1175,21 @@ impl MovDemuxer {
         self.tracks.get(track_index)?.track_selection()
     }
 
+    /// Track Kind entries (ISO/IEC 14496-12 §8.10.4) for `track_index`,
+    /// when the track's `udta` carries one or more `kind` children. The
+    /// box is `Quantity: Zero or more` (§8.10.4.1) — the returned slice
+    /// is in file order, and is empty when the track declares no kind.
+    /// Each entry surfaces a `(schemeURI, value?)` pair (typically a
+    /// WebVTT or DASH role tag for subtitle / caption / metadata
+    /// tracks). QTFF does not define this box; for `.mov` inputs it is
+    /// always empty.
+    pub fn track_kinds(&self, track_index: usize) -> &[crate::kind::KindEntry] {
+        self.tracks
+            .get(track_index)
+            .map(|t| t.track_kinds())
+            .unwrap_or(&[])
+    }
+
     /// Group the file's tracks by ISO/IEC 14496-12 §8.10.3
     /// `switch_group`. Returns `Vec<(switch_group_id, Vec<track_index>)>`
     /// sorted ascending by switch-group id. Tracks without a `tsel`
@@ -2078,6 +2093,10 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
                 // rather than leaving the raw bytes inside the flat
                 // user_data list.
                 track.track_selection = crate::track_selection::find_tsel_in_udta(&body)?;
+                // ISO/IEC 14496-12 §8.10.4 — `kind` (Track Kind) lives
+                // inside the same track-level udta, `Quantity: Zero or
+                // more`. Collect every entry as a typed surface.
+                track.kinds = crate::kind::find_kinds_in_udta(&body)?;
             }
             _ => {}
         }

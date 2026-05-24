@@ -282,6 +282,28 @@ AND tracks with `switch_group == 0` are excluded — both equivalent to
 `alternate_groups()` surface to expose the full alternate ⊇ switch
 hierarchy. QTFF doesn't define this box; it is ISO BMFF-only.
 
+Round 122 wires the **Track Kind box** (`kind`) — ISO/IEC 14496-12
+§8.10.4 (p. 74) — into the per-track parse. `kind` lives inside the
+track-level `udta` (`moov/trak/udta/kind`) and labels the track with a
+semantic role expressed as a `(schemeURI, value?)` pair of
+NULL-terminated C strings per §8.10.4.3. The box is `Quantity: Zero or
+more` (§8.10.4.1), so a track may carry several `kind` entries — one
+per role taxonomy. Each [`KindEntry`] exposes `scheme_uri` (e.g.
+`urn:mpeg:dash:role:2011` or `https://www.w3.org/TR/webvtt1/`) and an
+optional `value` (`None` when the box's on-disk shape is `[uri]\0\0`,
+the §8.10.4.3 "URI identifies the kind itself" form) plus a
+`has_value()` predicate. Both strings decode UTF-8 best-effort
+(`String::from_utf8_lossy` — malformed bytes become U+FFFD rather than
+rejecting the box); a missing trailing NULL on either string is
+tolerated (the field runs to end-of-slice). Unknown version (> 0) is
+rejected at open time. Surfaces on the demuxer via
+`MovDemuxer::track_kinds(track_index) -> &[KindEntry]` and on the
+track via `Track::track_kinds()`; both return an empty slice when the
+track declares no `kind`. The `udta` body is re-walked once for both
+`tsel` and `kind` so the typed surfaces stay aligned with the raw flat
+[`crate::user_data`] list. QTFF doesn't define this box; it is ISO
+BMFF-only and stays absent for plain `.mov` inputs.
+
 Round 21 adds **fragmented-MP4 seek** via the ISO/IEC 14496-12
 §8.8.10 `tfra` (Track Fragment Random Access Box) at open time. The
 demuxer walks `mfra/tfra/mfro` once and `seek_to` binary-searches

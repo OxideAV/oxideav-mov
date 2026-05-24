@@ -21,6 +21,7 @@ pub mod gmhd;
 pub mod header;
 pub mod heif_write;
 pub mod iprp;
+pub mod kind;
 pub mod media_meta;
 pub mod muxer;
 pub mod pdin;
@@ -81,6 +82,7 @@ pub use iprp::{
     ColrInfo, Imir, Irot, Ispe, ItemProperties, ItemProperty, ItemPropertyAssociation,
     LayerSelector, Mdcv, Pixi, PixiInfo, PropertyAssociation,
 };
+pub use kind::{find_kinds_in_udta, parse_kind, KindEntry};
 pub use media_meta::{
     channel_mask_for_layout_tag, Chan, ChanDescription, Clap, ColorParameters, ColorParametersKind,
     Cslg, MetaKeyValue, Pasp, Tapt,

@@ -12,6 +12,7 @@ use crate::bmff_meta::BmffMeta;
 use crate::edit::{media_pts_to_movie_pts, resolve_edit_segments, EditList, EditSegment};
 use crate::gmhd::Gmhd;
 use crate::header::{Hdlr, Mdhd, Tkhd};
+use crate::kind::KindEntry;
 use crate::media_meta::{
     parse_chan, parse_clap, parse_colr, parse_pasp, Chan, Clap, ColorParameters, Cslg,
     MetaKeyValue, Pasp, Tapt,
@@ -182,6 +183,12 @@ pub struct Track {
     /// present — equivalent to "no switching information declared"
     /// per §8.10.3.4. Round 95.
     pub track_selection: Option<TrackSelection>,
+    /// Parsed `kind` Track Kind entries (ISO/IEC 14496-12 §8.10.4) from
+    /// the track-level `udta`. Empty when no `kind` child is present.
+    /// §8.10.4.1 declares the box `Quantity: Zero or more`, so a track
+    /// may carry several `kind` entries simultaneously (different
+    /// taxonomies labelling the same track). Round 122.
+    pub kinds: Vec<KindEntry>,
     /// Samples appended by `moof/traf/trun` fragment runs (ISO/IEC
     /// 14496-12 §8.8). Empty for non-fragmented streams. Each
     /// entry already has its absolute file offset, DTS, duration,
@@ -341,6 +348,14 @@ impl Track {
     /// peer tracks at session start and during runtime switching.
     pub fn track_selection(&self) -> Option<&TrackSelection> {
         self.track_selection.as_ref()
+    }
+
+    /// Parsed `kind` Track Kind entries (ISO/IEC 14496-12 §8.10.4) from
+    /// the track-level `udta`. Empty slice when the track has no `kind`
+    /// child; the box is `Quantity: Zero or more` (§8.10.4.1) so a
+    /// caller may receive any number of entries, in file order.
+    pub fn track_kinds(&self) -> &[KindEntry] {
+        &self.kinds
     }
 
     /// Resolve the track's `edts/elst` edit list into the sequence of
