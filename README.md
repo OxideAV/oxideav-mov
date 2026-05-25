@@ -357,6 +357,24 @@ track declares no `kind`. The `udta` body is re-walked once for both
 [`crate::user_data`] list. QTFF doesn't define this box; it is ISO
 BMFF-only and stays absent for plain `.mov` inputs.
 
+Round 137 parses the **Color Table atom** (`ctab`) — QTFF p. 35 — at
+movie scope. The atom is an optional Apple-only leaf that lists a
+preferred 4-channel (reserved/red/green/blue) 16-bit palette of up to
+256 entries (the count field is *zero-relative*: on-disk `size` of
+`N` declares `N+1` entries per QTFF p. 35). The parser rejects the
+spec-fixed seed (`!= 0`) and flags (`!= 0x8000`) values, plus any
+body length that disagrees with the declared count. Each
+[`ColorTableEntry`] preserves the on-disk `reserved` word verbatim
+(some authoring tools stash a Mac Toolbox `ColorSpec.value` index
+there even though the spec fixes it at 0) and exposes an `rgb8()`
+helper that returns the high-byte 8-bit-per-channel triple from each
+16-bit channel. Surfaces on the demuxer via `MovDemuxer::ctab:
+Option<Ctab>` populated by the `moov` walker — at most one is kept
+per file with first-wins on the rare duplicate case (matching the
+`mvhd` / `pdin` conservative-merge convention). ISO BMFF does not
+define this atom; it is QuickTime-only and stays absent for MP4 /
+fMP4 / HEIF / AVIF inputs.
+
 Round 21 adds **fragmented-MP4 seek** via the ISO/IEC 14496-12
 §8.8.10 `tfra` (Track Fragment Random Access Box) at open time. The
 demuxer walks `mfra/tfra/mfro` once and `seek_to` binary-searches

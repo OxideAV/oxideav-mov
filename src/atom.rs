@@ -282,6 +282,12 @@ pub const META: [u8; 4] = fourcc("meta");
 pub const KEYS: [u8; 4] = fourcc("keys");
 pub const ILST: [u8; 4] = fourcc("ilst");
 
+/// Round 137 — Color Table atom (QTFF p. 35). Movie-level optional
+/// leaf atom carrying a Macintosh 16-bit-per-channel palette of up to
+/// 256 entries; QuickTime players use it when targeting indexed-color
+/// displays. ISO BMFF does not define this atom.
+pub const CTAB: [u8; 4] = fourcc("ctab");
+
 // Round-3: Reference-movie atoms (Apple QTFF "Reference Movies", p. 39+).
 pub const RMRA: [u8; 4] = fourcc("rmra"); // reference movie list (top of moov)
 pub const RMDA: [u8; 4] = fourcc("rmda"); // single reference movie descriptor

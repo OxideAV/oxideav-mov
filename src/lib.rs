@@ -13,6 +13,7 @@
 pub mod atom;
 pub mod bmff_meta;
 pub mod chapter;
+pub mod ctab;
 pub mod demuxer;
 pub mod derived;
 pub mod edit;
@@ -54,6 +55,7 @@ pub use chapter::{
     ChapterList, ColorRgba, FontTableEntry, HighlightColor, HighlightRange, StyleRecord,
     TextSampleStyles,
 };
+pub use ctab::{parse_ctab, ColorTableEntry, Ctab};
 pub use demuxer::{open_file_url, MovDemuxer, MAX_ALIAS_DEPTH};
 pub use derived::{
     build_grid_layout, build_overlay_layout, compute_post_transform_extent, image_layout_for,

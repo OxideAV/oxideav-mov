@@ -12,14 +12,15 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::atom::{
-    read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DINF, DREF,
-    EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MDAT, MDHD, MDIA, META, MFRA,
-    MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC,
-    SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS, STYP, SUBS,
-    TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
+    read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTAB, CTTS, DINF,
+    DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MDAT, MDHD, MDIA, META,
+    MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA,
+    RMVC, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS, STYP,
+    SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
+use crate::ctab::{parse_ctab, Ctab};
 use crate::edit::{parse_elst, EditList};
 use crate::fragment::{parse_mfra, parse_mvex, resolve_traf_samples, Mehd, Tfra, TrexDefaults};
 use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
@@ -112,6 +113,13 @@ pub struct MovDemuxer {
     /// diagnostic view of a concatenated segment stream don't lose
     /// information. Empty for QTFF and for non-segmented MP4s.
     pub styp: Vec<Styp>,
+    /// Movie-level Color Table atom (QTFF p. 35), when the file's
+    /// `moov` carries an optional `ctab` declaring a preferred
+    /// indexed-color palette. Up to 256 4-channel (reserved/r/g/b)
+    /// 16-bit entries. `None` for any file that omits this Apple-only
+    /// atom (the typical case — ISO BMFF / fMP4 / HEIF / AVIF do not
+    /// define `ctab`).
+    pub ctab: Option<Ctab>,
     /// Top-level Producer Reference Time Boxes (ISO/IEC 14496-12
     /// §8.16.5), in file order. Each `prft` records the writer's UTC
     /// wall-clock instant (NTP format) at which the *next* movie
@@ -371,6 +379,10 @@ impl MovDemuxer {
         // travels alongside the media data. Collected in file order so a
         // caller can step through every producer marker.
         let mut file_prft: Vec<Prft> = Vec::new();
+        // QTFF p. 35 Color Table atom (`ctab`). Movie-level, optional,
+        // "at most one" by convention. Keeps the first when a writer
+        // emits duplicates.
+        let mut movie_ctab: Option<Ctab> = None;
         // Per-track running media-time cursor (DTS) for fragmented
         // playback. Indexed by track-id (not by track index); only
         // populated for tracks that actually receive `traf` runs.
@@ -465,6 +477,7 @@ impl MovDemuxer {
                         &mut movie_bmff_meta,
                         &mut mehd_box,
                         &mut trex_defaults,
+                        &mut movie_ctab,
                     )?;
                 }
                 t if t == &META => {
@@ -654,6 +667,7 @@ impl MovDemuxer {
             file_bmff_meta,
             faststart: seen_moov_before_mdat,
             pdin: file_pdin,
+            ctab: movie_ctab,
             sidx: file_sidx,
             styp: file_styp,
             prft: file_prft,
@@ -2035,6 +2049,7 @@ fn parse_moov<R: Read + Seek + ?Sized>(
     bmff_meta: &mut Option<BmffMeta>,
     mehd_out: &mut Option<Mehd>,
     trex_out: &mut Vec<TrexDefaults>,
+    ctab_out: &mut Option<Ctab>,
 ) -> Result<()> {
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
     walk_children(r, Some(body_end), |r, child| {
@@ -2062,6 +2077,18 @@ fn parse_moov<R: Read + Seek + ?Sized>(
             }
             t if t == &RMRA => {
                 *reference_movies = parse_rmra(r, child)?;
+            }
+            t if t == &CTAB => {
+                // QTFF p. 35 — at most one `ctab` per movie. Keep the
+                // first when a malformed writer emits duplicates; the
+                // spec does not define override semantics so first-wins
+                // matches the conservative-merge policy applied to
+                // other "at most once" movie-level atoms (mvhd, pdin).
+                let body = read_payload(r, child)?;
+                let parsed = parse_ctab(&body)?;
+                if ctab_out.is_none() {
+                    *ctab_out = Some(parsed);
+                }
             }
             t if t == &MVEX => {
                 // Movie-extends header (ISO/IEC 14496-12 §8.8.1) —

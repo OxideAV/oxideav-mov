@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 137 — Color Table atom (`ctab`) parser, QTFF p. 35.
+  - `parse_ctab(payload) -> Result<Ctab>` in the new `ctab` module.
+    Layout: `color_table_seed[4]` (must be 0) + `color_table_flags[2]`
+    (must be 0x8000) + `color_table_size[2]` (zero-relative count;
+    on-disk `N` ↔ `N+1` entries per QTFF p. 35) + N × 4-channel
+    `[reserved:2][r:2][g:2][b:2]` color array. Rejected at open time:
+    payload shorter than the 8-byte fixed header; non-zero
+    `color_table_seed`; `color_table_flags != 0x8000`; body length
+    that disagrees with the declared count (no padding, no trailing
+    bytes — the color array runs to end-of-atom).
+  - `Ctab { seed: u32, flags: u16, entries: Vec<ColorTableEntry> }`
+    surfaces every entry verbatim; `color_count()` returns the
+    typed entry count without the `u16 → u32` widening at the call
+    site. `ColorTableEntry { reserved, red, green, blue: u16 }`
+    preserves the on-disk `reserved` word (some authoring tools
+    stash a Mac Toolbox `ColorSpec.value` index there even though
+    QTFF fixes it at 0); `rgb8()` returns the high-byte 8-bit-per-
+    channel triple for callers that don't need full 16-bit fidelity.
+  - `MovDemuxer.ctab: Option<Ctab>` field, populated by the `moov`
+    walker. QTFF places `ctab` as a movie-level sibling of `mvhd`
+    and `trak`; at most one is kept per file with first-wins on the
+    rare duplicate case (matching the `mvhd` / `pdin` conservative-
+    merge convention).
+  - 9 unit tests (`ctab::tests::…`) cover single-entry
+    zero-relative-count corner, three-entry primary-RGB palette,
+    full 256-entry palette, non-zero reserved-word preservation, and
+    rejection of short payloads / non-zero seed / wrong flags /
+    truncated color array / trailing bytes.
+  - 6 integration tests (`synth_round137_ctab.rs`) exercise the
+    full demuxer-open surface against a hand-built QuickTime file
+    whose `moov` carries the `ctab` after the track: round-trips
+    each of the spec-exercised shapes through `MovDemuxer::open` and
+    confirms the absent / malformed / duplicate cases behave per
+    spec.
+  - QTFF / Apple-only atom — ISO BMFF does not define `ctab`; an
+    MP4 / fMP4 / HEIF / AVIF file will not carry one and the
+    demuxer's `ctab` field stays `None`.
+
 - Round 128 — Producer Reference Time Box (`prft`) parser, ISO/IEC
   14496-12 §8.16.5.
   - `parse_prft(payload) -> Result<Prft>` in the new `prft` module.
