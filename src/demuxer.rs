@@ -12,14 +12,15 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::atom::{
-    read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTAB, CTTS, DINF,
-    DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MDAT, MDHD, MDIA, META,
-    MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA,
-    RMVC, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS, STYP,
-    SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
+    read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CO64, CSLG, CTAB, CTTS,
+    DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MDAT, MDHD, MDIA,
+    META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU,
+    RMRA, RMVC, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS,
+    STYP, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
+use crate::clip::{parse_clip, Clipping};
 use crate::ctab::{parse_ctab, Ctab};
 use crate::edit::{parse_elst, EditList};
 use crate::fragment::{parse_mfra, parse_mvex, resolve_traf_samples, Mehd, Tfra, TrexDefaults};
@@ -120,6 +121,14 @@ pub struct MovDemuxer {
     /// atom (the typical case — ISO BMFF / fMP4 / HEIF / AVIF do not
     /// define `ctab`).
     pub ctab: Option<Ctab>,
+    /// Movie-level Clipping atom (QTFF p. 43), when the file's `moov`
+    /// carries an optional `clip` declaring a spatial mask for the
+    /// movie as a whole. The wrapper contains a single `crgn` child
+    /// (QTFF p. 44) whose QuickDraw region surfaces here. `None` for
+    /// any file that omits this Apple-only atom (ISO BMFF does not
+    /// define `clip`); per-track clipping (when present) surfaces
+    /// through [`Track::clipping`] instead.
+    pub clipping: Option<Clipping>,
     /// Top-level Producer Reference Time Boxes (ISO/IEC 14496-12
     /// §8.16.5), in file order. Each `prft` records the writer's UTC
     /// wall-clock instant (NTP format) at which the *next* movie
@@ -383,6 +392,11 @@ impl MovDemuxer {
         // "at most one" by convention. Keeps the first when a writer
         // emits duplicates.
         let mut movie_ctab: Option<Ctab> = None;
+        // QTFF p. 43 Clipping atom (`clip`). Movie-level, optional,
+        // "at most one" by convention (the spec figure shows a single
+        // `clip` slot in the movie atom layout). Keeps the first when
+        // a writer emits duplicates.
+        let mut movie_clipping: Option<Clipping> = None;
         // Per-track running media-time cursor (DTS) for fragmented
         // playback. Indexed by track-id (not by track index); only
         // populated for tracks that actually receive `traf` runs.
@@ -478,6 +492,7 @@ impl MovDemuxer {
                         &mut mehd_box,
                         &mut trex_defaults,
                         &mut movie_ctab,
+                        &mut movie_clipping,
                     )?;
                 }
                 t if t == &META => {
@@ -668,6 +683,7 @@ impl MovDemuxer {
             faststart: seen_moov_before_mdat,
             pdin: file_pdin,
             ctab: movie_ctab,
+            clipping: movie_clipping,
             sidx: file_sidx,
             styp: file_styp,
             prft: file_prft,
@@ -2050,6 +2066,7 @@ fn parse_moov<R: Read + Seek + ?Sized>(
     mehd_out: &mut Option<Mehd>,
     trex_out: &mut Vec<TrexDefaults>,
     ctab_out: &mut Option<Ctab>,
+    clipping_out: &mut Option<Clipping>,
 ) -> Result<()> {
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
     walk_children(r, Some(body_end), |r, child| {
@@ -2088,6 +2105,18 @@ fn parse_moov<R: Read + Seek + ?Sized>(
                 let parsed = parse_ctab(&body)?;
                 if ctab_out.is_none() {
                     *ctab_out = Some(parsed);
+                }
+            }
+            t if t == &CLIP => {
+                // QTFF p. 43 — movie-level Clipping atom; single
+                // `crgn` child (QTFF p. 44). The spec figure shows
+                // one per movie; first-wins on the rare duplicate
+                // case (same conservative-merge policy as mvhd /
+                // pdin / ctab).
+                let body = read_payload(r, child)?;
+                let parsed = parse_clip(&body)?;
+                if clipping_out.is_none() {
+                    *clipping_out = Some(parsed);
                 }
             }
             t if t == &MVEX => {
@@ -2191,6 +2220,18 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
             }
             t if t == &TAPT => {
                 track.tapt = Some(parse_tapt(r, child)?);
+            }
+            t if t == &CLIP => {
+                // QTFF p. 43 — track-level Clipping atom; single
+                // `crgn` child (QTFF p. 44). Spec figure shows one
+                // per track; first-wins on the rare duplicate case
+                // (matches tapt / load / cslg conservative-merge
+                // policy at this scope).
+                let body = read_payload(r, child)?;
+                let parsed = parse_clip(&body)?;
+                if track.clipping.is_none() {
+                    track.clipping = Some(parsed);
+                }
             }
             t if t == &LOAD => {
                 let body = read_payload(r, child)?;

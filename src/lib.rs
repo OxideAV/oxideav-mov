@@ -13,6 +13,7 @@
 pub mod atom;
 pub mod bmff_meta;
 pub mod chapter;
+pub mod clip;
 pub mod ctab;
 pub mod demuxer;
 pub mod derived;
@@ -55,6 +56,7 @@ pub use chapter::{
     ChapterList, ColorRgba, FontTableEntry, HighlightColor, HighlightRange, StyleRecord,
     TextSampleStyles,
 };
+pub use clip::{parse_clip, parse_crgn, Clipping, ClippingRegion, QdRect};
 pub use ctab::{parse_ctab, ColorTableEntry, Ctab};
 pub use demuxer::{open_file_url, MovDemuxer, MAX_ALIAS_DEPTH};
 pub use derived::{

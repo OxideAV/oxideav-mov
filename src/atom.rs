@@ -288,6 +288,15 @@ pub const ILST: [u8; 4] = fourcc("ilst");
 /// displays. ISO BMFF does not define this atom.
 pub const CTAB: [u8; 4] = fourcc("ctab");
 
+/// Round 140 — Clipping atom (QTFF p. 43) and its single Clipping
+/// Region child (QTFF p. 44). `clip` is the wrapper container that may
+/// appear at either movie level (`moov/clip`) or track level
+/// (`moov/trak/clip`); `crgn` is the leaf inside it carrying the
+/// QuickDraw region (size + bounding-box rect + opaque scanline tail).
+/// ISO BMFF does not define either atom.
+pub const CLIP: [u8; 4] = fourcc("clip");
+pub const CRGN: [u8; 4] = fourcc("crgn");
+
 // Round-3: Reference-movie atoms (Apple QTFF "Reference Movies", p. 39+).
 pub const RMRA: [u8; 4] = fourcc("rmra"); // reference movie list (top of moov)
 pub const RMDA: [u8; 4] = fourcc("rmda"); // single reference movie descriptor

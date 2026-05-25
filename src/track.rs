@@ -9,6 +9,7 @@
 //! [`SampleDescription::extra`] for downstream codec crates.
 
 use crate::bmff_meta::BmffMeta;
+use crate::clip::Clipping;
 use crate::edit::{media_pts_to_movie_pts, resolve_edit_segments, EditList, EditSegment};
 use crate::gmhd::Gmhd;
 use crate::header::{Hdlr, Mdhd, Tkhd};
@@ -189,6 +190,14 @@ pub struct Track {
     /// may carry several `kind` entries simultaneously (different
     /// taxonomies labelling the same track). Round 122.
     pub kinds: Vec<KindEntry>,
+    /// Parsed track-level Clipping atom (QTFF p. 43), when the track's
+    /// `trak` carries an optional `clip` declaring a spatial mask
+    /// scoped to this individual track (independent of the movie-level
+    /// [`crate::MovDemuxer::clipping`]). The wrapper contains a single
+    /// `crgn` child whose QuickDraw region surfaces here. `None` for
+    /// any track that omits this Apple-only atom (ISO BMFF does not
+    /// define `clip`). Round 140.
+    pub clipping: Option<Clipping>,
     /// Samples appended by `moof/traf/trun` fragment runs (ISO/IEC
     /// 14496-12 §8.8). Empty for non-fragmented streams. Each
     /// entry already has its absolute file offset, DTS, duration,

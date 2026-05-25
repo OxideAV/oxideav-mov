@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 140 — Clipping atom (`clip`) + Clipping Region atom (`crgn`)
+  parsers, QTFF p. 43 / p. 44.
+  - `parse_crgn(payload) -> Result<ClippingRegion>` in the new `clip`
+    module. Layout per QTFF p. 44: `region_size[2]` (u16 BE; counts
+    itself plus the 8-byte bounding box, so minimum legal value is 10)
+    + `bounding_box[8]` (QuickDraw `Rect` — four 16-bit BE signed
+    integers in top/left/bottom/right order) + optional
+    `region_size - 10`-byte opaque QuickDraw scanline tail. Rejected:
+    payload < 10 bytes; `region_size < 10`; `region_size` overshoots
+    payload length; trailing bytes past the declared `region_size`.
+  - `parse_clip(payload) -> Result<Clipping>` walks the `clip`
+    wrapper's children, picking the single spec-defined `crgn` child
+    per QTFF p. 43 Figure 2-8. Tolerates unknown sibling atoms
+    (forward-compat); rejects a `clip` body with no `crgn` child;
+    first-wins on duplicate `crgn` children (matches the conservative-
+    merge policy applied to `mvhd` / `pdin` / `ctab` elsewhere).
+  - `Clipping { region: ClippingRegion }`,
+    `ClippingRegion { region_size: u16, bounding_box: QdRect,
+    region_data: Vec<u8> }`, and `QdRect { top, left, bottom, right:
+    i16 }` typed surfaces. `QdRect::width()` / `height()` return
+    `i32` to avoid sign-bit overflow on a rect spanning the full i16
+    range; `is_empty()` follows the QuickDraw zero-or-negative-extent
+    convention. `ClippingRegion::is_rectangular()` is true for the
+    minimum legal region (no scanline data).
+  - `MovDemuxer.clipping: Option<Clipping>` field, populated by the
+    `moov` walker. QTFF places `clip` as a movie-level sibling of
+    `mvhd` / `trak` / `udta` / `ctab`; at most one is kept per file
+    with first-wins on duplicates.
+  - `Track.clipping: Option<Clipping>` field, populated by `parse_trak`
+    from the optional `moov/trak/clip` child. Track-level clipping is
+    independent of movie-level clipping (both, either, or neither
+    surface populated for any given file).
+  - 14 unit tests (`clip::tests::…`) cover rectangular-region round-
+    trip, scanline-tail preservation, signed-origin Rect decoding,
+    empty-rect bounding box, the wrapper's single-`crgn` shape,
+    duplicate-`crgn` first-wins, forward-compat unknown-sibling
+    tolerance, missing-`crgn` rejection, inner parse-error
+    propagation, `size == 0` trailing-child handling, and rejection
+    of short payloads / `region_size < 10` / `region_size` overshoot
+    / trailing-bytes corruption.
+  - 7 integration tests (`synth_round140_clip.rs`) exercise the full
+    demuxer-open surface against hand-built QuickTime files whose
+    `moov` and `moov/trak` carry a `clip` at movie scope, track
+    scope, both scopes, with a scanline tail, absent at both scopes,
+    duplicated at movie scope (first-wins), and malformed (rejected
+    at open time).
+  - QTFF / Apple-only atom — ISO BMFF does not define `clip` or
+    `crgn`; an MP4 / fMP4 / HEIF / AVIF file will not carry either
+    and both demuxer fields stay `None`.
+
 - Round 137 — Color Table atom (`ctab`) parser, QTFF p. 35.
   - `parse_ctab(payload) -> Result<Ctab>` in the new `ctab` module.
     Layout: `color_table_seed[4]` (must be 0) + `color_table_flags[2]`

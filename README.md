@@ -357,6 +357,26 @@ track declares no `kind`. The `udta` body is re-walked once for both
 [`crate::user_data`] list. QTFF doesn't define this box; it is ISO
 BMFF-only and stays absent for plain `.mov` inputs.
 
+Round 140 parses the **Clipping atom** (`clip`) and its sole defined
+child the **Clipping Region atom** (`crgn`) — QTFF p. 43 / p. 44 —
+at both movie scope (`moov/clip`) and per-track scope
+(`moov/trak/clip`). The wrapper `clip` is a single-child container
+whose body the parser scans for one `crgn`; the region itself is a
+QuickDraw `Region` with a 16-bit byte-length count (`region_size`,
+inclusive of itself + the bounding box, minimum `10`), an 8-byte
+QuickDraw `Rect` bounding box (four 16-bit signed integers in
+top/left/bottom/right order), and an optional opaque scanline tail
+of `region_size - 10` bytes preserved verbatim for callers that want
+a round-trip surface (QTFF doesn't document the scanline format).
+Surfaces on the demuxer via `MovDemuxer::clipping: Option<Clipping>`
+(movie scope) and `Track::clipping: Option<Clipping>` (track scope);
+both follow the first-wins duplicate-merge policy shared with
+`mvhd` / `pdin` / `ctab`. `QdRect::{width, height, is_empty}`
+helpers expose the rect's derived shape (widths returned as `i32`
+to absorb sign-bit overflow across the i16 range). ISO BMFF does
+not define `clip` or `crgn`; an MP4 / fMP4 / HEIF / AVIF file will
+not carry either and both fields stay `None`.
+
 Round 137 parses the **Color Table atom** (`ctab`) — QTFF p. 35 — at
 movie scope. The atom is an optional Apple-only leaf that lists a
 preferred 4-channel (reserved/red/green/blue) 16-bit palette of up to
