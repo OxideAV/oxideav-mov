@@ -14,9 +14,9 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CO64, CSLG, CTTS, DINF, DREF,
     EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MDAT, MDHD, MDIA, META, MFRA,
-    MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SBGP,
-    SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS, STYP, SUBS, TAPT,
-    TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
+    MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC,
+    SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS, STYP, SUBS,
+    TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -26,6 +26,7 @@ use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
 use crate::header::{parse_ftyp, parse_hdlr, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd};
 use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
 use crate::pdin::{parse_pdin, Pdin};
+use crate::prft::{parse_prft, Prft};
 use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
 use crate::sample_groups::{parse_sbgp, parse_sgpd};
 use crate::sample_table::{
@@ -111,6 +112,16 @@ pub struct MovDemuxer {
     /// diagnostic view of a concatenated segment stream don't lose
     /// information. Empty for QTFF and for non-segmented MP4s.
     pub styp: Vec<Styp>,
+    /// Top-level Producer Reference Time Boxes (ISO/IEC 14496-12
+    /// §8.16.5), in file order. Each `prft` records the writer's UTC
+    /// wall-clock instant (NTP format) at which the *next* movie
+    /// fragment in bitstream order was produced (§8.16.5.1), paired with
+    /// the corresponding media time on a reference track. `Quantity:
+    /// Zero or more` — live DASH-LL / CMAF / HLS-fMP4 encoders emit one
+    /// `prft` per fragment so consumers can derive producer-consumer
+    /// rate alignment. Empty for QTFF, for non-segmented MP4s, and for
+    /// non-live segmented streams.
+    pub prft: Vec<Prft>,
     /// Pre-flattened sample queue, sorted by file offset for friendly
     /// I/O patterns. Each entry is `(stream_index, sample)`.
     samples: Vec<(u32, SampleEntry)>,
@@ -354,6 +365,12 @@ impl MovDemuxer {
         // QTFF doesn't define this box; it stays empty for `.mov`
         // inputs and non-segmented MP4s.
         let mut file_styp: Vec<Styp> = Vec::new();
+        // ISO/IEC 14496-12 §8.16.5 Producer Reference Time Boxes
+        // (`prft`). File-level, "Zero or more"; live encoders emit one
+        // before each `moof` so the wall-clock-to-media-time pairing
+        // travels alongside the media data. Collected in file order so a
+        // caller can step through every producer marker.
+        let mut file_prft: Vec<Prft> = Vec::new();
         // Per-track running media-time cursor (DTS) for fragmented
         // playback. Indexed by track-id (not by track index); only
         // populated for tracks that actually receive `traf` runs.
@@ -421,6 +438,16 @@ impl MovDemuxer {
                     // segment stream for boundary markers.
                     let payload = read_payload(input.as_mut(), &hdr)?;
                     file_styp.push(parse_styp(&payload)?);
+                }
+                t if t == &PRFT => {
+                    // ISO/IEC 14496-12 §8.16.5 — Producer Reference
+                    // Time Box. File-level, "Zero or more". The box
+                    // refers forward to the next `moof` in bitstream
+                    // order (§8.16.5.1), so we preserve every one in
+                    // file order — a live segment may carry several,
+                    // one per movie fragment it ships.
+                    let payload = read_payload(input.as_mut(), &hdr)?;
+                    file_prft.push(parse_prft(&payload)?);
                 }
                 t if t == &MOOV => {
                     if !seen_mdat {
@@ -629,6 +656,7 @@ impl MovDemuxer {
             pdin: file_pdin,
             sidx: file_sidx,
             styp: file_styp,
+            prft: file_prft,
             samples,
             next: 0,
             trex_defaults,
@@ -721,6 +749,17 @@ impl MovDemuxer {
         self.first_styp()
             .map(|s| s.is_cmaf_segment())
             .unwrap_or(false)
+    }
+
+    /// The first Producer Reference Time Box (`prft`) in the file, when
+    /// present. ISO/IEC 14496-12 §8.16.5.1 ties every `prft` to the
+    /// *next* movie fragment in bitstream order, so the first one
+    /// describes the file's earliest fragment — typically the most
+    /// useful single producer time for a live-stream catch-up
+    /// computation. Returns `None` for QTFF, non-segmented MP4s, and
+    /// non-live segmented streams that omit `prft`.
+    pub fn first_prft(&self) -> Option<&Prft> {
+        self.prft.first()
     }
 
     // Stub used by `open()` to validate the container before we

@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 128 — Producer Reference Time Box (`prft`) parser, ISO/IEC
+  14496-12 §8.16.5.
+  - `parse_prft(payload) -> Result<Prft>` in the new `prft` module.
+    Layout per §8.16.5.2: FullBox header + `reference_track_ID[4]` +
+    `ntp_timestamp[8]` + `media_time` (4 bytes under v0, 8 bytes under
+    v1). Rejected: payload < 4-byte FullBox header; `version > 1`
+    (§8.16.5.2 defines only v0 and v1); payload length not exactly
+    `16` (v0) or `20` (v1) — the box has no list and no variable
+    section, so any trailing bytes indicate corruption or an
+    unparseable writer extension.
+  - `Prft { version, reference_track_id: u32, ntp_timestamp: u64,
+    media_time: u64 }` widens both `media_time` widths to `u64` and
+    keeps the on-disk fields verbatim. Helpers: `ntp_seconds()` and
+    `ntp_fraction()` decompose the NTP word into the RFC 5905 §6
+    integer-seconds / fractional-seconds halves; `unix_micros()`
+    converts to a microsecond Unix-epoch instant via the
+    2 208 988 800 s NTP→Unix offset (constant
+    `NTP_TO_UNIX_EPOCH_SECONDS`), returning `None` for pre-1970 NTP
+    values.
+  - `MovDemuxer.prft: Vec<Prft>` field, populated by the top-level
+    walker. `Quantity: Zero or more` (§8.16.5.1); collected in file
+    order so a caller stepping through a live segment stream sees every
+    producer marker alongside its `moof`.
+  - `MovDemuxer::first_prft() -> Option<&Prft>` surfaces the file's
+    earliest producer time, which per §8.16.5.1 corresponds to the
+    file's first movie fragment — the typical "catch up to live"
+    anchor.
+  - 11 unit tests (`prft::tests::…`) cover v0 / v1 round-trips, the NTP
+    fraction → microseconds reduction, the pre-1970 `unix_micros`
+    return, and the reject paths (unknown version, truncated header,
+    truncated v0 / v1 body, trailing bytes, v0-extra-byte, plus a
+    flags-nonzero tolerance check). 7 integration tests
+    (`tests/synth_round128_prft.rs`) verify the full open-time path
+    against synthetic ISO BMFF fixtures: single v0 / v1 boxes,
+    multi-box file-order preservation, the empty-list / `first_prft()
+    == None` case, and three reject paths (truncated, unknown version,
+    trailing bytes).
+
 - Round 125 — Segment Type Box (`styp`) parser, ISO/IEC 14496-12 §8.16.2.
   - `parse_styp(payload) -> Result<Styp>` in the new `styp` module.
     Layout per §8.16.2 (identical to §4.3 `ftyp` with the box-type

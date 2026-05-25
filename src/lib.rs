@@ -25,6 +25,7 @@ pub mod kind;
 pub mod media_meta;
 pub mod muxer;
 pub mod pdin;
+pub mod prft;
 pub mod reference;
 pub mod render;
 pub mod sample_groups;
@@ -90,6 +91,7 @@ pub use media_meta::{
 };
 pub use muxer::{FragmentationMode, MovMuxer, MuxSample, MuxTrackKind};
 pub use pdin::{parse_pdin, Pdin, PdinEntry};
+pub use prft::{parse_prft, Prft, NTP_TO_UNIX_EPOCH_SECONDS};
 pub use reference::{parse_dref, DataReference, ReferenceMovie};
 pub use render::{ispe_dimensions, render_grid, render_iden, render_iovl, Rgba8Canvas};
 pub use sample_groups::{

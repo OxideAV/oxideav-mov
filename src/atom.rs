@@ -315,6 +315,14 @@ pub const SIDX: [u8; 4] = fourcc("sidx");
 // (§8.16.2.1).
 pub const STYP: [u8; 4] = fourcc("styp");
 
+// Round-128: Producer Reference Time Box (ISO/IEC 14496-12 §8.16.5).
+// File-level FullBox that records the writer's UTC wall-clock instant
+// (NTP format, RFC 5905) at which the next movie fragment was produced,
+// paired with the corresponding media time on a reference track. Used by
+// live DASH-LL / CMAF / HLS-fMP4 encoders so consumers can keep
+// production and consumption rates aligned over long sessions.
+pub const PRFT: [u8; 4] = fourcc("prft");
+
 // Round-3: Composition-shift-least-greatest atom.
 pub const CSLG: [u8; 4] = fourcc("cslg");
 

@@ -282,6 +282,31 @@ AND tracks with `switch_group == 0` are excluded — both equivalent to
 `alternate_groups()` surface to expose the full alternate ⊇ switch
 hierarchy. QTFF doesn't define this box; it is ISO BMFF-only.
 
+Round 128 parses the **Producer Reference Time Box** (`prft`) — ISO/IEC
+14496-12 §8.16.5 — at file scope. The FullBox (`version` 0 or 1)
+records the writer's UTC wall-clock instant in NTP format (RFC 5905 §6)
+at which the *next* movie fragment box in bitstream order was produced
+(§8.16.5.1), paired with a media time on a reference track that
+corresponds to the same instant. Live encoders (DASH-LL / CMAF /
+HLS-fMP4) emit one before each `moof` so a paired live decoder can
+recover the producer-consumer rate skew and bound drift over long
+sessions. Layout: `reference_track_ID[4]` + `ntp_timestamp[8]` +
+`media_time[4|8]` (32-bit under v0, 64-bit under v1; both widened to
+`u64` in [`Prft`]). Surfaces on the demuxer via
+`MovDemuxer::prft: Vec<Prft>` (file order — `Quantity: Zero or more`
+per §8.16.5.1) plus `MovDemuxer::first_prft()` for the §8.16.5.1
+typical "earliest producer time = the file's first fragment" shortcut.
+Convenience accessors on [`Prft`]: `ntp_seconds()` / `ntp_fraction()`
+decompose the NTP word into its RFC 5905 §6 halves, and
+`unix_micros()` converts to a microsecond Unix-epoch instant via the
+2 208 988 800 s NTP→Unix offset (returning `None` for any pre-1970
+NTP value). Rejected at open time: unknown `version` (> 1), a payload
+shorter than the fixed-width record for the declared version, and any
+trailing bytes past that record (`prft` carries no list — extra bytes
+indicate corruption or an unparseable writer extension). QTFF doesn't
+define this box; it is ISO BMFF-only and stays empty for plain `.mov`
+inputs.
+
 Round 125 parses the **Segment Type Box** (`styp`) — ISO/IEC 14496-12
 §8.16.2 — at file scope. The box has the same on-disk shape as `ftyp`
 (`major_brand[4]` + `minor_version[4]` + `compatible_brands[4]*`),
