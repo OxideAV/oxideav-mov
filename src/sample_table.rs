@@ -305,6 +305,19 @@ pub struct SampleTable {
     /// than one `subs` box (distinguished by `flags`, §8.7.7.1); rows
     /// from every box are merged and kept in ascending sample order.
     pub subs: Vec<SubSampleInfo>,
+    /// `saiz` Sample Auxiliary Information Sizes Boxes (ISO/IEC
+    /// 14496-12 §8.7.8). Empty when the track carries no `saiz` box.
+    /// At most one box per `(aux_info_type, aux_info_type_parameter)`
+    /// pair per §8.7.8.3; the demuxer drops duplicates silently (first
+    /// wins). Each entry is paired by discriminator with a matching
+    /// `saio` in [`Self::saio`] when both are present.
+    pub saiz: Vec<crate::sample_aux::Saiz>,
+    /// `saio` Sample Auxiliary Information Offsets Boxes (ISO/IEC
+    /// 14496-12 §8.7.9). Empty when the track carries no `saio` box.
+    /// At most one box per `(aux_info_type, aux_info_type_parameter)`
+    /// pair per §8.7.9.3; the demuxer drops duplicates silently (first
+    /// wins).
+    pub saio: Vec<crate::sample_aux::Saio>,
 }
 
 /// One entry in the iterator output: enough to read the sample bytes
@@ -386,6 +399,40 @@ impl SampleTable {
             .binary_search_by(|r| r.sample_number.cmp(&sample_number))
             .ok()
             .map(|i| self.subs[i].subsamples.as_slice())
+    }
+
+    /// Look up the [`crate::sample_aux::Saiz`] /
+    /// [`crate::sample_aux::Saio`] pair identified by `(aux_info_type,
+    /// aux_info_type_parameter)`. Either side of the pair may be
+    /// absent — §8.7.8.1 requires a matching `saio` exist for every
+    /// `saiz`, but writers don't always emit both, so this returns
+    /// each independently.
+    ///
+    /// The match scheme honours §8.7.8.1's implicit-fallback rule:
+    /// boxes whose `flags & 1` bit is unset (no on-disk discriminator)
+    /// match an `aux_info_type` of `b"\0\0\0\0"` and
+    /// `aux_info_type_parameter == 0`. Callers should pre-resolve the
+    /// implicit discriminator (e.g. scheme_type for CENC-protected
+    /// content, sample-entry type otherwise) before calling here when
+    /// the box's discriminator was implicit.
+    pub fn sample_aux_for(
+        &self,
+        aux_info_type: &[u8; 4],
+        aux_info_type_parameter: u32,
+    ) -> (
+        Option<&crate::sample_aux::Saiz>,
+        Option<&crate::sample_aux::Saio>,
+    ) {
+        let want_zero = aux_info_type == &[0u8; 4] && aux_info_type_parameter == 0;
+        let saiz = self.saiz.iter().find(|s| match &s.aux_info_type {
+            Some(a) => a.matches(aux_info_type, aux_info_type_parameter),
+            None => want_zero,
+        });
+        let saio = self.saio.iter().find(|s| match &s.aux_info_type {
+            Some(a) => a.matches(aux_info_type, aux_info_type_parameter),
+            None => want_zero,
+        });
+        (saiz, saio)
     }
 
     /// Look up the [`SampleToGroup`] / [`SampleGroupDescription`] pair
@@ -1046,6 +1093,8 @@ mod tests {
             sdtp: vec![],
             stsh: vec![],
             subs: vec![],
+            saiz: vec![],
+            saio: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 1);
@@ -1120,6 +1169,8 @@ mod tests {
             sdtp: vec![],
             stsh: vec![],
             subs: vec![],
+            saiz: vec![],
+            saio: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 4);
@@ -1154,6 +1205,8 @@ mod tests {
             sdtp: vec![],
             stsh: vec![],
             subs: vec![],
+            saiz: vec![],
+            saio: vec![],
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 4);

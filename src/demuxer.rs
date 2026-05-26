@@ -15,8 +15,8 @@ use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CO64, CSLG, CTAB, CTTS,
     DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MATT, MDAT, MDHD,
     MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR,
-    RMQU, RMRA, RMVC, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ,
-    STTS, STYP, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
+    RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH,
+    STSS, STSZ, STTS, STYP, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -31,6 +31,7 @@ use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, Met
 use crate::pdin::{parse_pdin, Pdin};
 use crate::prft::{parse_prft, Prft};
 use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
+use crate::sample_aux::{parse_saio, parse_saiz};
 use crate::sample_groups::{parse_sbgp, parse_sgpd};
 use crate::sample_table::{
     parse_co64, parse_ctts, parse_sdtp, parse_stco, parse_stsc, parse_stsh, parse_stss, parse_stsz,
@@ -1537,6 +1538,44 @@ impl MovDemuxer {
             .sub_samples_for(sample_number)
     }
 
+    /// Look up the Sample Auxiliary Information `(saiz, saio)` pair
+    /// for `track_index` identified by the discriminator pair
+    /// `(aux_info_type, aux_info_type_parameter)`, per ISO/IEC
+    /// 14496-12 §8.7.8 / §8.7.9.
+    ///
+    /// Either side may be `None` (an `saiz` without a paired `saio`
+    /// is invalid per §8.7.8.1 but writers occasionally emit one and
+    /// not the other, so this returns them independently). Both
+    /// `None` when the track has no sample-aux information matching
+    /// the discriminator, or when the track index is out of range.
+    ///
+    /// Per §8.7.8.1 boxes whose `flags & 1` bit is unset (no on-disk
+    /// discriminator) match an `aux_info_type` of `b"\0\0\0\0"` and
+    /// `aux_info_type_parameter == 0` — callers should pre-resolve
+    /// the implicit discriminator (CENC `scheme_type` for protected
+    /// content, sample-entry FourCC otherwise) before calling here
+    /// when the box's discriminator was implicit.
+    ///
+    /// This surface targets the `stbl`-scope (non-fragmented) form
+    /// only. Fragmented streams whose `saiz` / `saio` live inside
+    /// `traf` are not yet exposed.
+    pub fn sample_aux_info(
+        &self,
+        track_index: usize,
+        aux_info_type: &[u8; 4],
+        aux_info_type_parameter: u32,
+    ) -> (
+        Option<&crate::sample_aux::Saiz>,
+        Option<&crate::sample_aux::Saio>,
+    ) {
+        match self.tracks.get(track_index) {
+            None => (None, None),
+            Some(t) => t
+                .sample_table
+                .sample_aux_for(aux_info_type, aux_info_type_parameter),
+        }
+    }
+
     /// Inner implementation of [`Demuxer::seek_to`]. Lives on the
     /// struct (not the trait impl) so it's reachable from the
     /// standalone (no-`registry`) build's tests too without needing
@@ -2646,6 +2685,35 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
                     .any(|s| s.grouping_type == sgpd.grouping_type)
                 {
                     table.sgpd.push(sgpd);
+                }
+            }
+            t if t == &SAIZ => {
+                // §8.7.8.3 — at most one `saiz` per (aux_info_type,
+                // aux_info_type_parameter) per containing box. First
+                // wins on duplicates (matches the conservative-merge
+                // policy applied to `sbgp` / `sgpd` above).
+                let body = read_payload(r, child)?;
+                let saiz = parse_saiz(&body)?;
+                if !table
+                    .saiz
+                    .iter()
+                    .any(|s| s.aux_info_type == saiz.aux_info_type)
+                {
+                    table.saiz.push(saiz);
+                }
+            }
+            t if t == &SAIO => {
+                // §8.7.9.3 — at most one `saio` per (aux_info_type,
+                // aux_info_type_parameter) per containing box. First
+                // wins on duplicates.
+                let body = read_payload(r, child)?;
+                let saio = parse_saio(&body)?;
+                if !table
+                    .saio
+                    .iter()
+                    .any(|s| s.aux_info_type == saio.aux_info_type)
+                {
+                    table.saio.push(saio);
                 }
             }
             _ => {}

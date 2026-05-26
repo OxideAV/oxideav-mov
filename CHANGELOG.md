@@ -9,6 +9,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 147 — Sample Auxiliary Information Sizes Box (`saiz`) +
+  Sample Auxiliary Information Offsets Box (`saio`) parsers at
+  `stbl` scope, ISO/IEC 14496-12 §8.7.8 / §8.7.9.
+  - `parse_saiz(payload) -> Result<Saiz>` in the new `sample_aux`
+    module. Layout per §8.7.8.2: `version[1]` (spec fixes at 0;
+    unknown rejected) + `flags[3]` (low bit gates the
+    discriminator pair; upper bits carried verbatim) + optional
+    `aux_info_type[4]` + `aux_info_type_parameter[4]` (present iff
+    `flags & 1`) + `default_sample_info_size[1]` + `sample_count[4]`
+    + optional `sample_info_size[sample_count]` (present iff
+    `default_sample_info_size == 0`). Rejected: payload < 4-byte
+    FullBox header; version != 0; flags & 1 set with the pair
+    absent; body shorter than the mandatory
+    `default+sample_count` (5 bytes); per-sample table truncated
+    below `sample_count`.
+  - `parse_saio(payload) -> Result<Saio>` in the same module.
+    Layout per §8.7.9.2: `version[1]` (spec defines v0 / v1) +
+    `flags[3]` + optional discriminator pair (same gating as
+    `saiz`) + `entry_count[4]` + offset table at the version's
+    width (4 bytes per offset for v0, 8 bytes for v1). Rejected:
+    payload < 4-byte FullBox header; version > 1; flags & 1 set
+    with the pair absent; body shorter than `entry_count`;
+    offset table truncated below the declared width × count;
+    trailing bytes past the offset table (no padding by spec).
+  - `Saiz { flags: u32, aux_info_type: Option<AuxInfoType>,
+    default_sample_info_size: u8, sample_count: u32,
+    sample_info_sizes: Vec<u8> }` with `size_for(sample_idx) ->
+    Option<u32>` (honouring §8.7.8.3's "samples past sample_count
+    have no auxiliary information" prefix rule) and `total_size()
+    -> u64` (saturating sum, useful for chunk-scope integrity
+    checks against `saio`'s offset chain).
+  - `Saio { version: u8, flags: u32, aux_info_type:
+    Option<AuxInfoType>, offsets: Vec<u64> }` with
+    `is_single_chunk()` (§8.7.9.3's "all contiguous from the first
+    offset" shortcut) and `offset_for(index) -> Option<u64>`.
+  - `AuxInfoType { aux_info_type: [u8; 4], aux_info_type_parameter:
+    u32 }` discriminator with `matches(&[u8; 4], u32) -> bool`.
+    Boxes whose `flags & 1` bit is unset carry `aux_info_type:
+    None`; §8.7.8.1's implicit-fallback rules (scheme_type for
+    CENC-protected content, sample-entry type otherwise) are
+    caller-side.
+  - `SampleTable.saiz: Vec<Saiz>` + `SampleTable.saio: Vec<Saio>`
+    fields, populated by `parse_stbl` from the new `saiz` / `saio`
+    child handlers. §8.7.8.3 / §8.7.9.3 forbid duplicates for the
+    same `(aux_info_type, aux_info_type_parameter)` pair within a
+    single `stbl`; the walker silently drops duplicates first-wins
+    (matches the `sbgp` / `sgpd` conservative-merge convention).
+  - `SampleTable::sample_aux_for(aux_info_type,
+    aux_info_type_parameter) -> (Option<&Saiz>, Option<&Saio>)`
+    accessor. Boxes without an on-disk discriminator match against
+    `(b"\0\0\0\0", 0)` via this surface, letting callers
+    pre-resolve the implicit fallback before lookup.
+  - `MovDemuxer::sample_aux_info(track, aux_info_type,
+    aux_info_type_parameter) -> (Option<&Saiz>, Option<&Saio>)`
+    public surface. Returns `(None, None)` for out-of-range tracks.
+  - `SAIZ` / `SAIO` FourCC constants in `atom` module.
+  - 14 in-module unit tests + 8 integration tests
+    (`synth_round147_sample_aux.rs`) covering default-size and
+    per-sample-size `saiz` round-trip through the full `stbl`
+    walk, `saio` v0 and v1 64-bit offsets, the implicit
+    discriminator matching `(b"\0\0\0\0", 0)`, multiple `(saiz,
+    saio)` pairs distinguished by discriminator, duplicate
+    first-wins on the same discriminator, malformed-box rejection
+    at open time, and the "no `saiz`/`saio`" baseline.
+  - `stbl`-scope only this round. The `traf`-scope form
+    (fragmented-MP4 / CMAF / DASH live, §8.8 with `saiz` / `saio`
+    inside `traf`) is deferred to a follow-up; the parser is
+    container-agnostic so wiring it into the `traf` walker is the
+    only remaining piece.
 - Round 144 — Track Matte atom (`matt`) + Compressed Matte atom (`kmat`)
   parsers, QTFF p. 44 / p. 45.
   - `parse_kmat(payload) -> Result<CompressedMatte>` in the new `matte`

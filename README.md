@@ -403,6 +403,55 @@ of its tracks'. ISO BMFF does not define either atom; an MP4 / fMP4
 / HEIF / AVIF file will not carry them and `Track::matte` stays
 `None`.
 
+Round 147 parses the **Sample Auxiliary Information Sizes Box**
+(`saiz`) and **Sample Auxiliary Information Offsets Box** (`saio`)
+— ISO/IEC 14496-12 §8.7.8 / §8.7.9 — at `stbl` scope. The pair
+carries per-sample auxiliary information stored *outside* the
+sample data itself (e.g. ISO/IEC 23001-7 Common Encryption
+sample-aux records, or any other writer-defined per-sample side
+channel); the format and meaning of that data is owned by a
+separate specification, so this crate decodes only the structural
+envelope and surfaces it for caller interpretation. `saiz`
+records the per-sample byte count (either a single
+`default_sample_info_size` for uniform-size streams or a
+per-sample `u8` table when `default_sample_info_size == 0`),
+plus the discriminator pair `(aux_info_type,
+aux_info_type_parameter)` when `flags & 1` is set. `saio` records
+the file offsets to those bytes — either one offset per chunk /
+track-fragment-run (matching the container's chunking) or a single
+offset for the whole `stbl`. `saio` has two versions: v0 carries
+32-bit offsets, v1 carries 64-bit. Surfaces on the demuxer via
+`MovDemuxer::sample_aux_info(track, aux_info_type,
+aux_info_type_parameter) -> (Option<&Saiz>, Option<&Saio>)` (the
+two sides may exist independently — §8.7.8.1 requires a matching
+`saio` for every `saiz` but writers sometimes emit only one) and
+on the sample table via `SampleTable::sample_aux_for(...)`. Each
+[`Saiz`] exposes `size_for(sample_idx) -> Option<u32>` (honouring
+the §8.7.8.3 prefix rule — samples past `sample_count` have no
+auxiliary information) and `total_size()` (saturating sum across
+the table); each [`Saio`] exposes `is_single_chunk()` (true when
+`entry_count == 1`, the §8.7.9.3 "all auxiliary information
+contiguous from this offset" shortcut) and `offset_for(index)`.
+Boxes without an on-disk discriminator (the `flags & 1` bit
+unset) match an `aux_info_type` of `b"\0\0\0\0"` and
+`aux_info_type_parameter == 0` via the accessor; the §8.7.8.1
+implicit-fallback rules (scheme type for CENC-protected content,
+sample-entry FourCC otherwise) are caller-side concerns. Rejected
+at open time: unknown `saiz` version (spec fixes at 0), unknown
+`saio` version (spec defines only v0 / v1), a body shorter than
+the FullBox header, the `flags & 1` bit set with the
+discriminator pair absent, a per-sample `saiz` size table
+truncated below `sample_count`, an `saio` offset table truncated
+below `entry_count × {4,8}`, and trailing bytes past the `saio`
+offset table. Duplicate boxes for the same `(aux_info_type,
+aux_info_type_parameter)` inside one `stbl` are silently merged
+first-wins (spec forbids them per §8.7.8.3 / §8.7.9.3, matching
+the `sbgp` / `sgpd` conservative-merge convention). This round
+covers the `stbl`-scope path only; the `traf`-scope form
+(fragmented-MP4 / CMAF / DASH live) is deferred. QTFF does not
+define either box; both are ISO BMFF-only and stay empty for plain
+`.mov` inputs.
+
 Round 137 parses the **Color Table atom** (`ctab`) — QTFF p. 35 — at
 movie scope. The atom is an optional Apple-only leaf that lists a
 preferred 4-channel (reserved/red/green/blue) 16-bit palette of up to
@@ -439,6 +488,13 @@ Decoding stays in codec crates; this crate calls
 
 ## Follow-ups
 
+- `saiz` / `saio` `traf`-scope wiring (ISO/IEC 14496-12 §8.8 + §8.7.8 /
+  §8.7.9): the round-147 parsers are container-agnostic but only the
+  `stbl`-scope path is exposed. Fragmented-MP4 / CMAF / DASH-live
+  streams that carry sample auxiliary information inside `traf` (e.g.
+  CENC's per-fragment sample-aux records) need `parse_traf` to also
+  collect the two boxes per fragment and a fragmented accessor on
+  `MovDemuxer` mirroring `sample_aux_info`.
 - A `next_packet`-side opt-in (`MovDemuxer::with_edit_list_pts()`?)
   that swaps the emitted `Packet::pts` from media-time to movie-time
   end-to-end, so consumers that don't want the explicit

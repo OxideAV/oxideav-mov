@@ -31,6 +31,7 @@ pub mod pdin;
 pub mod prft;
 pub mod reference;
 pub mod render;
+pub mod sample_aux;
 pub mod sample_groups;
 pub mod sample_table;
 pub mod sidx;
@@ -100,6 +101,7 @@ pub use pdin::{parse_pdin, Pdin, PdinEntry};
 pub use prft::{parse_prft, Prft, NTP_TO_UNIX_EPOCH_SECONDS};
 pub use reference::{parse_dref, DataReference, ReferenceMovie};
 pub use render::{ispe_dimensions, render_grid, render_iden, render_iovl, Rgba8Canvas};
+pub use sample_aux::{parse_saio, parse_saiz, AuxInfoType, Saio, Saiz};
 pub use sample_groups::{
     decode_prol, decode_rap, decode_roll, parse_sbgp, parse_sgpd, AudioPreRoll, RollRecovery,
     SampleGroupDescription, SampleGroupDescriptionEntry, SampleToGroup, SampleToGroupEntry,
