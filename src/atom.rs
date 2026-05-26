@@ -297,6 +297,16 @@ pub const CTAB: [u8; 4] = fourcc("ctab");
 pub const CLIP: [u8; 4] = fourcc("clip");
 pub const CRGN: [u8; 4] = fourcc("crgn");
 
+/// Round 144 — Track Matte atom (QTFF p. 44) and its single Compressed
+/// Matte child (QTFF p. 45). `matt` is the wrapper container that lives
+/// inside a `trak` atom (QTFF p. 41 Figure 2-6 places it alongside
+/// `tkhd` / `mdia` / `edts` / `tref` / `load` / `imap` / `clip` /
+/// `udta`); `kmat` is the leaf inside it carrying the FullBox header,
+/// image description structure and compressed matte data. ISO BMFF
+/// does not define either atom.
+pub const MATT: [u8; 4] = fourcc("matt");
+pub const KMAT: [u8; 4] = fourcc("kmat");
+
 // Round-3: Reference-movie atoms (Apple QTFF "Reference Movies", p. 39+).
 pub const RMRA: [u8; 4] = fourcc("rmra"); // reference movie list (top of moov)
 pub const RMDA: [u8; 4] = fourcc("rmda"); // single reference movie descriptor

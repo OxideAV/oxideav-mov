@@ -13,10 +13,10 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CO64, CSLG, CTAB, CTTS,
-    DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MDAT, MDHD, MDIA,
-    META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU,
-    RMRA, RMVC, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ, STTS,
-    STYP, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
+    DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MATT, MDAT, MDHD,
+    MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR,
+    RMQU, RMRA, RMVC, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH, STSS, STSZ,
+    STTS, STYP, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -26,6 +26,7 @@ use crate::edit::{parse_elst, EditList};
 use crate::fragment::{parse_mfra, parse_mvex, resolve_traf_samples, Mehd, Tfra, TrexDefaults};
 use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
 use crate::header::{parse_ftyp, parse_hdlr, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd};
+use crate::matte::parse_matt;
 use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
 use crate::pdin::{parse_pdin, Pdin};
 use crate::prft::{parse_prft, Prft};
@@ -2231,6 +2232,19 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
                 let parsed = parse_clip(&body)?;
                 if track.clipping.is_none() {
                     track.clipping = Some(parsed);
+                }
+            }
+            t if t == &MATT => {
+                // QTFF p. 44 — track-level Track Matte atom; single
+                // `kmat` child (QTFF p. 45). Spec figure shows one
+                // per track; first-wins on the rare duplicate case
+                // (matches clip / tapt / load / cslg conservative-merge
+                // policy at this scope). The atom is QuickTime-only;
+                // ISO BMFF does not define it.
+                let body = read_payload(r, child)?;
+                let parsed = parse_matt(&body)?;
+                if track.matte.is_none() {
+                    track.matte = Some(parsed);
                 }
             }
             t if t == &LOAD => {

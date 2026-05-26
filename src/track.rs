@@ -14,6 +14,7 @@ use crate::edit::{media_pts_to_movie_pts, resolve_edit_segments, EditList, EditS
 use crate::gmhd::Gmhd;
 use crate::header::{Hdlr, Mdhd, Tkhd};
 use crate::kind::KindEntry;
+use crate::matte::Matte;
 use crate::media_meta::{
     parse_chan, parse_clap, parse_colr, parse_pasp, Chan, Clap, ColorParameters, Cslg,
     MetaKeyValue, Pasp, Tapt,
@@ -198,6 +199,17 @@ pub struct Track {
     /// any track that omits this Apple-only atom (ISO BMFF does not
     /// define `clip`). Round 140.
     pub clipping: Option<Clipping>,
+    /// Parsed track-level Track Matte atom (QTFF p. 44), when the
+    /// track's `trak` carries an optional `matt` declaring a visual
+    /// blending mask scoped to this individual track. The wrapper
+    /// contains a single `kmat` Compressed Matte child (QTFF p. 45)
+    /// whose FullBox header, image description structure and
+    /// compressed matte data surface here. The matte is composited
+    /// against the track's video at presentation time; the spec does
+    /// not define a movie-level matte (a movie's matte is the union
+    /// of its tracks'). `None` for any track that omits this
+    /// Apple-only atom (ISO BMFF does not define `matt`). Round 144.
+    pub matte: Option<Matte>,
     /// Samples appended by `moof/traf/trun` fragment runs (ISO/IEC
     /// 14496-12 §8.8). Empty for non-fragmented streams. Each
     /// entry already has its absolute file offset, DTS, duration,

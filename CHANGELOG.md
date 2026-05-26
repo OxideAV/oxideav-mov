@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 144 — Track Matte atom (`matt`) + Compressed Matte atom (`kmat`)
+  parsers, QTFF p. 44 / p. 45.
+  - `parse_kmat(payload) -> Result<CompressedMatte>` in the new `matte`
+    module. Layout per QTFF p. 45: `version[1]` (spec fixes at 0;
+    unknown rejected) + `flags[3]` (spec "Set this field to 0";
+    non-zero rejected) + image description structure (carved using the
+    leading 4-byte size word per QTFF p. 70; minimum 16 bytes for
+    size + format FourCC + 6 reserved + dref index) + trailing
+    compressed matte data (opaque to the parser; surfaced verbatim for
+    the codec the image description names). Rejected: payload < 8
+    bytes; unknown `version`; non-zero `flags`; image-description size
+    < 16; image-description size overrunning the body.
+  - `parse_matt(payload) -> Result<Matte>` walks the `matt` wrapper's
+    children, picking the single spec-defined `kmat` child per QTFF
+    p. 44 Figure 2-9. Tolerates unknown sibling atoms (forward-compat);
+    rejects a `matt` body with no `kmat` child; first-wins on
+    duplicate `kmat` children (matches the conservative-merge policy
+    applied to `clip` / `tapt` / `load` / `cslg` at track scope).
+  - `Matte { compressed: CompressedMatte }`,
+    `CompressedMatte { version: u8, flags: u32, image_description:
+    Vec<u8>, matte_data: Vec<u8> }` typed surfaces, plus
+    `CompressedMatte::data_format() -> Option<[u8; 4]>` (codec FourCC
+    at offset 4 of the image description per QTFF p. 70 "Data format")
+    and `CompressedMatte::image_description_size() -> u32` accessor.
+  - `Track.matte: Option<Matte>` field, populated by `parse_trak` from
+    a `moov/trak/matt` child atom. QTFF p. 41 Figure 2-6 places `matt`
+    inside individual tracks (siblings of `tkhd` / `mdia` / `edts` /
+    `tref` / `load` / `imap` / `clip` / `udta`); there is no
+    movie-level matte (a movie's matte is the union of its tracks').
+  - `MIN_IMAGE_DESCRIPTION_SIZE` public const (16) — the QTFF p. 70
+    universal lower bound used by the parser to reject malformed
+    embedded structures.
+  - `MATT` / `KMAT` FourCC constants in `atom` module.
+  - 14 in-module unit tests + 6 integration tests
+    (`synth_round144_matte.rs`) covering minimum-shape round trip,
+    extended image description carving, empty matte data, absent
+    matte, duplicate-merge first-wins, malformed-kmat rejection at
+    open time, and forward-compat sibling tolerance.
 - Round 140 — Clipping atom (`clip`) + Clipping Region atom (`crgn`)
   parsers, QTFF p. 43 / p. 44.
   - `parse_crgn(payload) -> Result<ClippingRegion>` in the new `clip`

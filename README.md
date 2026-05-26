@@ -377,6 +377,32 @@ to absorb sign-bit overflow across the i16 range). ISO BMFF does
 not define `clip` or `crgn`; an MP4 / fMP4 / HEIF / AVIF file will
 not carry either and both fields stay `None`.
 
+Round 144 parses the **Track Matte atom** (`matt`) and its sole
+defined child the **Compressed Matte atom** (`kmat`) — QTFF p. 44 /
+p. 45 — at per-track scope (`moov/trak/matt`). The wrapper `matt` is
+a single-child container whose body the parser scans for one `kmat`;
+the leaf carries a 1-byte version + 3-byte flags FullBox-style header
+(spec fixes both at 0), a standard QTFF image description structure
+(same on-disk shape as a video sample description per QTFF p. 70 +
+pp. 92–94 — the parser carves it out using the 4-byte size word at
+its head and surfaces the bytes verbatim), and a trailing
+variable-length blob of compressed matte data interpreted by the
+codec the image description names. Surfaces on the demuxer via
+`Track::matte: Option<Matte>`; first-wins on the rare duplicate case
+(shared with `clip` / `tapt` / `load` / `cslg`). The `kmat` parser
+rejects unknown `version` (`!= 0`), non-zero `flags`, an image
+description shorter than the 16-byte universal header (size + format
+FourCC + 6 reserved + dref index), or a declared image-description
+size that overruns the body — every rejection happens at open time
+so a malformed matte never silently disappears.
+`CompressedMatte::{data_format, image_description_size}` helpers
+expose the codec FourCC and the carved structure length without
+re-parsing the bytes. There is no movie-level matte — QTFF Figure
+2-6 places `matt` only inside `trak`; a movie's matte is the union
+of its tracks'. ISO BMFF does not define either atom; an MP4 / fMP4
+/ HEIF / AVIF file will not carry them and `Track::matte` stays
+`None`.
+
 Round 137 parses the **Color Table atom** (`ctab`) — QTFF p. 35 — at
 movie scope. The atom is an optional Apple-only leaf that lists a
 preferred 4-channel (reserved/red/green/blue) 16-bit palette of up to
