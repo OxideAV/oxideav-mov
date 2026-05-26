@@ -461,6 +461,36 @@ fragment now round-trip through the demuxer without external
 parsing. QTFF does not define either box; both are ISO BMFF-only
 and stay empty for plain `.mov` inputs.
 
+Round 157 parses the **Preview atom** (`pnot`) — Apple QuickTime File
+Format Specification (QTFF, 2001-03-01) pp. 26 – 27 / Figure 1-7 — at
+file scope. The atom is a preflight thumbnail hint: it points at one of
+the file's other top-level atoms (typically a `PICT` QuickDraw picture
+stored after `moov`) and declares "this is the representative poster
+image for the movie." A Finder / Open dialog can render the preview
+without decoding any media samples and without instantiating the codec
+pipeline. Layout is a fixed 12-byte body: `modification_date[4]` (Mac-
+classic seconds since 1904-01-01T00:00:00Z, the same epoch QTFF's
+`mvhd` uses for creation / modification times per p. 32) +
+`version_number[2]` (spec-fixed at 0) + `atom_type[4]` (FourCC of the
+previewed atom, typically `PICT` but any top-level FourCC is legal) +
+`atom_index[2]` (1-based index into that atom type's instances; QTFF
+p. 27 documents the typical value as 1). The parser rejects any body
+length other than 12 (`pnot` carries no list per QTFF Figure 1-7 — a
+truncated or padded body must reject so `atom_type` / `atom_index`
+can't silently corrupt). `version_number != 0` and `atom_index == 0`
+both *parse* (the spec's other fields stay readable) and surface
+conformance signals via [`Pnot::is_known_version`] /
+[`Pnot::is_valid_index`] for strict consumers. Convenience accessor
+`Pnot::unix_seconds()` converts the Mac timestamp to Unix-epoch
+seconds via the [`MAC_TO_UNIX_EPOCH_SECONDS`] offset
+(2 082 844 800 s), returning `None` for any pre-1970 value. Surfaces
+on the demuxer via `MovDemuxer::pnot: Option<Pnot>` populated by the
+file-level walker — at most one `pnot` is kept per file, first-wins
+on the rare duplicate case (matching the `pdin` / `ctab` / `clip` /
+`mvhd` conservative-merge convention). ISO BMFF does not define this
+atom; it is QuickTime-only and stays absent for MP4 / fMP4 / HEIF /
+AVIF inputs.
+
 Round 137 parses the **Color Table atom** (`ctab`) — QTFF p. 35 — at
 movie scope. The atom is an optional Apple-only leaf that lists a
 preferred 4-channel (reserved/red/green/blue) 16-bit palette of up to

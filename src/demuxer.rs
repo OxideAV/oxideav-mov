@@ -14,9 +14,9 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CO64, CSLG, CTAB, CTTS,
     DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MATT, MDAT, MDHD,
-    MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR,
-    RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD, STSH,
-    STSS, STSZ, STTS, STYP, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
+    MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA,
+    RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD,
+    STSH, STSS, STSZ, STTS, STYP, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -29,6 +29,7 @@ use crate::header::{parse_ftyp, parse_hdlr, parse_mdhd, parse_mvhd, parse_tkhd, 
 use crate::matte::parse_matt;
 use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
 use crate::pdin::{parse_pdin, Pdin};
+use crate::pnot::{parse_pnot, Pnot};
 use crate::prft::{parse_prft, Prft};
 use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
 use crate::sample_aux::{parse_saio, parse_saiz};
@@ -141,6 +142,17 @@ pub struct MovDemuxer {
     /// rate alignment. Empty for QTFF, for non-segmented MP4s, and for
     /// non-live segmented streams.
     pub prft: Vec<Prft>,
+    /// Top-level Preview atom (`pnot`) — QTFF p. 26 / Figure 1-7. An
+    /// optional preflight pointer at a poster image (typically a
+    /// top-level `PICT` atom) used by Finder / Open dialogs to render
+    /// a representative thumbnail without instantiating the codec
+    /// pipeline. `Quantity: 0 or 1` by convention; the parser keeps
+    /// the first when a writer emits duplicates (matching the
+    /// conservative-merge convention shared with `pdin` / `ctab` /
+    /// `clip` / `mvhd`). ISO BMFF does not define this atom; an MP4
+    /// / fMP4 / HEIF / AVIF file will not carry one and this field
+    /// stays `None`.
+    pub pnot: Option<Pnot>,
     /// Pre-flattened sample queue, sorted by file offset for friendly
     /// I/O patterns. Each entry is `(stream_index, sample)`.
     samples: Vec<(u32, SampleEntry)>,
@@ -390,6 +402,12 @@ impl MovDemuxer {
         // travels alongside the media data. Collected in file order so a
         // caller can step through every producer marker.
         let mut file_prft: Vec<Prft> = Vec::new();
+        // QTFF p. 26 Preview atom (`pnot`). File-level, optional, at
+        // most one by convention. Points at a poster image (typically a
+        // top-level `PICT`) for thumbnail rendering. Keeps the first
+        // when a writer emits duplicates (matching the `pdin` / `ctab`
+        // conservative-merge convention).
+        let mut file_pnot: Option<Pnot> = None;
         // QTFF p. 35 Color Table atom (`ctab`). Movie-level, optional,
         // "at most one" by convention. Keeps the first when a writer
         // emits duplicates.
@@ -476,6 +494,19 @@ impl MovDemuxer {
                     // one per movie fragment it ships.
                     let payload = read_payload(input.as_mut(), &hdr)?;
                     file_prft.push(parse_prft(&payload)?);
+                }
+                t if t == &PNOT => {
+                    // QTFF p. 26 — Preview atom. File-level, optional,
+                    // at most one by convention. Silently keep the
+                    // first when a writer emits duplicates (the spec
+                    // doesn't define override semantics, and dropping
+                    // would lose earlier-is-better information —
+                    // matches the `pdin` / `ctab` policy).
+                    let payload = read_payload(input.as_mut(), &hdr)?;
+                    let parsed = parse_pnot(&payload)?;
+                    if file_pnot.is_none() {
+                        file_pnot = Some(parsed);
+                    }
                 }
                 t if t == &MOOV => {
                     if !seen_mdat {
@@ -711,6 +742,7 @@ impl MovDemuxer {
             sidx: file_sidx,
             styp: file_styp,
             prft: file_prft,
+            pnot: file_pnot,
             samples,
             next: 0,
             trex_defaults,

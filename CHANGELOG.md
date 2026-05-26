@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 157 — Preview atom (`pnot`) parser at file scope, Apple
+  QuickTime File Format Specification (QTFF, 2001-03-01) pp. 26 – 27
+  / Figure 1-7.
+  - New `pnot` module: [`Pnot`] struct (`modification_date`,
+    `version_number`, `atom_type`, `atom_index`) and [`parse_pnot`]
+    parser. The atom is a 12-byte fixed-width record (no list / no
+    variable section per QTFF Figure 1-7); any other body length is
+    rejected at parse time so a truncated or extension-padded box
+    can't silently lose its `atom_type` / `atom_index` fields.
+    `version_number` is *not* rejected when non-zero — the spec
+    fixes it at 0 but a writer that sets a stray value leaves the
+    other fields readable, so the parser stays accepting and
+    surfaces a `Pnot::is_known_version()` predicate for strict
+    consumers. Same accept-and-flag treatment for an `atom_index`
+    of 0 (the spec documents the field as 1-based but doesn't
+    define a sentinel) via `Pnot::is_valid_index()`.
+  - `Pnot::unix_seconds()` converts the Mac-classic
+    `modification_date` (seconds since 1904-01-01T00:00:00Z, the
+    same epoch QTFF's `mvhd` uses for creation / modification
+    times per p. 32) to a Unix-epoch second count via the
+    2 082 844 800 s offset, returning `None` for any pre-1970 Mac
+    value. The `MAC_TO_UNIX_EPOCH_SECONDS` constant is `pub`-
+    exported alongside `PNOT_BODY_LEN` (12) so external callers
+    can do the same conversion or round-trip the byte width.
+  - `MovDemuxer::pnot: Option<Pnot>` populated by the file-level
+    walker. At most one `pnot` is kept per file — the parser
+    silently drops duplicates (first-wins, matching the
+    conservative-merge convention shared with `pdin` / `ctab` /
+    `clip` / `mvhd`). The atom lives at file scope, *not* inside
+    `moov`, per QTFF p. 26 — it appears between `ftyp` and `moov`
+    in the top-level atom stream. ISO BMFF does not define `pnot`;
+    MP4 / fMP4 / HEIF / AVIF inputs leave the field `None`.
+  - Ten `src/pnot.rs` unit tests cover field round-trip,
+    Mac-to-Unix epoch conversion (zero, known anchor, pre-1970
+    `None`), non-`PICT` `atom_type` opacity, the
+    `is_known_version` / `is_valid_index` predicates, a high-bit
+    `atom_index` (0xFFFF), and the three rejection paths
+    (truncated, empty, trailing bytes).
+  - Six `tests/synth_round157_pnot.rs` integration tests build a
+    minimal QuickTime file (`ftyp qt  ` + `pnot` + `moov` + `mdat`)
+    and assert: byte-exact round-trip of all four fields through
+    `MovDemuxer::open`; `pnot.is_none()` for files that omit the
+    atom; first-wins on duplicate `pnot` emission; truncation and
+    trailing-byte rejection at open time; and that a non-zero
+    `version_number` parses (with the predicate flagging it).
+
 - Round 150 — `traf`-scope wiring for the round-147 Sample Auxiliary
   Information Sizes / Offsets boxes, ISO/IEC 14496-12 §8.7.8.1 /
   §8.7.9.1.
