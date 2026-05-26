@@ -74,7 +74,7 @@ pub use edit::{
 pub use fragment::{
     parse_mehd, parse_mfhd, parse_mfra, parse_mfro, parse_moof, parse_mvex, parse_tfdt, parse_tfhd,
     parse_tfra, parse_traf, parse_trex, parse_trun, resolve_traf_samples, sample_flags_is_sync,
-    Mehd, Mfhd, Mfro, Tfhd, Tfra, TfraEntry, TrafRecord, TrexDefaults, Trun, TrunSample,
+    Mehd, Mfhd, Mfro, Tfhd, Tfra, TfraEntry, TrafParse, TrafRecord, TrexDefaults, Trun, TrunSample,
     TFHD_BASE_DATA_OFFSET_PRESENT, TFHD_DEFAULT_BASE_IS_MOOF, TFHD_DEFAULT_SAMPLE_DURATION_PRESENT,
     TFHD_DEFAULT_SAMPLE_FLAGS_PRESENT, TFHD_DEFAULT_SAMPLE_SIZE_PRESENT, TFHD_DURATION_IS_EMPTY,
     TFHD_SAMPLE_DESCRIPTION_INDEX_PRESENT, TRUN_DATA_OFFSET_PRESENT,
@@ -101,7 +101,7 @@ pub use pdin::{parse_pdin, Pdin, PdinEntry};
 pub use prft::{parse_prft, Prft, NTP_TO_UNIX_EPOCH_SECONDS};
 pub use reference::{parse_dref, DataReference, ReferenceMovie};
 pub use render::{ispe_dimensions, render_grid, render_iden, render_iovl, Rgba8Canvas};
-pub use sample_aux::{parse_saio, parse_saiz, AuxInfoType, Saio, Saiz};
+pub use sample_aux::{parse_saio, parse_saiz, AuxInfoType, FragmentSampleAux, Saio, Saiz};
 pub use sample_groups::{
     decode_prol, decode_rap, decode_roll, parse_sbgp, parse_sgpd, AudioPreRoll, RollRecovery,
     SampleGroupDescription, SampleGroupDescriptionEntry, SampleToGroup, SampleToGroupEntry,

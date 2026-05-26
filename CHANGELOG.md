@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 150 — `traf`-scope wiring for the round-147 Sample Auxiliary
+  Information Sizes / Offsets boxes, ISO/IEC 14496-12 §8.7.8.1 /
+  §8.7.9.1.
+  - `parse_traf` now also walks `saiz` / `saio` children inside each
+    `traf`; returns a new [`TrafParse`] struct (`tfhd`, `tfdt`,
+    `truns`, `saiz`, `saio`) instead of the round-18 3-tuple.
+    `TrafRecord` carries the new `saiz: Vec<Saiz>` / `saio: Vec<Saio>`
+    fields; duplicate boxes for the same `(aux_info_type,
+    aux_info_type_parameter)` inside one `traf` are merged
+    first-wins per §8.7.8.3 / §8.7.9.3.
+  - `MovDemuxer::fragment_sample_aux_info(track_index) ->
+    &[FragmentSampleAux]` surfaces per-fragment sample-aux records
+    in on-disk fragment order. Each [`FragmentSampleAux`] carries
+    the originating `mfhd.sequence_number`, the `tfhd.track_id`,
+    the parsed `saiz` / `saio` boxes, and a `lookup(aux_info_type,
+    aux_info_type_parameter) -> (Option<&Saiz>, Option<&Saio>)`
+    accessor that mirrors the §8.7.8.1 zero-discriminator-match
+    semantics of `SampleTable::sample_aux_for`.
+  - `Track::fragment_sample_aux: Vec<FragmentSampleAux>` holds the
+    per-track aggregation; populated by the demuxer's `moof` walker
+    alongside `fragment_samples`. Empty for non-fragmented streams
+    and for fragmented tracks whose `traf`s ship no `saiz` / `saio`.
+  - Five `tests/synth_round150_traf_sample_aux.rs` integration tests
+    build a two-fragment fMP4 with `saiz` + `saio` inside each
+    `traf` (fragment 1 with `cenc` discriminator, fragment 2 with
+    `cbcs`) and assert: one record per fragment, the originating
+    `mfhd.sequence_number` is threaded through, discriminator
+    lookups honour §8.7.8.1, the slice is empty for out-of-range
+    tracks, the slice is empty when no `traf` ships sample-aux, and
+    `stbl`-scope and `traf`-scope accessors don't collide on the
+    same track.
+
+### Changed
+
+- `fragment::parse_traf`'s return type is now `Result<TrafParse>`
+  (a new struct) rather than the round-18 `Result<(Option<Tfhd>,
+  Option<u64>, Vec<Trun>)>` tuple. Out-of-tree callers of the public
+  parser need to read fields off the struct instead of destructuring
+  the tuple; the new fields `TrafParse::saiz` and `TrafParse::saio`
+  carry the §8.7.8.1 / §8.7.9.1 per-fragment sample-aux boxes.
+
 - Round 147 — Sample Auxiliary Information Sizes Box (`saiz`) +
   Sample Auxiliary Information Offsets Box (`saio`) parsers at
   `stbl` scope, ISO/IEC 14496-12 §8.7.8 / §8.7.9.

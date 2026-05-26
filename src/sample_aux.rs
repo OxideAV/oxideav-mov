@@ -99,6 +99,68 @@ impl AuxInfoType {
     }
 }
 
+/// One fragment's worth of `traf`-scope sample-auxiliary-information
+/// boxes (ISO/IEC 14496-12 §8.7.8.1 / §8.7.9.1). One entry per `traf`
+/// per track, surfaced through [`crate::Track::fragment_sample_aux`]
+/// in declaration order so callers can correlate the discriminator
+/// pair with the matching fragment's run table.
+///
+/// The `mfhd_sequence_number` lets callers cross-reference the entry
+/// against [`crate::MovDemuxer::fragment_sequence_numbers`] when a
+/// fragment carries multiple tracks. The `track_id` is denormalised
+/// from the parent `tfhd` so consumers don't need to walk back up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FragmentSampleAux {
+    /// `mfhd.sequence_number` of the enclosing `moof` per §8.8.5.3.
+    /// Monotonically increasing across the file; lets callers find a
+    /// specific fragment by sequence.
+    pub mfhd_sequence_number: u32,
+    /// `tfhd.track_id` of the enclosing `traf` per §8.8.7. Useful as
+    /// a sanity check when iterating per-track entries.
+    pub track_id: u32,
+    /// `saiz` Sample Auxiliary Information Sizes Boxes living at
+    /// `traf` scope, in declaration order. Empty when the fragment
+    /// carries no per-fragment sample-aux sizes. At most one per
+    /// `(aux_info_type, aux_info_type_parameter)` pair per §8.7.8.3.
+    pub saiz: Vec<Saiz>,
+    /// `saio` Sample Auxiliary Information Offsets Boxes living at
+    /// `traf` scope, in declaration order. Empty when the fragment
+    /// carries no per-fragment sample-aux offsets. At most one per
+    /// `(aux_info_type, aux_info_type_parameter)` pair per §8.7.9.3.
+    pub saio: Vec<Saio>,
+}
+
+impl FragmentSampleAux {
+    /// Look up the `(saiz, saio)` pair carried by this fragment for
+    /// the discriminator pair `(aux_info_type, aux_info_type_parameter)`,
+    /// matching the §8.7.8.1 implicit-fallback rule used by
+    /// [`crate::sample_table::SampleTable::sample_aux_for`]: a box
+    /// whose `flags & 1` bit is unset (no on-disk discriminator)
+    /// matches the all-zero discriminator only.
+    ///
+    /// Either side may be `None` — a writer that emits an `saiz`
+    /// without a paired `saio` (or vice versa) is malformed per
+    /// §8.7.8.1, but writers occasionally do; both sides are returned
+    /// independently so callers can decide whether to error or carry
+    /// on.
+    pub fn lookup(
+        &self,
+        aux_info_type: &[u8; 4],
+        aux_info_type_parameter: u32,
+    ) -> (Option<&Saiz>, Option<&Saio>) {
+        let want_zero = aux_info_type == &[0u8; 4] && aux_info_type_parameter == 0;
+        let saiz = self.saiz.iter().find(|s| match &s.aux_info_type {
+            Some(a) => a.matches(aux_info_type, aux_info_type_parameter),
+            None => want_zero,
+        });
+        let saio = self.saio.iter().find(|s| match &s.aux_info_type {
+            Some(a) => a.matches(aux_info_type, aux_info_type_parameter),
+            None => want_zero,
+        });
+        (saiz, saio)
+    }
+}
+
 /// Parsed Sample Auxiliary Information Sizes Box (`saiz`, §8.7.8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Saiz {

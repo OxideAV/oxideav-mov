@@ -519,8 +519,15 @@ impl MovDemuxer {
                     // enclosing Movie Fragment Box" per §8.8.7.1.
                     let moof_start = pos;
                     let (mfhd_opt, trafs) = crate::fragment::parse_moof(input.as_mut(), &hdr)?;
-                    if let Some(m) = mfhd_opt {
-                        fragment_sequence_numbers.push(m.sequence_number);
+                    // §8.8.5.3 — `mfhd.sequence_number` is mandatory.
+                    // When the on-disk box is missing we fall back to 0
+                    // for cross-referencing per-fragment sample-aux
+                    // entries; the spec's monotonic-increase rule is
+                    // already validated by callers walking the sequence
+                    // vector directly.
+                    let mfhd_seq = mfhd_opt.map(|m| m.sequence_number).unwrap_or(0);
+                    if mfhd_opt.is_some() {
+                        fragment_sequence_numbers.push(mfhd_seq);
                     }
                     // Anchor for the "previous traf end" within this
                     // moof. The very first traf with no
@@ -560,6 +567,21 @@ impl MovDemuxer {
                         )?;
                         let n_samples = samples.len() as u32;
                         tracks[track_idx].fragment_samples.extend(samples);
+                        // §8.7.8.1 / §8.7.9.1 — surface any `saiz` /
+                        // `saio` collected at this `traf`'s scope so
+                        // callers can walk CMAF / CENC per-fragment
+                        // sample-aux without re-parsing the file.
+                        // Round 150.
+                        if !traf.saiz.is_empty() || !traf.saio.is_empty() {
+                            tracks[track_idx].fragment_sample_aux.push(
+                                crate::sample_aux::FragmentSampleAux {
+                                    mfhd_sequence_number: mfhd_seq,
+                                    track_id: tid,
+                                    saiz: traf.saiz.clone(),
+                                    saio: traf.saio.clone(),
+                                },
+                            );
+                        }
                         prev_traf_end = new_prev_traf_end;
                         track_dts_cursor.insert(tid, new_dts);
                         track_sample_index_cursor
@@ -1557,8 +1579,9 @@ impl MovDemuxer {
     /// when the box's discriminator was implicit.
     ///
     /// This surface targets the `stbl`-scope (non-fragmented) form
-    /// only. Fragmented streams whose `saiz` / `saio` live inside
-    /// `traf` are not yet exposed.
+    /// only. Fragmented streams carry `saiz` / `saio` at `traf`
+    /// scope per §8.7.8.1 / §8.7.9.1; query those through
+    /// [`Self::fragment_sample_aux_info`].
     pub fn sample_aux_info(
         &self,
         track_index: usize,
@@ -1573,6 +1596,41 @@ impl MovDemuxer {
             Some(t) => t
                 .sample_table
                 .sample_aux_for(aux_info_type, aux_info_type_parameter),
+        }
+    }
+
+    /// Look up the Sample Auxiliary Information `(saiz, saio)` pair
+    /// for `track_index` per fragment, identified by the discriminator
+    /// pair `(aux_info_type, aux_info_type_parameter)`, at `traf` scope
+    /// per ISO/IEC 14496-12 §8.7.8.1 / §8.7.9.1.
+    ///
+    /// Returns a slice of [`crate::sample_aux::FragmentSampleAux`] (one
+    /// entry per fragment of this track that ships any sample-aux
+    /// boxes); use [`crate::sample_aux::FragmentSampleAux::lookup`] on
+    /// each entry to extract the `(saiz, saio)` matching the requested
+    /// discriminator. Entries are returned in on-disk fragment order.
+    ///
+    /// The fragmented surface is intentionally a slice rather than a
+    /// single `(saiz, saio)` pair: §8.8 fragments are independent
+    /// per-fragment slabs of sample-aux data (e.g. CMAF / DASH-live
+    /// CENC streams carry one sample-aux slab per fragment, each
+    /// covering only that fragment's samples). Callers iterate to
+    /// build a cross-fragment view.
+    ///
+    /// Empty slice when the track has no `traf`-scope sample-aux
+    /// records, when the track index is out of range, or for non-
+    /// fragmented streams. Stub-fragments that ship `saiz` / `saio`
+    /// for a discriminator not matched by the requested pair are
+    /// surfaced too — callers that want only matching fragments should
+    /// filter by [`crate::sample_aux::FragmentSampleAux::lookup`]
+    /// returning a non-`None` pair.
+    pub fn fragment_sample_aux_info(
+        &self,
+        track_index: usize,
+    ) -> &[crate::sample_aux::FragmentSampleAux] {
+        match self.tracks.get(track_index) {
+            None => &[],
+            Some(t) => &t.fragment_sample_aux,
         }
     }
 

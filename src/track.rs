@@ -219,6 +219,19 @@ pub struct Track {
     /// fragmented `qt  ` or `mp4` plays straight through
     /// [`crate::MovDemuxer::next_packet`].
     pub fragment_samples: Vec<SampleEntry>,
+    /// Per-fragment sample-auxiliary-information records collected
+    /// from each `traf` that names this track (ISO/IEC 14496-12
+    /// §8.7.8.1 / §8.7.9.1, `traf` scope per §8.8.6). Empty for
+    /// non-fragmented streams and for fragmented tracks that ship no
+    /// `saiz` / `saio` boxes inside their `traf` containers.
+    ///
+    /// Order matches the on-disk fragment order (i.e. the order in
+    /// which `moof`s appear in the file, which is also the order in
+    /// [`crate::MovDemuxer::fragment_sequence_numbers`]). Use
+    /// [`crate::MovDemuxer::fragment_sample_aux_info`] to slice this
+    /// by discriminator pair across all fragments for a single track.
+    /// Round 150.
+    pub fragment_sample_aux: Vec<crate::sample_aux::FragmentSampleAux>,
 }
 
 impl Track {

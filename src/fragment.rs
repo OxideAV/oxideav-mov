@@ -37,7 +37,10 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::atom::{read_payload, walk_children, AtomHeader, MEHD, MFRO, TFRA, TRAF, TREX};
+use crate::atom::{
+    read_payload, walk_children, AtomHeader, MEHD, MFRO, SAIO, SAIZ, TFRA, TRAF, TREX,
+};
+use crate::sample_aux::{parse_saio, parse_saiz, Saio, Saiz};
 use crate::sample_table::SampleEntry;
 
 #[cfg(feature = "registry")]
@@ -523,20 +526,25 @@ pub fn parse_trun(payload: &[u8]) -> Result<Trun> {
 }
 
 /// Walk a `traf` container, collecting the single `tfhd`, any
-/// number of `trun`s, and the optional `tfdt`
-/// (Track Fragment Decode Time, §8.8.12). The order on the wire is
-/// `[tfhd][tfdt?][trun ...]` per §8.8.6.2; the walker does not
-/// enforce ordering — derived specs add sibling boxes (`sdtp` /
-/// `subs` / `saio` / `sbgp`) that the round-18 demuxer ignores.
-pub fn parse_traf<R: Read + Seek + ?Sized>(
-    r: &mut R,
-    hdr: &AtomHeader,
-) -> Result<(Option<Tfhd>, Option<u64>, Vec<Trun>)> {
+/// number of `trun`s, the optional `tfdt`
+/// (Track Fragment Decode Time, §8.8.12), and any `saiz` / `saio`
+/// (Sample Auxiliary Information Sizes / Offsets, §8.7.8 / §8.7.9)
+/// children. The order on the wire is `[tfhd][tfdt?][trun ...]` per
+/// §8.8.6.2; the walker does not enforce ordering — derived specs add
+/// sibling boxes (`sdtp` / `subs` / `sbgp`) that the round-18 demuxer
+/// ignores. Sample-aux boxes are §8.7.8.1 / §8.7.9.1 allowed in both
+/// `stbl` (non-fragmented) and `traf` (fragmented) scope; we surface
+/// them here so the demuxer can route CMAF / CENC per-fragment
+/// sample-aux to a fragmented accessor that mirrors the `stbl`-scope
+/// [`crate::MovDemuxer::sample_aux_info`] path.
+pub fn parse_traf<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<TrafParse> {
     let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
     let mut tfhd: Option<Tfhd> = None;
     let mut tfdt: Option<u64> = None;
     let mut truns: Vec<Trun> = Vec::new();
+    let mut saiz: Vec<Saiz> = Vec::new();
+    let mut saio: Vec<Saio> = Vec::new();
     walk_children(r, Some(body_end), |r, child| {
         match &child.fourcc {
             b"tfhd" => {
@@ -551,11 +559,63 @@ pub fn parse_traf<R: Read + Seek + ?Sized>(
                 let body = read_payload(r, child)?;
                 truns.push(parse_trun(&body)?);
             }
+            t if t == &SAIZ => {
+                // §8.7.8.3 — at most one `saiz` per (aux_info_type,
+                // aux_info_type_parameter) per containing box; first
+                // wins on duplicates, matching the `stbl`-scope merge
+                // policy in `demuxer::parse_stbl`.
+                let body = read_payload(r, child)?;
+                let s = parse_saiz(&body)?;
+                if !saiz.iter().any(|x| x.aux_info_type == s.aux_info_type) {
+                    saiz.push(s);
+                }
+            }
+            t if t == &SAIO => {
+                // §8.7.9.3 — at most one `saio` per (aux_info_type,
+                // aux_info_type_parameter) per containing box; first
+                // wins on duplicates.
+                let body = read_payload(r, child)?;
+                let s = parse_saio(&body)?;
+                if !saio.iter().any(|x| x.aux_info_type == s.aux_info_type) {
+                    saio.push(s);
+                }
+            }
             _ => {}
         }
         Ok(())
     })?;
-    Ok((tfhd, tfdt, truns))
+    Ok(TrafParse {
+        tfhd,
+        tfdt,
+        truns,
+        saiz,
+        saio,
+    })
+}
+
+/// Output of [`parse_traf`]. Carries the rich `traf` body — the
+/// `tfhd` defaults, the optional `tfdt`, the run table, and any
+/// `saiz` / `saio` sample-auxiliary-information boxes living at
+/// `traf` scope (§8.7.8.1 / §8.7.9.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrafParse {
+    /// Mandatory `tfhd` (§8.8.7) — only `None` when the `traf` is
+    /// malformed (the demuxer treats `None` as "skip this fragment").
+    pub tfhd: Option<Tfhd>,
+    /// Optional `tfdt` `baseMediaDecodeTime` per §8.8.12.
+    pub tfdt: Option<u64>,
+    /// Zero or more `trun` runs in declaration order.
+    pub truns: Vec<Trun>,
+    /// `saiz` boxes at `traf` scope, in declaration order. Empty
+    /// when the fragment carries no sample-auxiliary-information
+    /// sizes. At most one per `(aux_info_type,
+    /// aux_info_type_parameter)` pair per §8.7.8.3.
+    pub saiz: Vec<Saiz>,
+    /// `saio` boxes at `traf` scope, in declaration order. Empty
+    /// when the fragment carries no sample-auxiliary-information
+    /// offsets. At most one per `(aux_info_type,
+    /// aux_info_type_parameter)` pair per §8.7.9.3.
+    pub saio: Vec<Saio>,
 }
 
 /// Parse a `tfdt` payload per ISO/IEC 14496-12 §8.8.12.2.
@@ -627,9 +687,15 @@ pub fn parse_moof<R: Read + Seek + ?Sized>(
                 mfhd = Some(parse_mfhd(&body)?);
             }
             t if t == &TRAF => {
-                let (tfhd, tfdt, truns) = parse_traf(r, child)?;
-                if let Some(tfhd) = tfhd {
-                    trafs.push(TrafRecord { tfhd, tfdt, truns });
+                let parsed = parse_traf(r, child)?;
+                if let Some(tfhd) = parsed.tfhd {
+                    trafs.push(TrafRecord {
+                        tfhd,
+                        tfdt: parsed.tfdt,
+                        truns: parsed.truns,
+                        saiz: parsed.saiz,
+                        saio: parsed.saio,
+                    });
                 }
             }
             _ => {}
@@ -653,6 +719,20 @@ pub struct TrafRecord {
     pub tfdt: Option<u64>,
     /// Zero or more `trun` runs in declaration order.
     pub truns: Vec<Trun>,
+    /// `saiz` Sample Auxiliary Information Sizes Boxes (ISO/IEC
+    /// 14496-12 §8.7.8) declared at this `traf`'s scope. Empty when
+    /// the fragment carries no per-fragment sample-aux sizes. At most
+    /// one per `(aux_info_type, aux_info_type_parameter)` pair per
+    /// §8.7.8.3; duplicates are dropped silently (first wins) by
+    /// [`parse_traf`].
+    pub saiz: Vec<Saiz>,
+    /// `saio` Sample Auxiliary Information Offsets Boxes (ISO/IEC
+    /// 14496-12 §8.7.9) declared at this `traf`'s scope. Empty when
+    /// the fragment carries no per-fragment sample-aux offsets. At
+    /// most one per `(aux_info_type, aux_info_type_parameter)` pair
+    /// per §8.7.9.3; duplicates are dropped silently (first wins) by
+    /// [`parse_traf`].
+    pub saio: Vec<Saio>,
 }
 
 /// Resolve a `traf`'s on-disk samples into [`SampleEntry`]s ready
@@ -1218,6 +1298,8 @@ mod tests {
             tfhd,
             tfdt: None,
             truns: vec![trun],
+            saiz: Vec::new(),
+            saio: Vec::new(),
         };
         let moof_start = 1000u64;
         let (samples, end, dts) =
@@ -1268,6 +1350,8 @@ mod tests {
             tfhd,
             tfdt: None,
             truns: vec![trun],
+            saiz: Vec::new(),
+            saio: Vec::new(),
         };
         let (samples, _, dts) = resolve_traf_samples(&rec, None, 0, 0, 1000, 5).unwrap();
         assert_eq!(samples.len(), 2);
@@ -1319,6 +1403,8 @@ mod tests {
             tfhd,
             tfdt: None,
             truns: vec![trun],
+            saiz: Vec::new(),
+            saio: Vec::new(),
         };
         let (samples, _, _) = resolve_traf_samples(&rec, Some(&trex), 0, 0, 0, 0).unwrap();
         assert_eq!(samples.len(), 3);
@@ -1342,6 +1428,8 @@ mod tests {
             tfhd,
             tfdt: None,
             truns: Vec::new(),
+            saiz: Vec::new(),
+            saio: Vec::new(),
         };
         let (samples, _, dts) = resolve_traf_samples(&rec, None, 0, 100, 500, 0).unwrap();
         assert!(samples.is_empty());

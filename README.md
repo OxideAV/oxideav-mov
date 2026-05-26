@@ -446,11 +446,20 @@ below `entry_count × {4,8}`, and trailing bytes past the `saio`
 offset table. Duplicate boxes for the same `(aux_info_type,
 aux_info_type_parameter)` inside one `stbl` are silently merged
 first-wins (spec forbids them per §8.7.8.3 / §8.7.9.3, matching
-the `sbgp` / `sgpd` conservative-merge convention). This round
-covers the `stbl`-scope path only; the `traf`-scope form
-(fragmented-MP4 / CMAF / DASH live) is deferred. QTFF does not
-define either box; both are ISO BMFF-only and stay empty for plain
-`.mov` inputs.
+the `sbgp` / `sgpd` conservative-merge convention). Round 150
+extends the same envelope decode to the `traf` (fragmented) scope
+per §8.7.8.1 / §8.7.9.1: each `traf` is walked for its own `saiz`
+/ `saio` pair and surfaced on the demuxer via
+`MovDemuxer::fragment_sample_aux_info(track) ->
+&[FragmentSampleAux]`, with one entry per fragment that ships any
+sample-aux box (each entry carries the originating `mfhd`
+sequence number plus a `lookup(aux_info_type,
+aux_info_type_parameter) -> (Option<&Saiz>, Option<&Saio>)`
+mirroring the `stbl`-scope accessor's match semantics). CMAF /
+DASH-live / CENC fixtures that carry one sample-aux slab per
+fragment now round-trip through the demuxer without external
+parsing. QTFF does not define either box; both are ISO BMFF-only
+and stay empty for plain `.mov` inputs.
 
 Round 137 parses the **Color Table atom** (`ctab`) — QTFF p. 35 — at
 movie scope. The atom is an optional Apple-only leaf that lists a
@@ -488,13 +497,11 @@ Decoding stays in codec crates; this crate calls
 
 ## Follow-ups
 
-- `saiz` / `saio` `traf`-scope wiring (ISO/IEC 14496-12 §8.8 + §8.7.8 /
-  §8.7.9): the round-147 parsers are container-agnostic but only the
-  `stbl`-scope path is exposed. Fragmented-MP4 / CMAF / DASH-live
-  streams that carry sample auxiliary information inside `traf` (e.g.
-  CENC's per-fragment sample-aux records) need `parse_traf` to also
-  collect the two boxes per fragment and a fragmented accessor on
-  `MovDemuxer` mirroring `sample_aux_info`.
+- `MovMuxer` write-side `saiz` / `saio` emission at either `stbl` or
+  `traf` scope: the round-150 read path consumes both placements
+  (ISO/IEC 14496-12 §8.7.8.1 / §8.7.9.1) but the encoder never writes
+  them. Producers that need to round-trip CENC sample-aux records
+  through this crate currently have to hand-author the boxes.
 - A `next_packet`-side opt-in (`MovDemuxer::with_edit_list_pts()`?)
   that swaps the emitted `Packet::pts` from media-time to movie-time
   end-to-end, so consumers that don't want the explicit
