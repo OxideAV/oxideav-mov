@@ -509,6 +509,46 @@ per file with first-wins on the rare duplicate case (matching the
 define this atom; it is QuickTime-only and stays absent for MP4 /
 fMP4 / HEIF / AVIF inputs.
 
+Round 162 tightens the **atom walker's injection-robustness**. The
+parser is the kind of demuxer you can point at a network-supplied byte
+stream, and a malformed shape must produce a clean `Err(...)` rather
+than a panic, OOM kill, or runaway allocation. Two defenses land:
+
+- [`read_payload`] now refuses to allocate above
+  [`MAX_INMEMORY_ATOM_BODY`] (64 MiB). Every metadata atom that
+  legitimately materialises into a `Vec<u8>` (ftyp / moov / mvhd /
+  tkhd / mdhd / stsd / stts / stsc / stsz / stco / co64 / stss / sdtp
+  / subs / saiz / saio / sgpd / sbgp / tref / udta / meta / keys /
+  ilst / kind / tsel / load / clip / crgn / matt / kmat / gama / pasp
+  / clap / colr / chan / tapt / clef / prof / enof / pdin / sidx /
+  styp / prft / pnot / ctab) stays well under a megabyte in practice;
+  `mdat` (gigabytes legitimately) is never read via `read_payload`
+  in this crate — per-sample reads `seek` into it. So the cap bounds
+  one in-memory atom body, not the file size. A forged extended `size`
+  of (say) 8 GiB on a 1 KiB file now errors at the allocation site
+  before `vec![0u8; n as usize]` lands. A companion
+  [`read_payload_bounded`] helper lets callers express a tighter
+  per-call envelope (parent atom's remaining bytes, known file
+  length).
+- `MovDemuxer::open` and `MovDemuxer::probe_reference_movies` now
+  reject any top-level atom whose declared `size` extends past
+  end-of-file. `walk_children` already enforced the same rule on
+  nested atoms (a child's body cannot exceed its parent's payload);
+  the top-level walker now mirrors it, so every layer of the
+  demuxer is uniformly spec-bounded. The check is strict-greater:
+  an atom whose body_end is *exactly* `total_len` is still accepted
+  (the common case where `mdat` runs to the end of the file).
+
+Pinned by `tests/synth_round162_robustness.rs` (16 tests, four
+groups): forged 32-bit / 64-bit / one-byte-past-EOF top-level sizes
+are rejected; `read_payload` and `read_payload_bounded` reject above
+their respective caps and accept exactly at; a truncation sweep walks
+the baseline file byte-by-byte (no panic / no OOM at any cut point); a
+256-trial xorshift64* random-byte fuzz pass confirms hostile garbage
+never panics; a bogus nested-trak size pins `walk_children`'s existing
+rejection in place; degenerate `size == 0` (to-EOF) and empty-file
+cases surface cleanly.
+
 Round 21 adds **fragmented-MP4 seek** via the ISO/IEC 14496-12
 §8.8.10 `tfra` (Track Fragment Random Access Box) at open time. The
 demuxer walks `mfra/tfra/mfro` once and `seek_to` binary-searches

@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 162 — injection-robustness defenses against forged size fields
+  and OOM levers in the atom walker / top-level demuxer parser.
+  - New `MAX_INMEMORY_ATOM_BODY` constant (64 MiB). `read_payload`
+    refuses to allocate above this cap before the underlying
+    `vec![0u8; n as usize]` call lands, so a forged extended `size`
+    of (say) 8 GiB on a 1 KiB file errors as a clean parse error
+    rather than a multi-GiB allocation that turns into an OOM
+    process kill. The cap is generous: every metadata atom in QTFF /
+    ISO BMFF that legitimately materialises into a `Vec<u8>` (ftyp,
+    moov, mvhd, tkhd, mdhd, stsd, stts, stsc, stsz, stco, co64,
+    stss, sdtp, subs, saiz, saio, sgpd, sbgp, tref, udta, meta,
+    keys, ilst, kind, tsel, load, clip, crgn, matt, kmat, gama,
+    pasp, clap, colr, chan, tapt, clef, prof, enof, pdin, sidx,
+    styp, prft, pnot, ctab) stays well under a megabyte in practice.
+    `mdat` (sample data, gigabytes legitimately) is never read via
+    `read_payload` in this crate — only per-sample seek-and-read
+    pulls bytes out of it — so the cap doesn't bound legitimate
+    file size.
+  - New `read_payload_bounded(r, hdr, max_remaining)` helper for
+    callers that already know the maximum payload extent (a parent
+    atom's remaining bytes, a known file length). Rejects above the
+    envelope before allocating.
+  - `MovDemuxer::open` and `MovDemuxer::probe_reference_movies` now
+    reject any top-level atom whose declared `size` would extend past
+    end-of-file. `walk_children` already enforced the same "child
+    does not exceed parent" rule on nested atoms; the top-level
+    walker now mirrors it so the cleanest layer of the demuxer is
+    spec-bounded too.
+  - New `tests/synth_round162_robustness.rs` (16 tests, four groups):
+    forged 32-bit / 64-bit / one-byte-past-EOF top-level sizes are
+    rejected; `read_payload` and `read_payload_bounded` reject above
+    their respective caps and accept exactly at; a truncation sweep
+    walks the baseline file byte-by-byte and asserts no panic / no
+    OOM at any cut point; a 256-trial xorshift64* random-byte fuzz
+    pass confirms hostile garbage never panics; a bogus nested-trak
+    size pins `walk_children`'s existing rejection in place; and the
+    degenerate `size == 0` (to-EOF) and empty-file cases surface
+    cleanly.
+  - All four atom-walker / read_payload public APIs are re-exported
+    from the crate root for downstream tests / fuzz harnesses:
+    `AtomHeader`, `read_atom_header`, `read_payload`,
+    `read_payload_bounded`, `skip_payload`, `walk_children`,
+    `MAX_INMEMORY_ATOM_BODY`.
+
 - Round 157 — Preview atom (`pnot`) parser at file scope, Apple
   QuickTime File Format Specification (QTFF, 2001-03-01) pp. 26 – 27
   / Figure 1-7.

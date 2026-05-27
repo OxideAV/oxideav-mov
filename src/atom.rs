@@ -161,14 +161,77 @@ pub fn skip_payload<R: Seek + ?Sized>(r: &mut R, h: &AtomHeader) -> Result<()> {
     }
 }
 
+/// Upper bound on a single atom body read into memory via
+/// [`read_payload`].
+///
+/// `read_payload` materialises the entire body into a `Vec<u8>` so the
+/// per-atom parsers can index into it. A declared size larger than this
+/// almost certainly means a forged / corrupt size field rather than a
+/// legitimate metadata atom: `ftyp` / `moov` / `mvhd` / `tkhd` / `mdhd` /
+/// `stsd` / `stts` / `stsc` / `stsz` / `stco` / `co64` / `stss` / `sdtp` /
+/// `subs` / `saiz` / `saio` / `sgpd` / `sbgp` / `tref` / `udta` / `meta` /
+/// `keys` / `ilst` / `kind` / `tsel` / `load` / `clip` / `crgn` / `matt` /
+/// `kmat` / `gama` / `pasp` / `clap` / `colr` / `chan` / `tapt` / `clef` /
+/// `prof` / `enof` / `pdin` / `sidx` / `styp` / `prft` / `pnot` / `ctab`
+/// are all well under a megabyte in real files. Even an extremely long
+/// `keys`/`ilst` Apple metadata block stays under a few hundred KiB.
+///
+/// `mdat` (the sample-data atom — gigabytes legitimately) is **never**
+/// read via [`read_payload`] in this crate: per-sample reads `seek` into
+/// `mdat` and pull only the bytes for the requested sample (see
+/// [`crate::demuxer::MovDemuxer::next_packet`]). So capping
+/// [`read_payload`] at 64 MiB does not bound the legitimate file
+/// size — only a single in-memory metadata atom.
+///
+/// The constant is `pub` so test fixtures can reason about the limit.
+pub const MAX_INMEMORY_ATOM_BODY: u64 = 64 * 1024 * 1024;
+
 /// Read the full body of an atom (size must be known).
+///
+/// Refuses to allocate more than [`MAX_INMEMORY_ATOM_BODY`] bytes — a
+/// forged or corrupt extended `size` field on a small file would
+/// otherwise drive a single `vec![0u8; n as usize]` into a multi-GiB
+/// allocation that fails as an OOM rather than a clean parse error.
 pub fn read_payload<R: Read + ?Sized>(r: &mut R, h: &AtomHeader) -> Result<Vec<u8>> {
     let n = h
         .payload_len()
         .ok_or_else(|| Error::invalid("MOV: cannot read open-ended atom body"))?;
+    if n > MAX_INMEMORY_ATOM_BODY {
+        return Err(Error::invalid(format!(
+            "MOV: atom '{}' declares {n}-byte body, refusing in-memory read above {MAX_INMEMORY_ATOM_BODY}-byte cap",
+            h.type_str(),
+        )));
+    }
     let mut buf = vec![0u8; n as usize];
     r.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+/// Read the full body of an atom whose declared size has already been
+/// bounded against an outer envelope (a file length or a parent atom's
+/// payload).
+///
+/// Differs from [`read_payload`] in that the caller passes the maximum
+/// number of bytes still legitimately available at the cursor; the
+/// helper bails before allocating when the atom's `payload_len()`
+/// claims more than `max_remaining`. This catches forged-size attacks
+/// that would otherwise pass the per-atom [`MAX_INMEMORY_ATOM_BODY`]
+/// cap (e.g. a 32 MiB declaration on a 1 KiB file).
+pub fn read_payload_bounded<R: Read + ?Sized>(
+    r: &mut R,
+    h: &AtomHeader,
+    max_remaining: u64,
+) -> Result<Vec<u8>> {
+    let n = h
+        .payload_len()
+        .ok_or_else(|| Error::invalid("MOV: cannot read open-ended atom body"))?;
+    if n > max_remaining {
+        return Err(Error::invalid(format!(
+            "MOV: atom '{}' body of {n} bytes exceeds {max_remaining}-byte envelope (truncated or forged size)",
+            h.type_str(),
+        )));
+    }
+    read_payload(r, h)
 }
 
 /// Walk the immediate children of a container atom, calling `visit`

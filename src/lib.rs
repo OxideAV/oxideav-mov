@@ -49,6 +49,10 @@ pub mod registry;
 #[cfg(not(feature = "registry"))]
 pub mod standalone;
 
+pub use atom::{
+    read_atom_header, read_payload, read_payload_bounded, skip_payload, walk_children, AtomHeader,
+    MAX_INMEMORY_ATOM_BODY,
+};
 pub use bmff_meta::{
     file_extents_for_item, idat_bytes_concat, idat_bytes_for_item, item_data, parse_bmff_meta,
     primary_item_data, BmffMeta, DataLocation, ItemDataLocation, ItemExtent, ItemInfoEntry,

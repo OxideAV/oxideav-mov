@@ -342,6 +342,15 @@ impl MovDemuxer {
                 .total_size
                 .map(|t| hdr.payload_offset + (t - hdr.header_len))
                 .unwrap_or(total_len);
+            // Same injection-robustness guard as `open_with` — a
+            // forged top-level `size` past EOF is rejected before any
+            // further parsing or allocation.
+            if body_end > total_len {
+                return Err(Error::invalid(format!(
+                    "MOV: top-level atom '{}' extends to byte {body_end} past end-of-file {total_len}",
+                    hdr.type_str(),
+                )));
+            }
             if hdr.fourcc == MOOV {
                 input.seek(SeekFrom::Start(hdr.payload_offset))?;
                 walk_children(input, Some(body_end), |r, child| {
@@ -447,6 +456,26 @@ impl MovDemuxer {
                 .total_size
                 .map(|t| hdr.payload_offset + (t - hdr.header_len))
                 .unwrap_or(total_len);
+
+            // Top-level injection-robustness check: a forged 32-bit
+            // `size` field (or 64-bit extended size) on a small file
+            // can declare body_end far beyond the actual end of the
+            // input. Without this guard the per-arm `read_payload`
+            // would attempt a multi-GiB allocation that fails as OOM
+            // rather than a clean parse error. `walk_children` already
+            // enforces this rule on nested atoms; we mirror it at the
+            // top level. The check also rejects `payload_offset >
+            // total_len` (header straddling EOF) and a wraparound
+            // where `t - header_len` underflowed implicitly when the
+            // declared size somehow slipped below `header_len` (the
+            // size-floor check in `read_atom_header` already catches
+            // this, but defence-in-depth is cheap).
+            if body_end > total_len {
+                return Err(Error::invalid(format!(
+                    "MOV: top-level atom '{}' extends to byte {body_end} past end-of-file {total_len}",
+                    hdr.type_str(),
+                )));
+            }
 
             match &hdr.fourcc {
                 t if t == &FTYP => {
