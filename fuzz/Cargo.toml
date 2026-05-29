@@ -70,10 +70,9 @@ cargo-fuzz = true
 #     no-alias `MovDemuxer::open` so no aliases are followed; the
 #     reference-movie *parser* still gets exercised.
 #
-# There is no external system library worth pulling in as a
-# cross-decode oracle (the clean-room wall bars every QuickTime
-# SDK / mp4v2 / Bento4 / GPAC / libavformat as a reference
-# anyway), so this fuzz crate is **demux-only**: feed arbitrary
+# No external cross-decode oracle is pulled in (clean-room wall —
+# the crate's bytes are the source of truth), so this fuzz crate is
+# **demux-only**: feed arbitrary
 # bytes through `MovDemuxer::open` and then drain `next_packet()`
 # for a bounded number of steps, asserting nothing panics,
 # aborts, or OOMs.
