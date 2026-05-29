@@ -42,6 +42,7 @@ pub mod track;
 pub mod track_load;
 pub mod track_selection;
 pub mod user_data;
+pub mod uuid;
 
 #[cfg(feature = "registry")]
 pub mod registry;
@@ -138,3 +139,4 @@ pub use track_selection::{
     TSEL_ATTR_TEMPORAL_SCALABILITY, TSEL_ATTR_VIEW_SCALABILITY,
 };
 pub use user_data::{iso_language_tag, parse_udta, UserDataEntry, UserDataKind};
+pub use uuid::{parse_uuid, Uuid, USERTYPE_LEN};

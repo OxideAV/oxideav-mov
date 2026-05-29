@@ -16,7 +16,7 @@ use crate::atom::{
     DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MATT, MDAT, MDHD,
     MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA,
     RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD,
-    STSH, STSS, STSZ, STTS, STYP, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, VMHD, WIDE,
+    STSH, STSS, STSZ, STTS, STYP, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, UUID, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -43,6 +43,7 @@ use crate::styp::{parse_styp, Styp};
 use crate::track::{parse_stsd, Track, TrackRef, TrackRefKind};
 use crate::track_load::parse_load;
 use crate::user_data::{parse_udta, UserDataEntry};
+use crate::uuid::{parse_uuid, Uuid};
 
 #[cfg(feature = "registry")]
 use oxideav_core::{
@@ -153,6 +154,19 @@ pub struct MovDemuxer {
     /// / fMP4 / HEIF / AVIF file will not carry one and this field
     /// stays `None`.
     pub pnot: Option<Pnot>,
+    /// Top-level User-Type Boxes (`uuid`) — ISO/IEC 14496-12 §4.2 /
+    /// §11.1. The spec's escape hatch for vendor-specific extensions:
+    /// every entry's `usertype` is a 16-byte UUID identifying the
+    /// vendor schema, and `payload` is the opaque body. `Quantity:
+    /// Zero or more` — a single `.mov` / `.mp4` may carry several
+    /// (one per vendor extension, with overlap permitted), so the
+    /// parser collects them in declaration order and leaves
+    /// disambiguation to the caller. Well-known carriers include the
+    /// PIFF tfxd / tfrf live-DASH timing extensions, Sony XAVC
+    /// per-clip metadata, and GoPro GPMF telemetry. QTFF does not
+    /// define `uuid` at spec level; in practice it routinely appears
+    /// in vendor `.mov` files alongside the QuickTime atoms.
+    pub file_uuids: Vec<Uuid>,
     /// Pre-flattened sample queue, sorted by file offset for friendly
     /// I/O patterns. Each entry is `(stream_index, sample)`.
     samples: Vec<(u32, SampleEntry)>,
@@ -417,6 +431,15 @@ impl MovDemuxer {
         // when a writer emits duplicates (matching the `pdin` / `ctab`
         // conservative-merge convention).
         let mut file_pnot: Option<Pnot> = None;
+        // ISO/IEC 14496-12 §4.2 / §11.1 User-Type Boxes (`uuid`).
+        // File-level, "Zero or more" — collected in declaration order
+        // because a single file may carry several vendor extensions
+        // (PIFF tfxd + tfrf, Sony XAVC + GoPro GPMF, etc.) and there
+        // is no implied "first wins" semantics; every entry is a
+        // distinct vendor-schema record. QTFF does not define `uuid`
+        // at the spec level but real-world `.mov` files routinely
+        // carry them.
+        let mut file_uuids: Vec<Uuid> = Vec::new();
         // QTFF p. 35 Color Table atom (`ctab`). Movie-level, optional,
         // "at most one" by convention. Keeps the first when a writer
         // emits duplicates.
@@ -536,6 +559,20 @@ impl MovDemuxer {
                     if file_pnot.is_none() {
                         file_pnot = Some(parsed);
                     }
+                }
+                t if t == &UUID => {
+                    // ISO/IEC 14496-12 §4.2 / §11.1 — User-Type Box.
+                    // File-level, "Zero or more"; every entry is a
+                    // distinct vendor-schema record so we preserve
+                    // declaration order rather than apply the
+                    // "first wins" convention used by single-shot
+                    // atoms like `pdin` / `pnot` / `ctab`. The body
+                    // begins with the 16-byte `usertype` UUID
+                    // followed by an opaque payload (§4.2 puts no
+                    // lower bound on the payload length, so a body
+                    // of exactly 16 bytes — UUID only — is legal).
+                    let payload = read_payload(input.as_mut(), &hdr)?;
+                    file_uuids.push(parse_uuid(&payload)?);
                 }
                 t if t == &MOOV => {
                     if !seen_mdat {
@@ -772,6 +809,7 @@ impl MovDemuxer {
             styp: file_styp,
             prft: file_prft,
             pnot: file_pnot,
+            file_uuids,
             samples,
             next: 0,
             trex_defaults,

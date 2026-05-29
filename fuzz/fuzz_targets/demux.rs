@@ -127,6 +127,21 @@ fuzz_target!(|data: &[u8]| {
     let _ = dmx.ctab.is_some();
     let _ = dmx.pnot.is_some();
     let _ = dmx.clipping.is_some();
+    // Round-182 file-level `uuid` surface (ISO/IEC 14496-12 §4.2 /
+    // §11.1). Each entry is independent so we walk them all, capping
+    // at 64 to bound fuzz time on a pathological writer that emits
+    // thousands of duplicate vendor headers. The `usertype_string`
+    // call exercises the canonical RFC 4122 formatter; the
+    // `is_iso_reserved_namespace` branch exercises the §11.1 escape-
+    // pattern check on the attacker-supplied UUID prefix.
+    let nuuids = dmx.file_uuids.len().min(64);
+    for ui in 0..nuuids {
+        let u = &dmx.file_uuids[ui];
+        let _ = u.usertype_string();
+        let _ = u.is_iso_reserved_namespace();
+        let _ = u.iso_namespace_boxtype();
+        let _ = u.payload.len();
+    }
     let _ = dmx.ftyp.is_some();
     let _ = dmx.mvhd.is_some();
     let _ = dmx.is_fragmented();

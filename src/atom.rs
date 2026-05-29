@@ -432,6 +432,15 @@ pub const GMIN: [u8; 4] = fourcc("gmin");
 pub const TEXT: [u8; 4] = fourcc("text");
 pub const TMCD: [u8; 4] = fourcc("tmcd");
 
+/// Round 182 — User-Type Box (ISO/IEC 14496-12 §4.2 / §11.1). The
+/// escape hatch for vendor-specific extensions: the box's body starts
+/// with a 16-byte UUID identifying the vendor schema, followed by an
+/// opaque payload. May appear at file scope (typical) or nested inside
+/// any container that allows arbitrary boxes. QTFF does not define the
+/// box at spec level but real-world `.mov` files routinely embed one
+/// (Sony XAVC, GoPro GPMF, PIFF tfxd / tfrf, GoPro CAME, etc.).
+pub const UUID: [u8; 4] = fourcc("uuid");
+
 #[cfg(test)]
 mod tests {
     use super::*;

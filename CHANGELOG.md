@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 182 — User-Type Box (`uuid`) parser at file scope.
+  - New `src/uuid.rs` module decodes the ISO/IEC 14496-12:2015 §4.2 /
+    §11.1 escape-type box: every body opens with a 16-byte UUID
+    identifying the vendor extension followed by an opaque payload.
+    The parser surfaces both verbatim — `Uuid::usertype` (the raw
+    `[u8; 16]`) and `Uuid::payload` (the trailing bytes) — without
+    committing the crate to any vendor schema, so callers can dispatch
+    on the UUID bytes by exact match (PIFF tfxd /
+    `6d1d9b05-42d5-44e6-80e2-141daff757b2`, PIFF tfrf /
+    `d4807ef2-ca39-4695-8e54-26cb9e46a79f`, Sony XAVC, GoPro GPMF,
+    etc.).
+  - File-level `uuid` boxes surface on the demuxer as
+    `MovDemuxer::file_uuids: Vec<Uuid>` collected in declaration
+    order. §4.2's `Quantity: Zero or more` semantics is preserved
+    rather than collapsed: a single file may carry several vendor
+    extensions (e.g. tfxd + tfrf, Sony XAVC + GoPro GPMF) and there
+    is no implied "first wins" rule, so each entry stays distinct.
+  - Two diagnostic helpers ride along: `Uuid::usertype_string()` formats
+    the UUID as the canonical RFC 4122 textual form
+    `XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX`, and
+    `Uuid::is_iso_reserved_namespace()` /
+    `Uuid::iso_namespace_boxtype()` detect and decode the §11.1
+    reserved-namespace pattern (`type ‖ 00 11 00 10 80 00 00 AA 00 38
+    9B 71`) — the spec forbids writing standard boxes through the
+    `'uuid'` escape, so a true result flags a non-conformant writer
+    that promoted a normative box into the UUID space.
+  - Parser refuses a body shorter than the 16-byte `usertype` prefix
+    so a half-record can't silently disappear; an empty payload after
+    the UUID is accepted (§4.2 puts no lower bound on payload length).
+  - Top-level walker recognises `uuid` as an additional file-scope box
+    alongside `pdin` / `sidx` / `styp` / `prft` / `pnot`, matching
+    §4.2's "any top-level box" placement rule.
+  - QTFF does not define `uuid` at the spec level, but real-world
+    `.mov` files routinely embed user-type boxes from vendors that
+    emit QuickTime containers, so the file-level field is populated
+    for both QT MOV and ISO BMFF derivative inputs.
+  - Fuzz harness extended to sweep the file-level `uuid` surface
+    (capped at 64 entries per input to bound pathological-writer
+    cases) — `usertype_string` / `is_iso_reserved_namespace` /
+    `iso_namespace_boxtype` / `payload.len()` are exercised against
+    attacker-supplied UUID prefixes.
+  - 8 new integration tests in `tests/synth_round182_uuid.rs` cover
+    single + multi-`uuid` decode, declaration-order preservation, empty-
+    payload acceptance, truncated-prefix rejection at open time,
+    reserved-namespace flagging with boxtype recovery, vendor-UUID
+    non-reservation, and binary payload byte-for-byte round-trip.
+  - 9 new lib-mod unit tests in `src/uuid.rs` cover the parser
+    invariants and the §11.1 escape-pattern detector.
+
 - Round 176 — cargo-fuzz harness for the demuxer.
   - New `fuzz/` cargo-fuzz crate with a single `demux` target. The
     target feeds arbitrary fuzz-supplied bytes through

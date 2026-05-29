@@ -560,6 +560,39 @@ round-18 flattened `fragment_samples` queue. `tfdt` (§8.8.12) is
 now also parsed so per-fragment DTS climbs from the writer-supplied
 baseline rather than a re-zeroed cursor.
 
+Round 182 parses the **User-Type Box** (`uuid`) — ISO/IEC 14496-12
+§4.2 / §11.1 — at file scope. `uuid` is the spec's escape hatch for
+vendor-specific extensions: every box body opens with a 16-byte UUID
+identifying the vendor schema, followed by an opaque payload. The
+parser surfaces both verbatim — [`Uuid::usertype`] (the raw `[u8; 16]`)
+and `Uuid::payload` (the trailing bytes) — without committing the
+crate to any vendor schema, so callers dispatch on the UUID bytes by
+exact match (PIFF tfxd / tfrf live-DASH timing extensions, Sony XAVC
+clip metadata, GoPro GPMF telemetry, etc.). The boxes surface on the
+demuxer via `MovDemuxer::file_uuids: Vec<Uuid>` collected in
+declaration order: §4.2's `Quantity: Zero or more` lets a single file
+carry several vendor extensions (`tfxd` + `tfrf`, Sony XAVC + GoPro
+GPMF, …) and there is no implied "first wins" rule, so each entry
+stays distinct. Two diagnostic helpers ride along:
+`Uuid::usertype_string()` formats the UUID as the canonical RFC 4122
+textual form `XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX`, and
+`Uuid::is_iso_reserved_namespace()` / `Uuid::iso_namespace_boxtype()`
+detect and decode the §11.1 reserved-namespace pattern (`type ‖ 00 11
+00 10 80 00 00 AA 00 38 9B 71`) — the spec forbids writing standard
+boxes through the `'uuid'` escape, so a true result flags a non-
+conformant writer that promoted a normative box into the UUID space.
+A body shorter than the 16-byte `usertype` prefix is rejected at
+open time so a half-record can't silently disappear; an empty payload
+after the UUID is accepted (§4.2 puts no lower bound on payload
+length). QTFF does not define `uuid` at the spec level but real-world
+`.mov` files routinely embed user-type boxes from vendors that emit
+QuickTime containers, so the file-level field is populated for both
+QT MOV and ISO BMFF derivative inputs. The round-176 fuzz harness
+extends to sweep every collected entry (capped at 64 per input to
+bound pathological-writer cases) through `usertype_string` /
+`is_iso_reserved_namespace` / `iso_namespace_boxtype` /
+`payload.len()` so the adversarial UUID-prefix surface stays covered.
+
 Round 176 adds a **cargo-fuzz harness** under `fuzz/` (target
 `demux`). The target feeds arbitrary bytes through `MovDemuxer::open`,
 drains up to 256 packets via `next_packet`, touches every file-scope
