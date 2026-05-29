@@ -560,6 +560,27 @@ round-18 flattened `fragment_samples` queue. `tfdt` (§8.8.12) is
 now also parsed so per-fragment DTS climbs from the writer-supplied
 baseline rather than a re-zeroed cursor.
 
+Round 176 adds a **cargo-fuzz harness** under `fuzz/` (target
+`demux`). The target feeds arbitrary bytes through `MovDemuxer::open`,
+drains up to 256 packets via `next_packet`, touches every file-scope
+structural accessor (`ftyp` / `mvhd` / `pdin` / `sidx` / `styp` /
+`prft` / `ctab` / `pnot` / `clipping`, plus the brand and segment-
+classification predicates), sweeps every track through `track_load` /
+`track_selection` / `track_kinds` / `edit_segments_for` /
+`random_access_points`, pokes the round-74 / round-91 edit-list
+mapper at `media_pts = 0 / i64::MIN / i64::MAX`, and re-exercises the
+round-21 seek path via `seek_to(0, 0)`. The harness pairs with the
+round-162 robustness invariants — the 64 MiB
+`MAX_INMEMORY_ATOM_BODY` cap, the past-EOF top-level rejection, and
+the nested child-vs-parent envelope check — and keeps them
+exercised across the random-input space. A daily 30-minute run is
+scheduled via `.github/workflows/fuzz.yml`. Reference-movie alias
+resolution (`open_with_aliases`) is intentionally excluded so a fuzz-
+supplied `rmra/url ` cannot reach the network or the file system;
+the no-alias `MovDemuxer::open` path still walks every
+`rmra/rmda/rmdr/rmcs` parser so the reference-movie *parse* side is
+fully covered.
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per

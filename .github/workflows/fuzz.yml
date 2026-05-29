@@ -1,0 +1,22 @@
+name: Fuzz
+
+# Daily fuzz run for the cargo-fuzz harnesses under fuzz/. The QTFF /
+# ISO BMFF demuxer is the rich attack surface here — atom-tree
+# walking with `size:u32 / type:FourCC [/ largesize:u64]` length-
+# prefixed boxes, sample-table allocations driven by attacker-
+# supplied per-track counts, fragmented `moof/traf/trun` arithmetic,
+# the QTFF-only `gmhd/clip/matt/rmra/ctab/pnot` family, plus the
+# ISO BMFF-only `pdin/sidx/styp/prft` file-scope boxes. Single demux
+# target consumes the whole 30-minute budget.
+
+on:
+  schedule:
+    - cron: "23 8 * * *"   # daily 08:23 UTC, jittered off the hour
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    uses: OxideAV/.github/.github/workflows/crate-fuzz.yml@master
+    with:
+      time_budget_seconds: 1800
+    secrets: inherit

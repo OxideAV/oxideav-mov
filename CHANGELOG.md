@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 176 — cargo-fuzz harness for the demuxer.
+  - New `fuzz/` cargo-fuzz crate with a single `demux` target. The
+    target feeds arbitrary fuzz-supplied bytes through
+    `MovDemuxer::open`, drains up to 256 packets via `next_packet`,
+    touches every file-scope structural accessor (`ftyp`, `mvhd`,
+    `pdin`, `sidx`, `styp`, `prft`, `ctab`, `pnot`, `clipping`, plus
+    `brand_class` / `is_dash_segment` / `is_cmaf_segment` /
+    `is_heic` / `is_avif` / `is_miaf` / `is_fragmented` /
+    `is_faststart` / `alternate_groups` / `switch_groups`), sweeps
+    every track (capped at 64 per input) through `track_load` /
+    `track_selection` / `track_kinds` / `edit_segments_for` /
+    `random_access_points`, and re-exercises the round-21 / round-91
+    seek path via `seek_to(0, 0)`. Edit-list mapper is poked at
+    `media_pts = 0 / i64::MIN / i64::MAX` so the round-74 / round-91
+    fixed-point math gets adversarial values without depending on a
+    crafted corpus.
+  - Pairs with round 162's robustness work: the atom walker's 64 MiB
+    `MAX_INMEMORY_ATOM_BODY` cap, the past-EOF top-level rejection,
+    and the nested child-vs-parent envelope check are the safety
+    invariants the fuzz target keeps exercised across the random
+    input space.
+  - New `.github/workflows/fuzz.yml` schedules a daily 30-minute
+    `cargo fuzz run demux` via the org-level reusable fuzz workflow
+    at `OxideAV/.github/.github/workflows/crate-fuzz.yml`.
+  - Reference-movie alias resolution is intentionally excluded —
+    `open_with_aliases` would resolve fuzz-supplied `rmra/url `
+    strings against a caller-supplied opener, which would either
+    reach out to the network or spin on file-system probes. The
+    no-alias `MovDemuxer::open` path still walks every
+    `rmra/rmda/rmdr/rmcs` parser so the reference-movie *parse* side
+    is fully covered.
+
 - Round 162 — injection-robustness defenses against forged size fields
   and OOM levers in the atom walker / top-level demuxer parser.
   - New `MAX_INMEMORY_ATOM_BODY` constant (64 MiB). `read_payload`

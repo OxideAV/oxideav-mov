@@ -1,0 +1,98 @@
+[package]
+name = "oxideav-mov-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# The Apple QuickTime File Format (QTFF) demuxer is the rich fuzz
+# surface for this crate. QTFF and ISO BMFF share an atom hierarchy
+# of `size:u32 / type:FourCC [/ largesize:u64]` length-prefixed
+# boxes, and the walker descends `moov > trak > mdia > minf > stbl
+# > ...` (plus the fragmented `moof > traf > trun` parallel tree)
+# entirely driven by attacker-controlled length and count fields.
+# The QTFF-specific atoms — Apple `udta` (`©nam`/`©ART`/…),
+# reference-movie `rmra/rmda/rmdr/rmcd/rmcs`, the `gmhd/text/tmcd`
+# generic-media-header family, the `clip/crgn/matt/kmat` Apple
+# leaves, the `load/tapt/clef/prof/enof/ctab/pnot/chan` Apple
+# scalars, and the chapter-text-track decode path — broaden the
+# attack surface beyond what the sibling mp4 fuzz target covers.
+#
+# Classic attacker primitives this target exercises:
+#
+#   * Box size overflow / underflow — a `size:u32 = 0` means
+#     "extends to EOF"; `size:u32 = 1` means "read a 64-bit
+#     `largesize` next"; any other value < 8 is malformed; and a
+#     well-formed `largesize` can encode values larger than the
+#     remaining file. Round 162 hardened the top-level walker
+#     against past-EOF declared sizes; this fuzz target keeps that
+#     invariant exercised over the random-input space.
+#   * `read_payload` allocation cap — the round-162 MAX_INMEMORY
+#     _ATOM_BODY (64 MiB) ceiling has to survive arbitrary atom
+#     sizes without panicking, OOM-killing the process, or letting
+#     a `Vec::with_capacity(n as usize)` ever land where `n` is
+#     attacker-controlled.
+#   * Nested-box recursion depth — `moov > trak > edts > elst`,
+#     `meta > ilst > item > data`, fragmented `moof > traf`,
+#     `udta > meta > ilst`, `rmra > rmda > rmcs/rmcd/rmqu`, etc.
+#     Unbounded recursion across a pathological deep nest is a
+#     stack-blow vector.
+#   * Sample-table allocation arithmetic — `stsz.sample_size = 0`
+#     means "see per-sample table of length `sample_count`"; the
+#     `stsc` run-length form can describe billions of samples in a
+#     handful of bytes; `stco`/`co64` chunk offsets must each be
+#     in-file. A naive `Vec::with_capacity(sample_count as usize)`
+#     would OOM on a tiny crafted input.
+#   * `tfhd` / `trun` / `tfdt` arithmetic — the trun loop reads
+#     per-sample size, duration, flags and composition-time-offset
+#     from the fragment body, all bounded only by attacker-
+#     supplied counts. The `mfra/tfra` random-access index drives
+#     a binary search across attacker-supplied PTS keys.
+#   * Edit-list arithmetic — `elst` `media_time` is signed and
+#     `media_rate` is a fixed-point fraction; segment durations
+#     are in the movie timescale, which can be zero (divide-by-
+#     zero vector for any presentation-time math). The round-91
+#     non-unity rate-scaling math must not panic on degenerate
+#     input.
+#   * Sample-entry inner parsers — `avcC` / `hvcC` / `dOps` /
+#     `dfLa` / `esds` BER-encoded descriptors are recursively
+#     length-prefixed and live inside an outer sample entry whose
+#     `data_reference_index` is attacker-controlled.
+#   * Sample-aux / sample-group parsers — `saiz/saio` (rounds 147
+#     / 150) carry attacker-supplied per-sample sizes and offsets;
+#     `sbgp/sgpd` (round 80) carry attacker-supplied run-length
+#     samples-per-group counts and per-entry catalogue lengths.
+#   * Reference-movie alias chain — `rmra/rmda/rmdr/rmcs` describes
+#     a graph of alternate sources, including network URLs the
+#     opener resolves at probe time. The fuzz target uses the
+#     no-alias `MovDemuxer::open` so no aliases are followed; the
+#     reference-movie *parser* still gets exercised.
+#
+# There is no external system library worth pulling in as a
+# cross-decode oracle (the clean-room wall bars every QuickTime
+# SDK / mp4v2 / Bento4 / GPAC / libavformat as a reference
+# anyway), so this fuzz crate is **demux-only**: feed arbitrary
+# bytes through `MovDemuxer::open` and then drain `next_packet()`
+# for a bounded number of steps, asserting nothing panics,
+# aborts, or OOMs.
+[dependencies]
+libfuzzer-sys = "0.4"
+oxideav-core = "0.1"
+
+[dependencies.oxideav-mov]
+path = ".."
+
+# Prevent this from interfering with the umbrella workspace.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "demux"
+path = "fuzz_targets/demux.rs"
+test = false
+doc = false

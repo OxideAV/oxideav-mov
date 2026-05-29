@@ -1,0 +1,182 @@
+#![no_main]
+
+//! Demux arbitrary fuzz-supplied bytes through the QuickTime File
+//! Format (QTFF) / ISO Base Media File Format demuxer.
+//!
+//! The contract under test is purely that the calls *return*: a
+//! malformed stream yields `Err(Error::…)`, a well-formed one yields
+//! `Ok(_)` packets until `Error::Eof`, and neither path may panic,
+//! abort, integer-overflow (in a debug build), index out of bounds,
+//! or attempt an attacker-controlled `Vec::with_capacity` /
+//! `vec![0; n]` allocation that exceeds what the input could
+//! possibly back. Return values are intentionally discarded.
+//!
+//! The QTFF + ISO BMFF attack surface this exercises:
+//!
+//!   * The box-tree walker, which descends `moov > trak > mdia >
+//!     minf > stbl > ...` and the parallel `moof > traf > trun`
+//!     fragmented-MP4 tree, where every level is a
+//!     `size:u32 / type:FourCC [/ largesize:u64]` length-prefixed
+//!     container (QTFF p. 19 / ISO/IEC 14496-12 §4.2). `size:u32 = 0`
+//!     ("to EOF") and `size:u32 = 1` ("largesize follows") are the
+//!     two box sentinels that have historically defeated naive
+//!     parsers. Round 162 hardened the top-level walker against any
+//!     declared size that would extend past end-of-file; this target
+//!     keeps that invariant exercised over the random-input space.
+//!   * The `read_payload` allocation cap (64 MiB) — round 162 added
+//!     a ceiling so a forged extended `size` of (say) 8 GiB on a
+//!     1 KiB file errors at the allocation site before `vec![0u8;
+//!     n as usize]` lands. The fuzz target sprays attacker-controlled
+//!     size words at the walker so any unguarded `read_payload`
+//!     call site would surface as an OOM or panic.
+//!   * Sample-table expansion — `stts`, `stsc`, `stsz`/`stz2`,
+//!     `stco`/`co64`, `stss`, `stsh`, `ctts`, `sdtp`, `subs`,
+//!     `sbgp`/`sgpd`, `saiz`/`saio` all have attacker-controlled
+//!     entry counts that drive allocations and per-sample arithmetic.
+//!   * Fragmented MP4 — `tfhd` per-track defaults, `tfdt` base media
+//!     decode time, `trun` per-sample overrides, and the round-21
+//!     `mfra/tfra/mfro` random-access index, all of which compose
+//!     into the absolute file-offset arithmetic that locates each
+//!     fragment's payload bytes.
+//!   * Edit list (`edts/elst`) — signed `media_time` plus
+//!     fixed-point `media_rate`, with segment durations in the
+//!     (possibly zero) movie timescale. The round-74 / round-91
+//!     mapper has to survive degenerate edits without panicking.
+//!   * Sample-entry inner parsers — `avcC`, `hvcC`, `av1C`, `vpcC`,
+//!     `dfLa`, `dOps`, `dac3`, `dec3`, and the BER-encoded `esds`
+//!     descriptor chain, all walked under an outer
+//!     `data_reference_index` the input chooses.
+//!   * QTFF-specific atoms — Apple `udta` (`©nam`/`©ART`/…),
+//!     `gmhd > gmin/text/tmcd`, `clip/crgn`, `matt/kmat`, `load`,
+//!     `tapt/clef/prof/enof`, `ctab`, `pnot`, plus the
+//!     chapter-text-track decoder (the only place this crate
+//!     interprets sample *bytes*, not just sample-table offsets).
+//!   * ISO BMFF-only file-scope boxes — `pdin`, `sidx`, `styp`,
+//!     `prft`. Their parsers see arbitrary attacker-supplied counts
+//!     and version words and must reject every malformed shape at
+//!     open time.
+//!   * Metadata — 3GPP `udta` boxes (`titl`/`auth`/…), iTunes-style
+//!     `meta`/`keys`/`ilst` (whose `item > data` inner shape is
+//!     itself a recursive box tree), `BmffMeta` `iprp`/`iloc`/`iref`
+//!     graph traversal.
+//!   * `seek_to(0, 0)` re-exercises the sample-table walker from a
+//!     random offset, including the `tfra` binary search on
+//!     fragmented inputs.
+//!
+//! `MovDemuxer::open` is the no-resolver entry point: a successful
+//! open hands back a demuxer whose `next_packet` then walks every
+//! sample / fragment. We cap the per-input packet count so a
+//! pathological valid stream can't dominate fuzz time.
+//!
+//! Reference-movie alias resolution is intentionally NOT exercised
+//! here — `open_with_aliases` would resolve `rmra/url ` chains
+//! against a caller-supplied opener, and fuzz input controls the
+//! URL string, so a too-permissive opener would either reach out to
+//! the network or spin on file-system probes. The no-alias path
+//! still walks every `rmra/rmda/rmdr/rmcs` parser, so the *parse*
+//! side of the reference-movie surface is covered.
+
+use std::io::Cursor;
+
+use libfuzzer_sys::fuzz_target;
+use oxideav_core::{Demuxer, ReadSeek};
+
+use oxideav_mov::demuxer::MovDemuxer;
+
+/// Bound on how many packets we drain per fuzz input. A pathological
+/// but legitimate stream (e.g. a one-sample-per-chunk track with a
+/// long `stsz` table) could otherwise spin the fuzzer on a single
+/// many-packet track instead of exploring the input space.
+const MAX_PACKETS_PER_INPUT: usize = 256;
+
+fuzz_target!(|data: &[u8]| {
+    // Skip trivially-short inputs — the smallest legal QTFF / ISO
+    // BMFF file has at least an 8-byte `ftyp` box header (or a
+    // legacy bare-`moov` 8-byte header), so anything shorter can't
+    // even pass the outermost box read.
+    if data.len() < 8 {
+        return;
+    }
+    let rs: Box<dyn ReadSeek> = Box::new(Cursor::new(data.to_vec()));
+    let Ok(mut dmx) = MovDemuxer::open(rs) else {
+        return;
+    };
+
+    // Touch the metadata + streams accessors once. These are
+    // populated entirely by the open() path but exercising the
+    // accessors catches any post-open invariant the parser might
+    // have left in an inconsistent state. The `Demuxer` impl's
+    // `streams()` reaches into the `streams` field; the public
+    // fields below reach into the file-scope structural surfaces.
+    let _ = dmx.streams().len();
+    let _ = dmx.meta.len();
+    let _ = dmx.user_data.len();
+    let ntracks = dmx.tracks.len();
+
+    // Touch the round-162 / round-105 / round-114 / round-125 /
+    // round-128 / round-137 / round-157 file-scope surfaces. Each
+    // field is an immediate value populated by the open() path,
+    // so the access is cheap; landing here at all asserts the
+    // parser populated them in a consistent shape rather than
+    // leaving the demuxer half-built. The `is_*` predicates also
+    // walk the brand list once.
+    let _ = dmx.pdin.is_some();
+    let _ = dmx.sidx.len();
+    let _ = dmx.styp.len();
+    let _ = dmx.prft.len();
+    let _ = dmx.ctab.is_some();
+    let _ = dmx.pnot.is_some();
+    let _ = dmx.clipping.is_some();
+    let _ = dmx.ftyp.is_some();
+    let _ = dmx.mvhd.is_some();
+    let _ = dmx.is_fragmented();
+    let _ = dmx.is_faststart();
+    let _ = dmx.is_heic();
+    let _ = dmx.is_avif();
+    let _ = dmx.is_miaf();
+    let _ = dmx.first_styp().is_some();
+    let _ = dmx.first_prft().is_some();
+    let _ = dmx.is_dash_segment();
+    let _ = dmx.is_cmaf_segment();
+    let _ = dmx.brand_class().len();
+    let _ = dmx.alternate_groups().len();
+    let _ = dmx.switch_groups().len();
+
+    // Per-track accessor sweep. We touch every track but cap the
+    // count so a pathological `mvhd` with thousands of `trak`
+    // entries can't dominate fuzz time. The accessor calls
+    // exercise the round-89 / round-95 / round-122 typed-lookup
+    // paths plus the round-74 edit-segment surface.
+    let ntracks = ntracks.min(64);
+    for ti in 0..ntracks {
+        let _ = dmx.track_load(ti);
+        let _ = dmx.track_selection(ti);
+        let _ = dmx.track_kinds(ti);
+        let _ = dmx.edit_segments_for(ti);
+        let _ = dmx.random_access_points(ti).len();
+        // Exercise the round-74 / round-91 edit-list mapper on a
+        // couple of attacker-influenced media_pts values. The
+        // mapper has to survive any value, including i64::MIN /
+        // MAX, without panicking on the fixed-point math.
+        let _ = dmx.movie_pts_for(ti, 0);
+        let _ = dmx.movie_pts_for(ti, i64::MIN);
+        let _ = dmx.movie_pts_for(ti, i64::MAX);
+    }
+
+    // Drain packets up to MAX_PACKETS_PER_INPUT. The loop terminates
+    // on the first error (Eof, invalid, ...) — fuzz inputs are
+    // expected to crash the sample-table walker more often than they
+    // demux cleanly, so a bounded loop is plenty.
+    for _ in 0..MAX_PACKETS_PER_INPUT {
+        if dmx.next_packet().is_err() {
+            break;
+        }
+    }
+
+    // Re-exercise the seek path. seek_to(0, 0) is the cheapest
+    // possible call — it lands on the first sync sample of stream 0
+    // (if any) — and runs the `stss` / `tfra` / sample-offset
+    // machinery from a random offset. If the file had no streams
+    // this returns Err; that's fine.
+    let _ = dmx.seek_to(0, 0);
+});
