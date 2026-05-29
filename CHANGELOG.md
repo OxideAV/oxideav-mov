@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Round 187 — `read_atom_header` now rejects any atom header whose
+  declared `start + total_size` overflows `u64`. The post-round-182
+  scheduled fuzz run (libFuzzer target `demux`) produced
+  `crash-353fbd8c75a517f36da693fcea9b24d24240fc5e`: an 8-byte
+  placeholder atom followed by a `size=1` extended-size atom whose
+  `largesize = u64::MAX`. The top-level walker's
+  `body_end = payload_offset + (total_size - header_len)`
+  (`src/demuxer.rs:480`, mirrored in `src/atom.rs:263` for
+  `walk_children` and `src/demuxer.rs:357` for
+  `probe_reference_movies`) computed `24 + (u64::MAX - 16) =
+  u64::MAX + 8` and panicked with `attempt to add with overflow`
+  on debug builds. The new `checked_add` at the header read site
+  is the single point that bounds every downstream `body_end`
+  computation: once `start + total_size <= u64::MAX` is proven,
+  the equivalent `payload_offset + (total_size - header_len)`
+  also fits. Boundary case `start + largesize == u64::MAX`
+  remains accepted; downstream layers then decide whether the
+  body fits in the actual file.
+  - New regression test
+    `tests/synth_round187_extended_size_overflow.rs` replays the
+    exact crash bytes through `MovDemuxer::open`, focuses the
+    rejection on `read_atom_header` at a non-zero start, pins the
+    `start + largesize == u64::MAX` boundary as still accepted at
+    framing level, and exercises the same overflow shape nested
+    inside a `moov` container so the `walk_children` arithmetic
+    site is covered too.
+
 ### Added
 
 - Round 182 — User-Type Box (`uuid`) parser at file scope.

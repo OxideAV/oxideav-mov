@@ -134,6 +134,31 @@ pub fn read_atom_header<R: Read + Seek + ?Sized>(r: &mut R) -> Result<Option<Ato
         }
     };
 
+    // Reject any header whose declared end byte would overflow `u64`.
+    // This is the single point that bounds every downstream
+    // `payload_offset + payload_len()` / `body_end` computation: once
+    // we have proven `start + total_size <= u64::MAX`, the equivalent
+    // form `payload_offset + (total_size - header_len)` also fits,
+    // so the top-level walker, `walk_children`, and the per-atom
+    // `body_end` helpers can no longer integer-overflow on a forged
+    // extended size near `u64::MAX`. The fuzz target's crash input
+    // `00000008 00000000  00000001 09ffffff ffffffff ffffffff …`
+    // exercises exactly this path: an 8-byte placeholder atom
+    // followed by a `size=1` extended-size atom whose `largesize`
+    // is `u64::MAX`, which without this check overflows
+    // `payload_offset + (u64::MAX - 16)` in `src/demuxer.rs` line 480
+    // and `src/atom.rs` line 263 (debug builds panic; release builds
+    // silently wrap and would compute a body_end far below
+    // `total_len`, masking the malformed input).
+    if let Some(t) = total_size {
+        if start.checked_add(t).is_none() {
+            return Err(Error::invalid(format!(
+                "MOV: atom '{}' declared size {t} from offset {start} overflows u64",
+                std::str::from_utf8(&fourcc).unwrap_or("????"),
+            )));
+        }
+    }
+
     Ok(Some(AtomHeader {
         fourcc,
         total_size,

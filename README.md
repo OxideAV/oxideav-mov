@@ -614,6 +614,21 @@ the no-alias `MovDemuxer::open` path still walks every
 `rmra/rmda/rmdr/rmcs` parser so the reference-movie *parse* side is
 fully covered.
 
+Round 187 closes the first finding from the scheduled fuzz harness:
+`crash-353fbd8c75a517f36da693fcea9b24d24240fc5e` declared a `size=1`
+extended-size atom with `largesize = u64::MAX` after an 8-byte
+placeholder. The walker's `body_end = payload_offset + (total_size -
+header_len)` overflowed `u64` on the addition step (debug builds
+panicked; release builds would silently wrap). The fix anchors the
+defence at `read_atom_header`: any header whose declared `start +
+total_size` overflows `u64` is rejected before downstream layers
+ever compute a `body_end`. Pinned by
+`tests/synth_round187_extended_size_overflow.rs` (the verbatim
+crash bytes, the focused header-level rejection, the
+`start + largesize == u64::MAX` acceptance boundary, and the same
+overflow shape nested inside a `moov` so `walk_children`'s
+arithmetic site is covered too).
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per
