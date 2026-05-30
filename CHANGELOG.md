@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-mov/compare/v0.0.2...v0.0.3) - 2026-05-29
+
+### Other
+
+- Round 187 — reject extended-size atoms that overflow u64 (fuzz crash 353f)
+- Round 182 — User-Type Box (uuid) parser at file scope
+- scrub enumerated-denials disclaimer per audit doctrine
+- Round 176 — cargo-fuzz harness for the QTFF / ISO BMFF demuxer
+- Round 162 — injection-robustness for the atom walker
+- Round 157 — Preview atom (pnot) parser, QTFF pp. 26-27 / Figure 1-7
+- Round 150 — traf-scope saiz / saio sample-aux wiring (§8.7.8.1 / §8.7.9.1)
+- Round 147 — Sample Auxiliary Information saiz / saio parsers (ISO/IEC 14496-12 §8.7.8 / §8.7.9, stbl-scope)
+- parse matt + kmat (Track Matte / Compressed Matte) at track scope
+- parse clip + crgn (Clipping atom / Clipping Region) at movie + track scope
+- round 137: parse the Color Table atom (`ctab`) at movie scope
+- Round 128 — Producer Reference Time Box (prft) parser, ISO/IEC 14496-12 §8.16.5
+- Round 125 — Segment Type Box (styp) parser, ISO/IEC 14496-12 §8.16.2
+- Round 122 — Track Kind box (kind) parser, ISO/IEC 14496-12 §8.10.4
+- Round 118 — Sub-Sample Information Box (subs) parser, ISO/IEC 14496-12 §8.7.7
+
 ### Fixed
 
 - Round 187 — `read_atom_header` now rejects any atom header whose
