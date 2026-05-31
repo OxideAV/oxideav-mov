@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- Round 199 — Track Group Box (`trgr`) parser at per-track scope; new `Track::track_groups()` / `MovDemuxer::track_group_entries(track_index)` / `MovDemuxer::tracks_in_group(type, id)` / `MovDemuxer::track_groups()` accessors (ISO/IEC 14496-12 §8.3.4)
+
 ## [0.0.3](https://github.com/OxideAV/oxideav-mov/compare/v0.0.2...v0.0.3) - 2026-05-29
 
 ### Other

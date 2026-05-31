@@ -191,6 +191,14 @@ pub struct Track {
     /// may carry several `kind` entries simultaneously (different
     /// taxonomies labelling the same track). Round 122.
     pub kinds: Vec<KindEntry>,
+    /// Parsed `trgr` Track Group Box children (ISO/IEC 14496-12 §8.3.4)
+    /// — one entry per FullBox child of the (at most one per `trak`)
+    /// `trgr` container, in file order. Each entry is a
+    /// `(track_group_type, track_group_id)` membership declaration; two
+    /// tracks whose lists contain matching pairs belong to the same
+    /// group. Empty when the track carries no `trgr`. ISO BMFF-only —
+    /// QTFF does not define this box. Round 199.
+    pub track_groups: Vec<crate::track_group::TrackGroupTypeEntry>,
     /// Parsed track-level Clipping atom (QTFF p. 43), when the track's
     /// `trak` carries an optional `clip` declaring a spatial mask
     /// scoped to this individual track (independent of the movie-level
@@ -390,6 +398,18 @@ impl Track {
     /// caller may receive any number of entries, in file order.
     pub fn track_kinds(&self) -> &[KindEntry] {
         &self.kinds
+    }
+
+    /// Parsed `trgr` Track Group Box children (ISO/IEC 14496-12 §8.3.4)
+    /// for this track. Each entry is one `(track_group_type,
+    /// track_group_id)` membership declaration — two tracks whose lists
+    /// share a `(type, id)` pair belong to the same group. Empty slice
+    /// when the track has no `trgr` child (the common case for plain
+    /// MP4 / fMP4 / `.mov` inputs that don't use track grouping); the
+    /// box is itself `Quantity: Zero or one` (§8.3.4.1) but its
+    /// children are unconstrained.
+    pub fn track_groups(&self) -> &[crate::track_group::TrackGroupTypeEntry] {
+        &self.track_groups
     }
 
     /// Resolve the track's `edts/elst` edit list into the sequence of

@@ -614,6 +614,51 @@ the no-alias `MovDemuxer::open` path still walks every
 `rmra/rmda/rmdr/rmcs` parser so the reference-movie *parse* side is
 fully covered.
 
+Round 199 parses the **Track Group Box** (`trgr`) — ISO/IEC 14496-12
+§8.3.4 (p. 27) — at per-track scope (`moov/trak/trgr`). The container
+itself is empty-bodied (§8.3.4.2 `aligned(8) class TrackGroupBox('trgr') {}`)
+and holds zero or more *track-group-type* FullBoxes whose FourCC is the
+`track_group_type` and whose first u32 (after the FullBox header) is the
+`track_group_id`. Two tracks whose `trgr` containers each carry a child
+with the same FourCC and the same `track_group_id` belong to the same
+track group (§8.3.4.3). The pair `(track_group_type, track_group_id)` is
+the spec's group identifier — same type but different id means different
+groups (two msrc-tagged participants in a video-telephony call), and
+same id but different type also means different groups (an `'msrc'`
+membership does not collide with a derived-spec group sharing the id).
+Each [`TrackGroupTypeEntry`] surfaces the type FourCC, the id, the
+FullBox version (rejected if non-zero per §8.3.4.2), the flags
+low-24-bit (tolerated even when non-zero, matching `parse_kind` /
+`parse_tsel`), and any type-specific tail bytes verbatim (§8.3.4.2 "the
+remaining data may be specified for a particular track_group_type" —
+empty for `'msrc'` and every other base-spec type, populated for
+derived-spec or vendor extensions). The `is_msrc()` predicate marks the
+§8.3.4.3 multi-source-presentation group, the only `track_group_type`
+the base spec defines. Surfaces on the demuxer via four accessors:
+`Track::track_groups()` and `MovDemuxer::track_group_entries(track)`
+return the per-track entry list in file order;
+`MovDemuxer::tracks_in_group(type, id)` returns every track that
+declares membership of one specific `(type, id)` group; and
+`MovDemuxer::track_groups()` returns every observed `(type, id)` bucket
+sorted ascending, with per-bucket duplicate-track dedup (a track that
+lists the same membership row twice — legal per §8.3.4 since the spec
+does not forbid duplicate rows — appears once in the bucket). The
+parser uses the existing `walk_children` machinery so every
+round-162 / round-187 generic atom-header guardrail applies (past-EOF
+rejection, 64-MiB `read_payload` cap, `size==1` + largesize overflow
+check). `trgr` itself is `Quantity: Zero or one` per `trak` (§8.3.4.1);
+a malformed writer that emits two `trgr` containers in one `trak` is
+tolerated first-wins (matching `tapt` / `load` / `cslg` / `clip` /
+`matt` conservative-merge policy at trak scope). §8.3.4.1 is explicit
+that track groups indicate **shared characteristics or relationships**,
+not **dependencies** — those stay the `tref` Track Reference Box's
+job, and this parser does not blur the two surfaces. QTFF does not
+define this box; it is ISO BMFF-only and stays empty for plain `.mov`
+inputs. The round-176 fuzz harness extends to walk every track's
+`trgr` entry list (capped at 16/track to bound pathological inputs)
+plus the file-level `track_groups()` bucket aggregator and a
+`tracks_in_group` probe derived from the input's first four bytes.
+
 Round 187 closes the first finding from the scheduled fuzz harness:
 `crash-353fbd8c75a517f36da693fcea9b24d24240fc5e` declared a `size=1`
 extended-size atom with `largesize = u64::MAX` after an 8-byte

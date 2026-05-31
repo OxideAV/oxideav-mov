@@ -16,7 +16,8 @@ use crate::atom::{
     DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MATT, MDAT, MDHD,
     MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA,
     RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD,
-    STSH, STSS, STSZ, STTS, STYP, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, UDTA, UUID, VMHD, WIDE,
+    STSH, STSS, STSZ, STTS, STYP, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID, VMHD,
+    WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -1439,6 +1440,74 @@ impl MovDemuxer {
             .unwrap_or(&[])
     }
 
+    /// Track Group Box membership entries (ISO/IEC 14496-12 §8.3.4) for
+    /// `track_index`, in file order. Each entry surfaces one
+    /// `(track_group_type, track_group_id)` pair declared by a FullBox
+    /// child of the track's `trgr` container. Empty slice when the
+    /// track has no `trgr` child. QTFF does not define this box; for
+    /// plain `.mov` inputs the result is always empty. See
+    /// [`Self::track_groups_for`] for the dual lookup ("which tracks
+    /// share this `(type, id)` group?").
+    pub fn track_group_entries(
+        &self,
+        track_index: usize,
+    ) -> &[crate::track_group::TrackGroupTypeEntry] {
+        self.tracks
+            .get(track_index)
+            .map(|t| t.track_groups())
+            .unwrap_or(&[])
+    }
+
+    /// All tracks that belong to the same §8.3.4 track group, given the
+    /// group's `(track_group_type, track_group_id)` key. Returns the
+    /// 0-based track indices in track-declaration order. A return of an
+    /// empty `Vec` means no track in the file declares that membership
+    /// (the spec doesn't reserve a sentinel for "absent group", so the
+    /// caller must distinguish "valid group, no members" from "we
+    /// haven't named that group" themselves).
+    pub fn tracks_in_group(&self, track_group_type: [u8; 4], track_group_id: u32) -> Vec<usize> {
+        let mut out = Vec::new();
+        for (idx, t) in self.tracks.iter().enumerate() {
+            for entry in t.track_groups() {
+                if entry.track_group_type == track_group_type
+                    && entry.track_group_id == track_group_id
+                {
+                    out.push(idx);
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Bucket the file's tracks by their declared `(track_group_type,
+    /// track_group_id)` memberships. Returns
+    /// `Vec<((type, id), Vec<track_index>)>` sorted ascending by
+    /// `(track_group_type, track_group_id)`. A track that belongs to
+    /// several groups appears in several buckets; a track with no
+    /// `trgr` membership appears in none. Pairs with
+    /// [`Self::tracks_in_group`] for single-bucket lookup and with
+    /// [`Self::alternate_groups`] / [`Self::switch_groups`] for the
+    /// other ISO BMFF track-relationship surfaces.
+    #[allow(clippy::type_complexity)]
+    pub fn track_groups(&self) -> Vec<(([u8; 4], u32), Vec<usize>)> {
+        let mut by_group: std::collections::BTreeMap<([u8; 4], u32), Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (idx, t) in self.tracks.iter().enumerate() {
+            for entry in t.track_groups() {
+                by_group.entry(entry.key()).or_default().push(idx);
+            }
+        }
+        // Dedup per-bucket — a single track that lists the same (type, id)
+        // pair twice (legal per §8.3.4) should not appear twice in the
+        // bucket, since the bucket is "set of member tracks" not
+        // "multiset of declarations".
+        for v in by_group.values_mut() {
+            v.dedup();
+        }
+        by_group.into_iter().collect()
+    }
+
     /// Group the file's tracks by ISO/IEC 14496-12 §8.10.3
     /// `switch_group`. Returns `Vec<(switch_group_id, Vec<track_index>)>`
     /// sorted ascending by switch-group id. Tracks without a `tsel`
@@ -2414,6 +2483,15 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
             }
             t if t == &TREF => {
                 track.references = parse_tref(r, child)?;
+            }
+            // ISO/IEC 14496-12 §8.3.4 — Track Group Box. Container
+            // whose children are FullBoxes whose FourCC is the
+            // track_group_type. Quantity: Zero or one (§8.3.4.1), so
+            // first-wins on the rare duplicate case (consistent with
+            // `tapt` / `load` / `cslg` / `clip` / `matt` conservative-
+            // merge policy at trak scope).
+            t if t == &TRGR && track.track_groups.is_empty() => {
+                track.track_groups = crate::track_group::parse_trgr(r, child)?;
             }
             t if t == &TAPT => {
                 track.tapt = Some(parse_tapt(r, child)?);

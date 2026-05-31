@@ -156,6 +156,20 @@ fuzz_target!(|data: &[u8]| {
     let _ = dmx.brand_class().len();
     let _ = dmx.alternate_groups().len();
     let _ = dmx.switch_groups().len();
+    // Round-199 file-level `trgr` aggregate surface (ISO/IEC 14496-12
+    // §8.3.4). The bucket map walks every track's per-trak entry list
+    // once; per-bucket dedup keeps it bounded. Touch the dual-lookup
+    // path with an attacker-style key derived from the input's first
+    // four bytes so the `tracks_in_group` matcher is exercised against
+    // a random-but-not-fully-empty FourCC.
+    let tgroups = dmx.track_groups();
+    let _ = tgroups.len();
+    if data.len() >= 4 {
+        let mut probe_type = [0u8; 4];
+        probe_type.copy_from_slice(&data[..4]);
+        let _ = dmx.tracks_in_group(probe_type, 0).len();
+    }
+    let _ = dmx.tracks_in_group(*b"msrc", 1).len();
 
     // Per-track accessor sweep. We touch every track but cap the
     // count so a pathological `mvhd` with thousands of `trak`
@@ -167,6 +181,14 @@ fuzz_target!(|data: &[u8]| {
         let _ = dmx.track_load(ti);
         let _ = dmx.track_selection(ti);
         let _ = dmx.track_kinds(ti);
+        // Round-199 per-track Track Group Box (`trgr`) entry list.
+        let entries = dmx.track_group_entries(ti);
+        let _ = entries.len();
+        for e in entries.iter().take(16) {
+            let _ = e.key();
+            let _ = e.is_msrc();
+            let _ = e.payload.len();
+        }
         let _ = dmx.edit_segments_for(ti);
         let _ = dmx.random_access_points(ti).len();
         // Exercise the round-74 / round-91 edit-list mapper on a

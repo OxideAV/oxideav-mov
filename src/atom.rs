@@ -81,6 +81,7 @@ impl AtomHeader {
                 | b"imap"
                 | b"rmra"
                 | b"rmda"
+                | b"trgr"
         )
     }
 }
@@ -354,6 +355,11 @@ pub const SKIP: [u8; 4] = fourcc("skip");
 pub const WIDE: [u8; 4] = fourcc("wide");
 pub const UDTA: [u8; 4] = fourcc("udta");
 pub const TREF: [u8; 4] = fourcc("tref");
+/// Round 199 — Track Group Box (ISO/IEC 14496-12 §8.3.4). Container
+/// inside `trak` whose children are FullBoxes whose FourCC is the
+/// `track_group_type`. Two tracks that contain a child with the same
+/// FourCC and the same `track_group_id` belong to the same track group.
+pub const TRGR: [u8; 4] = fourcc("trgr");
 pub const PNOT: [u8; 4] = fourcc("pnot");
 /// Round 89 — Track Load Settings atom (QTFF p. 48).
 pub const LOAD: [u8; 4] = fourcc("load");
