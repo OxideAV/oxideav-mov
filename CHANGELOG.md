@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Round 204 — Compact Sample Size Box (`stz2`) parser at `stbl` scope (ISO/IEC 14496-12 §8.7.3.3). The on-disk `field_size` (4 / 8 / 16 bits) is decoded into the existing `stsz_table: Vec<u32>` so downstream `sample_count()` / `sample_size_at()` paths continue to work unchanged. New `SampleTable::sample_size_source: Option<SampleSizeSource>` field and `MovDemuxer::sample_size_source(track_index)` accessor surface which of `stsz` (§8.7.3.2) / `stz2` (§8.7.3.3) populated the table, preserving the on-disk encoding choice for round-tripping remuxers. The two boxes are mutually-exclusive per §8.7.3; a malformed writer emitting both is tolerated first-wins (matching the `sbgp`/`sgpd`/`saiz`/`saio` conservative-merge convention). Rejected at open time: `field_size` other than 4/8/16 (§8.7.3.3.2), non-zero 24-bit `reserved` word (§8.7.3.3.1), truncated entry table, body shorter than the 12-byte fixed header. 4-bit packing decodes MSB-first per §8.7.3.3.2 with a zero-pad nibble silently dropped for odd `sample_count`. The round-176 fuzz harness extends to call the new per-track `sample_size_source` accessor.
 - Round 199 — Track Group Box (`trgr`) parser at per-track scope; new `Track::track_groups()` / `MovDemuxer::track_group_entries(track_index)` / `MovDemuxer::tracks_in_group(type, id)` / `MovDemuxer::track_groups()` accessors (ISO/IEC 14496-12 §8.3.4)
 
 ## [0.0.3](https://github.com/OxideAV/oxideav-mov/compare/v0.0.2...v0.0.3) - 2026-05-29

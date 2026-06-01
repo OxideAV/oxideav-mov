@@ -116,9 +116,9 @@ pub use sample_groups::{
     VisualRandomAccess,
 };
 pub use sample_table::{
-    parse_sdtp, parse_stsh, parse_subs, IsLeading, SampleDependsOn, SampleEntry,
-    SampleHasRedundancy, SampleIsDependedOn, SampleTable, SdtpEntry, StshEntry, SubSampleEntry,
-    SubSampleInfo,
+    parse_sdtp, parse_stsh, parse_stz2, parse_subs, IsLeading, SampleDependsOn, SampleEntry,
+    SampleHasRedundancy, SampleIsDependedOn, SampleSizeSource, SampleTable, SdtpEntry, StshEntry,
+    SubSampleEntry, SubSampleInfo,
 };
 pub use sidx::{parse_sidx, ReferenceType, Sidx, SidxReference};
 pub use styp::{parse_styp, Styp};

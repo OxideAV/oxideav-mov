@@ -342,6 +342,13 @@ pub const STSS: [u8; 4] = fourcc("stss");
 pub const STSH: [u8; 4] = fourcc("stsh"); // Shadow Sync Sample Box
 pub const STSC: [u8; 4] = fourcc("stsc");
 pub const STSZ: [u8; 4] = fourcc("stsz");
+/// Round 204 — Compact Sample Size Box (ISO/IEC 14496-12 §8.7.3.3). The
+/// ISO BMFF alternative to `stsz`: each entry occupies `field_size`
+/// bits (4 / 8 / 16) rather than a fixed u32, packing per-sample sizes
+/// for streams whose sizes routinely fit in fewer than 32 bits. Only
+/// one of `stsz` or `stz2` appears in any given `stbl`. QTFF does not
+/// define this box; it is ISO BMFF-only.
+pub const STZ2: [u8; 4] = fourcc("stz2");
 pub const STCO: [u8; 4] = fourcc("stco");
 pub const CO64: [u8; 4] = fourcc("co64");
 pub const CTTS: [u8; 4] = fourcc("ctts");

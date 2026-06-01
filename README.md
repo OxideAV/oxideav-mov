@@ -614,6 +614,43 @@ the no-alias `MovDemuxer::open` path still walks every
 `rmra/rmda/rmdr/rmcs` parser so the reference-movie *parse* side is
 fully covered.
 
+Round 204 parses the **Compact Sample Size Box** (`stz2`) — ISO/IEC
+14496-12 §8.7.3.3 — at `stbl` scope, completing the §8.7.3 sample-size
+surface. `stz2` is the on-disk-compact alternative to `stsz`: each
+entry occupies a fixed `field_size` (4, 8 or 16 bits per §8.7.3.3.2)
+rather than a full 32 bits, packing per-sample sizes for streams whose
+sizes routinely fit in fewer bits (small text-track lines, low-bitrate
+CMAF audio fragments, screen-recording IFRAME streams whose dropped
+P/B frames sit under 256 bytes). Only one of `stsz` / `stz2` appears
+in any given `stbl` per §8.7.3; a malformed writer that emits both is
+tolerated first-wins, matching the `sbgp`/`sgpd`/`saiz`/`saio`
+conservative-merge convention. The 4-bit packing decodes MSB-first
+per §8.7.3.3.2 ("each byte contains two values: entry[i]<<4 +
+entry[i+1]"), with the trailing zero-pad nibble silently dropped for
+odd `sample_count` ("the last byte is padded with zeros"). Decoded
+entries are widened to `u32` and stored in the existing
+[`SampleTable::stsz_table`] so every downstream consumer
+([`SampleTable::sample_count`], `SampleTable::sample_size_at`, the
+sample iterator) continues to work unchanged regardless of which box
+populated the table. A new [`SampleSizeSource`] enum + companion
+[`SampleTable::sample_size_source`] field + companion
+`MovDemuxer::sample_size_source(track_index)` accessor surface the
+on-disk encoding choice — `Stsz`, `Stz2 { field_size }`, or `None`
+when the `stbl` carries no sample-size box (fragmented-only tracks
+whose sizes all come from `trun`) — so a round-tripping remuxer that
+wants to preserve a compact-encoded segment can detect it without
+re-parsing the box. Rejected at open time: `field_size` other than
+4 / 8 / 16 (§8.7.3.3.2 enumerates exactly these three widths),
+non-zero 24-bit `reserved` word (§8.7.3.3.1 spec-fixes it at 0),
+truncated entry table (post-header byte count shorter than
+`ceil(sample_count × field_size / 8)`), unknown FullBox `version`
+(spec fixes at 0), body shorter than the 12-byte fixed header. QTFF
+does not define this box; it is ISO BMFF-only and stays absent for
+plain `.mov` inputs. The round-176 fuzz harness extends to call the
+new per-track `sample_size_source` accessor so an attacker-supplied
+`stbl` with both boxes, neither box, or a pathological `field_size`
+value reaches the accessor without panicking.
+
 Round 199 parses the **Track Group Box** (`trgr`) — ISO/IEC 14496-12
 §8.3.4 (p. 27) — at per-track scope (`moov/trak/trgr`). The container
 itself is empty-bodied (§8.3.4.2 `aligned(8) class TrackGroupBox('trgr') {}`)

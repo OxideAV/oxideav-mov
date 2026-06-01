@@ -16,8 +16,8 @@ use crate::atom::{
     DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MATT, MDAT, MDHD,
     MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA,
     RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD,
-    STSH, STSS, STSZ, STTS, STYP, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID, VMHD,
-    WIDE,
+    STSH, STSS, STSZ, STTS, STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID,
+    VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -37,7 +37,7 @@ use crate::sample_aux::{parse_saio, parse_saiz};
 use crate::sample_groups::{parse_sbgp, parse_sgpd};
 use crate::sample_table::{
     parse_co64, parse_ctts, parse_sdtp, parse_stco, parse_stsc, parse_stsh, parse_stss, parse_stsz,
-    parse_stts, parse_subs, SampleEntry, SampleTable, SubSampleInfo,
+    parse_stts, parse_stz2, parse_subs, SampleEntry, SampleSizeSource, SampleTable, SubSampleInfo,
 };
 use crate::sidx::{parse_sidx, Sidx};
 use crate::styp::{parse_styp, Styp};
@@ -1683,6 +1683,27 @@ impl MovDemuxer {
             .sample_dependency(sample_zero_based)
     }
 
+    /// Source of `track_index`'s sample-size data: `stsz` (§8.7.3.2),
+    /// `stz2` (§8.7.3.3), or `None` when the `stbl` carries no
+    /// sample-size box at all (a fragmented-only track whose sizes all
+    /// come from `trun`). Round 204 — ISO/IEC 14496-12 §8.7.3 treats
+    /// the two as mutually-exclusive alternatives and at most one
+    /// appears in any given `stbl`; this accessor lets a remuxer that
+    /// wants to round-trip the original on-disk encoding choice
+    /// (e.g. preserve a compact-packed CMAF segment) detect it
+    /// without re-parsing the box. The per-sample values downstream
+    /// code consumes through [`SampleTable::sample_count`] and
+    /// [`SampleTable::sample_size_at`] are identical regardless of
+    /// which box populated the table.
+    ///
+    /// Returns `None` when `track_index` is out of range.
+    pub fn sample_size_source(&self, track_index: usize) -> Option<SampleSizeSource> {
+        self.tracks
+            .get(track_index)?
+            .sample_table
+            .sample_size_source
+    }
+
     /// Look up the alternative sync sample for a shadowed sample via the
     /// `stsh` (Shadow Sync Sample Box, ISO/IEC 14496-12 §8.6.3).
     ///
@@ -2850,12 +2871,36 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
                 let body = read_payload(r, child)?;
                 table.stsc = parse_stsc(&body)?;
             }
-            t if t == &STSZ => {
+            // ISO/IEC 14496-12 §8.7.3 lists `stsz` and `stz2` as
+            // mutually-exclusive alternatives — at most one of the two
+            // appears in any given `stbl`. A malformed writer that
+            // emits both is tolerated first-wins (whichever child the
+            // walker reaches first populates the table; the second is
+            // ignored). Matches the `sbgp`/`sgpd`/`saiz`/`saio`
+            // conservative-merge convention.
+            t if t == &STSZ && table.sample_size_source.is_none() => {
                 let body = read_payload(r, child)?;
                 let (def, n, tab) = parse_stsz(&body)?;
                 table.stsz_default_size = def;
                 table.stsz_count = n;
                 table.stsz_table = tab;
+                table.sample_size_source = Some(SampleSizeSource::Stsz);
+            }
+            // Round 204 — Compact Sample Size Box (§8.7.3.3). `stz2`
+            // is the mutually-exclusive alternative to `stsz`:
+            // first-of-the-two wins so a malformed writer emitting
+            // both does not silently overwrite the parsed table with
+            // the second box. §8.7.3.3 has no constant-size branch —
+            // every entry is listed explicitly — so `stsz_default_size`
+            // is unconditionally `None` and downstream code that walks
+            // `stsz_table[index]` works unchanged.
+            t if t == &STZ2 && table.sample_size_source.is_none() => {
+                let body = read_payload(r, child)?;
+                let (field_size, n, tab) = parse_stz2(&body)?;
+                table.stsz_default_size = None;
+                table.stsz_count = n;
+                table.stsz_table = tab;
+                table.sample_size_source = Some(SampleSizeSource::Stz2 { field_size });
             }
             t if t == &STCO => {
                 let body = read_payload(r, child)?;

@@ -191,6 +191,14 @@ fuzz_target!(|data: &[u8]| {
         }
         let _ = dmx.edit_segments_for(ti);
         let _ = dmx.random_access_points(ti).len();
+        // Round-204 sample-size-source discriminator (ISO/IEC 14496-12
+        // §8.7.3). Exercises the `stsz` / `stz2` enum surface so an
+        // attacker-supplied stbl with both boxes, neither box, or a
+        // pathological field_size value reaches the accessor without
+        // panicking. The discriminator is `Option<SampleSizeSource>`;
+        // the `Some(Stz2 { field_size })` path leaks the on-disk
+        // field width so a fuzzer-generated stz2 surfaces here.
+        let _ = dmx.sample_size_source(ti);
         // Exercise the round-74 / round-91 edit-list mapper on a
         // couple of attacker-influenced media_pts values. The
         // mapper has to survive any value, including i64::MIN /

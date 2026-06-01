@@ -258,6 +258,24 @@ pub struct SubSampleInfo {
     pub subsamples: Vec<SubSampleEntry>,
 }
 
+/// Which on-disk sample-size box populated [`SampleTable::stsz_table`]
+/// (and friends). Round 204 — ISO/IEC 14496-12 §8.7.3 lists `stsz`
+/// (§8.7.3.2) and `stz2` (§8.7.3.3) as mutually-exclusive alternatives;
+/// exactly one of the two may appear in any given `stbl`. Once parsed,
+/// the per-sample values both surfaces produce are identical (sizes are
+/// widened to `u32`), but downstream code that wants to know the
+/// on-disk encoding choice — e.g. a remuxer that wants to preserve the
+/// compact-encoded shape — can inspect this enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SampleSizeSource {
+    /// Sizes came from a Sample Size Box (`stsz`, §8.7.3.2).
+    Stsz,
+    /// Sizes came from a Compact Sample Size Box (`stz2`, §8.7.3.3).
+    /// The `field_size` (4 / 8 / 16) preserves the on-disk bit width
+    /// each entry was packed at — useful for round-trip remuxing.
+    Stz2 { field_size: u8 },
+}
+
 /// Parsed sample table for a single track.
 #[derive(Clone, Debug, Default)]
 pub struct SampleTable {
@@ -269,6 +287,15 @@ pub struct SampleTable {
     pub stsz_default_size: Option<u32>,
     pub stsz_count: u32,
     pub stsz_table: Vec<u32>,
+    /// Sample-size encoding source: which of `stsz` / `stz2` populated
+    /// `stsz_default_size` / `stsz_count` / `stsz_table`. Round 204
+    /// surfaces the distinction so callers can detect a compact-encoded
+    /// stream without re-parsing the box; the per-sample values
+    /// downstream code consumes through `sample_count()` /
+    /// `sample_size_at()` are identical either way. `None` when the
+    /// `stbl` carries no sample-size box at all (fragmented-only tracks
+    /// where every sample comes from `trun`).
+    pub sample_size_source: Option<SampleSizeSource>,
     /// Chunk offsets in *file* (input) byte coordinates. May be u64
     /// when `co64` was used.
     pub chunk_offsets: Vec<u64>,
@@ -562,6 +589,110 @@ pub fn parse_stsz(payload: &[u8]) -> Result<(Option<u32>, u32, Vec<u32>)> {
         out.push(read_u32(&body[i * 4..]));
     }
     Ok((None, count, out))
+}
+
+/// Parse `stz2` (Compact Sample Size Box) payload.
+///
+/// Layout per ISO/IEC 14496-12 §8.7.3.3.1:
+///
+/// ```text
+/// aligned(8) class CompactSampleSizeBox extends FullBox('stz2', 0, 0) {
+///     unsigned int(24) reserved = 0;
+///     unsigned int(8)  field_size;
+///     unsigned int(32) sample_count;
+///     for (i = 1; i <= sample_count; i++) {
+///         unsigned int(field_size) entry_size;
+///     }
+/// }
+/// ```
+///
+/// `field_size` is the per-sample size in bits and must take the value
+/// 4, 8 or 16 (§8.7.3.3.2). When 4, each on-disk byte packs two values
+/// MSB-first (`entry[i] << 4 | entry[i+1]`); if `sample_count` is odd
+/// the last byte is zero-padded in the low nibble.
+///
+/// Returns `(field_size, sample_count, table)`. Unlike `stsz`, `stz2`
+/// has no constant-size branch — every entry is explicitly listed —
+/// so the function unconditionally produces an explicit per-sample
+/// table that the demuxer feeds into [`SampleTable::stsz_table`] for
+/// uniform downstream handling. The "compact-ness" lives entirely in
+/// the on-disk encoding; once parsed, sizes are widened to `u32` to
+/// match `stsz`'s public surface.
+///
+/// Rejected at open time:
+///
+/// * a body shorter than the 12-byte fixed header (`reserved + field_size
+///   + sample_count`);
+/// * a `field_size` other than 4, 8 or 16 (§8.7.3.3.2 enumerates exactly
+///   these three values);
+/// * a non-zero `reserved` 24-bit word (the spec fixes it at 0);
+/// * a body whose post-header length is shorter than `ceil(sample_count
+///   × field_size / 8)` bytes (truncated entries).
+pub fn parse_stz2(payload: &[u8]) -> Result<(u8, u32, Vec<u32>)> {
+    need(payload, 0, 12, "stz2 header")?;
+    // FullBox header (4 bytes: version + flags) — version must be 0, no
+    // flags are defined. We tolerate non-zero flags the same way other
+    // FullBox parsers in this crate do (kind / tsel), since §8.7.3.3.1
+    // fixes both to 0 but writers occasionally leak vendor bits.
+    if payload[0] != 0 {
+        return Err(Error::invalid("MOV: stz2 unknown version"));
+    }
+    // §8.7.3.3.1 `unsigned int(24) reserved = 0` — strict check: any
+    // non-zero value indicates a corrupt or non-conformant writer that
+    // has co-opted the field for vendor use; we reject so the misuse is
+    // visible rather than silently passing through.
+    let reserved = u32::from_be_bytes([0, payload[4], payload[5], payload[6]]);
+    if reserved != 0 {
+        return Err(Error::invalid("MOV: stz2 reserved field non-zero"));
+    }
+    let field_size = payload[7];
+    if !matches!(field_size, 4 | 8 | 16) {
+        return Err(Error::invalid("MOV: stz2 field_size not 4/8/16"));
+    }
+    let count = read_u32(&payload[8..]);
+    let body = &payload[12..];
+    // Required on-disk byte count: `ceil(count × field_size / 8)`. For
+    // 4-bit entries an odd count rounds up — §8.7.3.3.2's "the last byte
+    // is padded with zeros".
+    let n = count as u64;
+    let bytes_needed = match field_size {
+        4 => n.div_ceil(2),
+        8 => n,
+        16 => n.saturating_mul(2),
+        _ => unreachable!(),
+    };
+    if (body.len() as u64) < bytes_needed {
+        return Err(Error::invalid("MOV: stz2 truncated entry table"));
+    }
+    let mut out = Vec::with_capacity(count as usize);
+    match field_size {
+        4 => {
+            // Two entries per byte, MSB-first: high nibble is entry
+            // `2i`, low nibble is entry `2i + 1`.
+            for i in 0..(count as usize) {
+                let byte = body[i / 2];
+                let nibble = if i % 2 == 0 {
+                    (byte >> 4) & 0x0f
+                } else {
+                    byte & 0x0f
+                };
+                out.push(nibble as u32);
+            }
+        }
+        8 => {
+            for &b in body.iter().take(count as usize) {
+                out.push(b as u32);
+            }
+        }
+        16 => {
+            for i in 0..(count as usize) {
+                let off = i * 2;
+                out.push(u16::from_be_bytes([body[off], body[off + 1]]) as u32);
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok((field_size, count, out))
 }
 
 /// Parse `stco` (32-bit chunk offsets).
@@ -1095,6 +1226,7 @@ mod tests {
             subs: vec![],
             saiz: vec![],
             saio: vec![],
+            sample_size_source: None,
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 1);
@@ -1171,6 +1303,7 @@ mod tests {
             subs: vec![],
             saiz: vec![],
             saio: vec![],
+            sample_size_source: None,
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 4);
@@ -1207,6 +1340,7 @@ mod tests {
             subs: vec![],
             saiz: vec![],
             saio: vec![],
+            sample_size_source: None,
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
         assert_eq!(v.len(), 4);
