@@ -711,6 +711,42 @@ crash bytes, the focused header-level rejection, the
 overflow shape nested inside a `moov` so `walk_children`'s
 arithmetic site is covered too).
 
+Round 210 parses the **Degradation Priority Box** (`stdp`) — ISO/IEC
+14496-12 §8.5.3 — at `stbl` scope. The box carries one 16-bit
+unsigned `priority` per sample; transports that selectively discard
+samples under load (RTP stacks, bandwidth-adaptive segmenters) use
+the value to choose which samples to drop. The on-disk table has no
+count field — §8.5.3.1 sizes the row count from the `stsz`/`stz2`
+`sample_count` — so the demuxer defers the parse until after the
+`stbl` walk completes, mirroring the `sdtp` deferred-sizing path
+landed in round 98. New [`SampleTable::stdp: Vec<u16>`] field plus
+[`SampleTable::sample_degradation_priority(sample_idx)`] and
+[`MovDemuxer::sample_degradation_priority(track, sample)`] accessors
+surface the value 1:1 with what the writer emitted; the spec leaves
+the numeric meaning and acceptable range to specifications derived
+from the base format (§8.5.3.1, §8.5.3.3) so the raw `u16` is the
+right surface to hand back to callers that consult the derived spec
+carrying the `stdp` track. Rejected at open time: payload shorter
+than the 4-byte FullBox header, non-zero `flags` (§8.5.3.2 defines
+`FullBox('stdp', version = 0, 0)` — silent acceptance would let a
+malformed writer leak undefined bits past the parser), and a body
+shorter than `sample_count × 2` bytes (the truncated-table case
+mirrors `sdtp`'s sizing guarantee). Trailing padding past the
+declared row count is silently ignored — some writers round the box
+up to an 8-byte boundary, and §8.5.3.2 names exactly `sample_count`
+rows. A duplicate `stdp` inside the same `stbl` is tolerated
+first-wins (§8.5.3 lists the box as `Quantity: Zero or one`;
+first-wins matches the conservative-merge policy applied to every
+other "at most once" stbl-scope box — `sdtp`, `sbgp`/`sgpd`,
+`saiz`/`saio`, the sample-size boxes themselves). QTFF does not
+define this box; it is ISO BMFF-only and stays empty for plain
+`.mov` inputs. The round-176 fuzz harness extends to call the new
+per-track `sample_degradation_priority` accessor on a couple of
+attacker-influenced sample indices (zero plus a value derived from
+the input's first 32-bit word) so an `stdp`-carrying fuzz input
+reaches the deferred parse and the bounded `Vec::get` accessor
+without panicking.
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per

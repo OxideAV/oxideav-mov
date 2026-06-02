@@ -320,6 +320,16 @@ pub struct SampleTable {
     /// table has no count field — its length equals the `stsz`/`stz2`
     /// sample count (§8.6.4.1).
     pub sdtp: Vec<SdtpEntry>,
+    /// `stdp` Degradation Priority Box rows (ISO/IEC 14496-12 §8.5.3).
+    /// One 16-bit unsigned `priority` per sample, in decode order. Empty
+    /// when the track carries no `stdp` box. The on-disk table has no
+    /// count field — its length equals the `stsz`/`stz2` sample count
+    /// (§8.5.3.1). The base spec defines no fixed numeric range; a
+    /// derived specification fixes the exact meaning and acceptable
+    /// range (§8.5.3.1) so the unmodified `u16` is the right surface to
+    /// hand back to callers that consult the specification carrying the
+    /// `stdp` track.
+    pub stdp: Vec<u16>,
     /// `stsh` Shadow Sync Sample Box entries (ISO/IEC 14496-12
     /// §8.6.3), sorted ascending by `shadowed_sample_number`. Empty
     /// when the track carries no `stsh` box. Optional metadata: a
@@ -395,6 +405,15 @@ impl SampleTable {
     /// table). ISO/IEC 14496-12 §8.6.4.
     pub fn sample_dependency(&self, sample_idx: u32) -> Option<SdtpEntry> {
         self.sdtp.get(sample_idx as usize).copied()
+    }
+
+    /// `stdp` Degradation Priority for a 0-based decode-order sample
+    /// index — ISO/IEC 14496-12 §8.5.3 — or `None` when the track
+    /// carries no `stdp` box (or the index is past the table). The
+    /// raw 16-bit value is returned unmodified; the spec leaves the
+    /// numeric meaning to derived specifications (§8.5.3.1, §8.5.3.3).
+    pub fn sample_degradation_priority(&self, sample_idx: u32) -> Option<u16> {
+        self.stdp.get(sample_idx as usize).copied()
     }
 
     /// Look up the alternative *sync* sample (1-based) that shadows the
@@ -772,6 +791,44 @@ pub fn parse_sdtp(payload: &[u8], sample_count: u32) -> Result<Vec<SdtpEntry>> {
         return Err(Error::invalid("MOV: sdtp truncated table"));
     }
     Ok(body[..n].iter().map(|&b| SdtpEntry::from_byte(b)).collect())
+}
+
+/// Parse `stdp` (Degradation Priority Box) payload — ISO/IEC 14496-12
+/// §8.5.3.
+///
+/// Layout (§8.5.3.2): `[version:1][flags:3]` then `sample_count` rows
+/// of `[priority:2]`. The box carries no on-disk count word — its row
+/// count is taken from the `sample_count` of the sample-size box
+/// (§8.5.3.1), so the caller passes in the value already parsed from
+/// `stsz`/`stz2`. The body must hold at least `sample_count * 2`
+/// bytes; trailing padding (a malformed writer might round up the box
+/// to an 8-byte boundary) is ignored. Per §8.5.3.3 the box defines
+/// `version = 0`; a non-zero version is tolerated like every other
+/// version-0 box in this crate (we read the field with no semantic
+/// branching) but a non-zero `flags` is rejected so a malformed writer
+/// claiming an extension cannot silently propagate undefined bits.
+pub fn parse_stdp(payload: &[u8], sample_count: u32) -> Result<Vec<u16>> {
+    need(payload, 0, 4, "stdp header")?;
+    // §8.5.3.2 — FullBox(version=0, 0). Flags are documented as zero;
+    // reject a non-zero flags field rather than silently propagate it.
+    let flags =
+        (u32::from(payload[1]) << 16) | (u32::from(payload[2]) << 8) | u32::from(payload[3]);
+    if flags != 0 {
+        return Err(Error::invalid("MOV: stdp non-zero flags"));
+    }
+    let body = &payload[4..];
+    let n = sample_count as usize;
+    let need_bytes = n
+        .checked_mul(2)
+        .ok_or_else(|| Error::invalid("MOV: stdp sample_count overflows table-size computation"))?;
+    if body.len() < need_bytes {
+        return Err(Error::invalid("MOV: stdp truncated table"));
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        out.push(read_u16(&body[i * 2..]));
+    }
+    Ok(out)
 }
 
 /// Parse `stss` sync-sample table (1-based sample numbers).
@@ -1222,6 +1279,7 @@ mod tests {
             sbgp: vec![],
             sgpd: vec![],
             sdtp: vec![],
+            stdp: vec![],
             stsh: vec![],
             subs: vec![],
             saiz: vec![],
@@ -1299,6 +1357,7 @@ mod tests {
             sbgp: vec![],
             sgpd: vec![],
             sdtp: vec![],
+            stdp: vec![],
             stsh: vec![],
             subs: vec![],
             saiz: vec![],
@@ -1336,6 +1395,7 @@ mod tests {
             sbgp: vec![],
             sgpd: vec![],
             sdtp: vec![],
+            stdp: vec![],
             stsh: vec![],
             subs: vec![],
             saiz: vec![],

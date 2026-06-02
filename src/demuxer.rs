@@ -15,9 +15,9 @@ use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CO64, CSLG, CTAB, CTTS,
     DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MATT, MDAT, MDHD,
     MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA,
-    RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STSC, STSD,
-    STSH, STSS, STSZ, STTS, STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID,
-    VMHD, WIDE,
+    RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STDP, STSC,
+    STSD, STSH, STSS, STSZ, STTS, STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA,
+    UUID, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -36,8 +36,9 @@ use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
 use crate::sample_aux::{parse_saio, parse_saiz};
 use crate::sample_groups::{parse_sbgp, parse_sgpd};
 use crate::sample_table::{
-    parse_co64, parse_ctts, parse_sdtp, parse_stco, parse_stsc, parse_stsh, parse_stss, parse_stsz,
-    parse_stts, parse_stz2, parse_subs, SampleEntry, SampleSizeSource, SampleTable, SubSampleInfo,
+    parse_co64, parse_ctts, parse_sdtp, parse_stco, parse_stdp, parse_stsc, parse_stsh, parse_stss,
+    parse_stsz, parse_stts, parse_stz2, parse_subs, SampleEntry, SampleSizeSource, SampleTable,
+    SubSampleInfo,
 };
 use crate::sidx::{parse_sidx, Sidx};
 use crate::styp::{parse_styp, Styp};
@@ -1683,6 +1684,31 @@ impl MovDemuxer {
             .sample_dependency(sample_zero_based)
     }
 
+    /// Look up the `stdp` Degradation Priority Box (ISO/IEC 14496-12
+    /// §8.5.3) value for a 0-based decode-order sample on a track.
+    ///
+    /// Returns `None` when the track carries no `stdp` box, the sample
+    /// index is past the table, or `track_index` is out of range. The
+    /// raw 16-bit value is returned unmodified — §8.5.3.1 leaves the
+    /// numeric meaning and acceptable range to specifications derived
+    /// from the base format, so callers consult the spec that defined
+    /// the track to interpret the priority.
+    ///
+    /// This is optional metadata: a track plays and seeks correctly
+    /// when it is ignored. Transports that selectively discard samples
+    /// under load may use the priority to choose which samples to drop
+    /// (§8.5.3.1).
+    pub fn sample_degradation_priority(
+        &self,
+        track_index: usize,
+        sample_zero_based: u32,
+    ) -> Option<u16> {
+        self.tracks
+            .get(track_index)?
+            .sample_table
+            .sample_degradation_priority(sample_zero_based)
+    }
+
     /// Source of `track_index`'s sample-size data: `stsz` (§8.7.3.2),
     /// `stz2` (§8.7.3.3), or `None` when the `stbl` carries no
     /// sample-size box at all (a fragmented-only track whose sizes all
@@ -2857,6 +2883,10 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
     // (ISO/IEC 14496-12 §8.6.4.1). Defer its parse until after the walk
     // so the sample count is known regardless of child order.
     let mut sdtp_payload: Option<Vec<u8>> = None;
+    // `stdp` has the same deferred-sizing shape (§8.5.3.1 — row count
+    // taken from the sample-size box) so we collect the raw payload and
+    // parse after the walk completes.
+    let mut stdp_payload: Option<Vec<u8>> = None;
     let mut table = SampleTable::default();
     walk_children(r, Some(body_end), |r, child| {
         match &child.fourcc {
@@ -2936,6 +2966,17 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
             t if t == &SDTP => {
                 sdtp_payload = Some(read_payload(r, child)?);
             }
+            // ISO/IEC 14496-12 §8.5.3 — Degradation Priority Box. Sized
+            // from `stsz`/`stz2` `sample_count` per §8.5.3.1 (no on-disk
+            // count field), so we defer parsing until after the stbl
+            // walk regardless of child order. §8.5.3 lists the box as
+            // `Quantity: Zero or one`; a malformed writer emitting two
+            // is tolerated first-wins (matches the conservative-merge
+            // policy applied to the other "at most once" stbl-scope
+            // boxes — `sdtp` itself, plus the various sample-aux boxes).
+            t if t == &STDP && stdp_payload.is_none() => {
+                stdp_payload = Some(read_payload(r, child)?);
+            }
             t if t == &CSLG => {
                 let body = read_payload(r, child)?;
                 track.cslg = Some(parse_cslg(&body)?);
@@ -3005,6 +3046,10 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
     // now fully parsed regardless of stbl child order.
     if let Some(payload) = sdtp_payload {
         table.sdtp = parse_sdtp(&payload, table.stsz_count)?;
+    }
+    // `stdp` is sized from the same sample-size box (§8.5.3.1).
+    if let Some(payload) = stdp_payload {
+        table.stdp = parse_stdp(&payload, table.stsz_count)?;
     }
 
     // stsd parses last because it needs `track.hdlr` to discriminate

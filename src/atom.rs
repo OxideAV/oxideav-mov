@@ -353,6 +353,14 @@ pub const STCO: [u8; 4] = fourcc("stco");
 pub const CO64: [u8; 4] = fourcc("co64");
 pub const CTTS: [u8; 4] = fourcc("ctts");
 pub const SDTP: [u8; 4] = fourcc("sdtp"); // Independent and Disposable Samples Box
+/// Round 210 — Degradation Priority Box (ISO/IEC 14496-12 §8.5.3). One
+/// 16-bit `priority` per sample, sized from the `stsz`/`stz2`
+/// `sample_count`; the box itself carries no on-disk count field
+/// (§8.5.3.1). Defines a per-sample importance hint for transports
+/// that may discard samples under load; specifications derived from
+/// the base format define the exact meaning and acceptable range
+/// (§8.5.3.1). QTFF does not define this box; it is ISO BMFF-only.
+pub const STDP: [u8; 4] = fourcc("stdp");
 pub const SUBS: [u8; 4] = fourcc("subs"); // Sub-Sample Information Box
 pub const SAIZ: [u8; 4] = fourcc("saiz"); // Sample Auxiliary Information Sizes Box
 pub const SAIO: [u8; 4] = fourcc("saio"); // Sample Auxiliary Information Offsets Box

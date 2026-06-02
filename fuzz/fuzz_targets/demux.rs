@@ -30,7 +30,7 @@
 //!     size words at the walker so any unguarded `read_payload`
 //!     call site would surface as an OOM or panic.
 //!   * Sample-table expansion — `stts`, `stsc`, `stsz`/`stz2`,
-//!     `stco`/`co64`, `stss`, `stsh`, `ctts`, `sdtp`, `subs`,
+//!     `stco`/`co64`, `stss`, `stsh`, `ctts`, `sdtp`, `stdp`, `subs`,
 //!     `sbgp`/`sgpd`, `saiz`/`saio` all have attacker-controlled
 //!     entry counts that drive allocations and per-sample arithmetic.
 //!   * Fragmented MP4 — `tfhd` per-track defaults, `tfdt` base media
@@ -199,6 +199,18 @@ fuzz_target!(|data: &[u8]| {
         // the `Some(Stz2 { field_size })` path leaks the on-disk
         // field width so a fuzzer-generated stz2 surfaces here.
         let _ = dmx.sample_size_source(ti);
+        // Round-210 Degradation Priority Box (`stdp`, §8.5.3)
+        // per-sample accessor. The table is sized from `stsz`/`stz2`
+        // so a fuzz input that constructs a runt sample-size box
+        // alongside an oversize stdp must reach the deferred parse
+        // without panicking. Probe a handful of indices, including
+        // zero and a value derived from the input bytes so the
+        // bounded `Vec::get` path stays exercised on every input.
+        let _ = dmx.sample_degradation_priority(ti, 0);
+        if data.len() >= 4 {
+            let probe = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            let _ = dmx.sample_degradation_priority(ti, probe);
+        }
         // Exercise the round-74 / round-91 edit-list mapper on a
         // couple of attacker-influenced media_pts values. The
         // mapper has to survive any value, including i64::MIN /
