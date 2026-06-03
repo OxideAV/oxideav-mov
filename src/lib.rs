@@ -40,6 +40,7 @@ pub mod styp;
 pub mod timecode;
 pub mod track;
 pub mod track_group;
+pub mod track_input_map;
 pub mod track_load;
 pub mod track_selection;
 pub mod user_data;
@@ -129,6 +130,13 @@ pub use timecode::{
 pub use track::{SampleDescription, Track, TrackRef, TrackRefKind};
 pub use track_group::{
     parse_track_group_type, parse_trgr, TrackGroupTypeEntry, TRACK_GROUP_TYPE_MSRC,
+};
+pub use track_input_map::{
+    parse_imap, parse_track_input_entry, InputType, InputTypeKind, ObjectId, TrackInputEntry,
+    TrackInputMap, INPUT_TYPE_ATOM, K_TRACK_MODIFIER_OBJECT_GRAPHICS_MODE,
+    K_TRACK_MODIFIER_OBJECT_MATRIX, K_TRACK_MODIFIER_TYPE_BALANCE, K_TRACK_MODIFIER_TYPE_CLIP,
+    K_TRACK_MODIFIER_TYPE_GRAPHICS_MODE, K_TRACK_MODIFIER_TYPE_IMAGE, K_TRACK_MODIFIER_TYPE_MATRIX,
+    K_TRACK_MODIFIER_TYPE_VOLUME, OBJECT_ID_ATOM, TRACK_INPUT_ATOM,
 };
 pub use track_load::{
     parse_load, Load, LOAD_HINT_DOUBLE_BUFFER, LOAD_HINT_HIGH_QUALITY, LOAD_PRELOAD_ALWAYS,

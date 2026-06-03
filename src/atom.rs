@@ -379,6 +379,14 @@ pub const PNOT: [u8; 4] = fourcc("pnot");
 /// Round 89 — Track Load Settings atom (QTFF p. 48).
 pub const LOAD: [u8; 4] = fourcc("load");
 
+/// Round 216 — Track Input Map atom (QTFF pp. 51–53). Container inside
+/// `trak` whose children are track input atoms (` in`) describing how
+/// data flowing in from each `'ssrc'` track-reference should be
+/// interpreted (transform matrix, clip region, volume, balance,
+/// graphics mode, per-object variants). QuickTime-only — ISO BMFF
+/// does not define this atom.
+pub const IMAP: [u8; 4] = fourcc("imap");
+
 // Apple-specific / round-2 atoms.
 pub const GAMA: [u8; 4] = fourcc("gama");
 pub const PASP: [u8; 4] = fourcc("pasp");

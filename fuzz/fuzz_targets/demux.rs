@@ -181,6 +181,26 @@ fuzz_target!(|data: &[u8]| {
         let _ = dmx.track_load(ti);
         let _ = dmx.track_selection(ti);
         let _ = dmx.track_kinds(ti);
+        // Round-216 Track Input Map atom (`imap`, QTFF pp. 51-53)
+        // accessor — surfaces the parsed `' in'` entries when the
+        // track carries an `imap` child of `trak`. The accessor walks
+        // QT-style track input atoms with their own ` ty` and
+        // optional `obid` children; exercise the slot lookup path on
+        // a small attacker-influenced atom id so the sparse list
+        // search stays covered on an `imap`-carrying fuzz input.
+        if let Some(imap) = dmx.track_input_map(ti) {
+            for e in imap.entries.iter().take(16) {
+                let _ = e.atom_id;
+                let _ = e.input_type.kind;
+                let _ = e.object_id;
+            }
+            let probe_slot = if data.len() >= 4 {
+                u32::from_le_bytes([data[0], data[1], data[2], data[3]])
+            } else {
+                1
+            };
+            let _ = imap.entry_for_ssrc_slot(probe_slot);
+        }
         // Round-199 per-track Track Group Box (`trgr`) entry list.
         let entries = dmx.track_group_entries(ti);
         let _ = entries.len();

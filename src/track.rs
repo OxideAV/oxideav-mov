@@ -218,6 +218,17 @@ pub struct Track {
     /// of its tracks'). `None` for any track that omits this
     /// Apple-only atom (ISO BMFF does not define `matt`). Round 144.
     pub matte: Option<Matte>,
+    /// Parsed track-level Track Input Map atom (QTFF pp. 51–53), when
+    /// the track's `trak` carries an optional `imap` describing how
+    /// each `'ssrc'` (non-primary source) track-reference modulates
+    /// this track's presentation (transform matrix, clip region,
+    /// volume, balance, graphics mode, per-object variants). The
+    /// 1-based [`crate::track_input_map::TrackInputEntry::atom_id`]
+    /// indexes into [`Self::references`] filtered by
+    /// [`TrackRefKind::NonPrimarySource`]. `None` for tracks that omit
+    /// this Apple-only atom (ISO BMFF does not define `imap`).
+    /// Round 216.
+    pub track_input_map: Option<crate::track_input_map::TrackInputMap>,
     /// Samples appended by `moof/traf/trun` fragment runs (ISO/IEC
     /// 14496-12 §8.8). Empty for non-fragmented streams. Each
     /// entry already has its absolute file offset, DTS, duration,
@@ -410,6 +421,17 @@ impl Track {
     /// children are unconstrained.
     pub fn track_groups(&self) -> &[crate::track_group::TrackGroupTypeEntry] {
         &self.track_groups
+    }
+
+    /// Parsed Track Input Map atom (QTFF pp. 51–53), when the track's
+    /// `trak` carries an optional `imap`. Each entry describes how one
+    /// `'ssrc'` (non-primary-source) track reference modulates this
+    /// track's presentation; resolve an entry against the parent's
+    /// reference list via [`crate::track_input_map::TrackInputEntry::atom_id`]
+    /// (1-based index into the `'ssrc'` entries). `None` for tracks
+    /// that omit this Apple-only atom (ISO BMFF does not define `imap`).
+    pub fn track_input_map(&self) -> Option<&crate::track_input_map::TrackInputMap> {
+        self.track_input_map.as_ref()
     }
 
     /// Resolve the track's `edts/elst` edit list into the sequence of

@@ -13,11 +13,11 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CO64, CSLG, CTAB, CTTS,
-    DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, KEYS, LOAD, MATT, MDAT, MDHD,
-    MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA,
-    RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STDP, STSC,
-    STSD, STSH, STSS, STSZ, STTS, STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA,
-    UUID, VMHD, WIDE,
+    DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, IMAP, KEYS, LOAD, MATT, MDAT,
+    MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS,
+    RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STDP,
+    STSC, STSD, STSH, STSS, STSZ, STTS, STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR,
+    UDTA, UUID, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -1412,6 +1412,23 @@ impl MovDemuxer {
         self.tracks.get(track_index)?.load_settings()
     }
 
+    /// Track Input Map (QTFF pp. 51–53) for `track_index`, when the
+    /// track carries an `imap` atom. `None` is the spec's "no input
+    /// modifiers declared" — the track's `'ssrc'` references (if any)
+    /// pass through their data unmodified. Each entry surfaces a typed
+    /// `(input_type, object_id?)` pair plus a 1-based atom id that
+    /// indexes into the parent track's `'ssrc'`-filtered reference
+    /// list ([`Track::track_refs_of_kind`] with
+    /// [`crate::track::TrackRefKind::NonPrimarySource`]). QTFF-only —
+    /// ISO BMFF does not define `imap`, so the result is `None` for
+    /// MP4 / fMP4 / HEIF / AVIF inputs.
+    pub fn track_input_map(
+        &self,
+        track_index: usize,
+    ) -> Option<&crate::track_input_map::TrackInputMap> {
+        self.tracks.get(track_index)?.track_input_map()
+    }
+
     /// Track Selection box (ISO/IEC 14496-12 §8.10.3) for
     /// `track_index`, when the track's `udta` carries a `tsel` child.
     /// `None` is the spec's "no switching information" sentinel: the
@@ -2567,6 +2584,16 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
                 if track.matte.is_none() {
                     track.matte = Some(parsed);
                 }
+            }
+            // QTFF pp. 51–53 — track-level Track Input Map atom.
+            // Container whose children are ` in` track input atoms
+            // (one per `'ssrc'` reference). QTFF Figure 2-6 places
+            // `imap` once per trak; first-wins on the rare duplicate
+            // case (matches clip / matt / tapt / load / cslg
+            // conservative-merge policy at this scope). The atom is
+            // QuickTime-only; ISO BMFF does not define it.
+            t if t == &IMAP && track.track_input_map.is_none() => {
+                track.track_input_map = Some(crate::track_input_map::parse_imap(r, child)?);
             }
             t if t == &LOAD => {
                 let body = read_payload(r, child)?;

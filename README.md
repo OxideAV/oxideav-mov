@@ -747,6 +747,60 @@ the input's first 32-bit word) so an `stdp`-carrying fuzz input
 reaches the deferred parse and the bounded `Vec::get` accessor
 without panicking.
 
+Round 216 parses the **Track Input Map atom** (`imap`) — Apple
+QuickTime File Format Specification (QTFF, 2001-03-01) pp. 51 – 53 /
+Figure 2-14 — at per-track scope (`moov/trak/imap`). The atom tells the
+QuickTime engine how each non-primary source (a `tref` reference of
+type `'ssrc'`, QTFF p. 50 Table 2-2) modulates this track's
+presentation: a transform matrix on the track's location/scaling, a
+QuickDraw clipping region scoped to the track's shape, an 8.8
+fixed-point sound volume curve for fades, a 16-bit sound balance
+level for panning, a graphics-mode record for visual fades, or a
+per-object variant of any of the above scoped to one sub-track
+construct (a sprite, a tween). `imap` is the only QT-atom-shaped
+container the parser supports today: its body holds one or more track
+input atoms (` in`, with the leading two bytes 0x00 per QTFF p. 52)
+each of which carries a 12-byte QT-style header tail (`atom_id` +
+reserved + `child_count` + reserved) before its own classic-shaped
+child atoms (` ty` required, `obid` optional). The required ` ty`
+input-type atom carries a 4-byte identifier classified into the
+[`InputTypeKind`] enum across QTFF Table 2-3's eight values
+(`Matrix` / `Clip` / `Volume` / `Balance` / `GraphicsMode` /
+`ObjectMatrix` / `ObjectGraphicsMode` / `Image`, plus an
+[`InputTypeKind::Other`] fall-through that preserves any vendor or
+future-spec raw value). `kTrackModifierTypeImage` is on-disk the FourCC
+`'vide'` — QTFF reuses the video-media-type marker as the input-type
+identifier — surfaced bit-exactly via
+[`K_TRACK_MODIFIER_TYPE_IMAGE`]. The three per-object identifiers
+(`ObjectMatrix` / `ObjectGraphicsMode` / `Image`) require an
+accompanying `obid` child carrying the object id, and the parser
+enforces this cross-field consistency rule on QTFF p. 53 at open
+time. The 1-based [`TrackInputEntry::atom_id`] indexes into the parent
+track's `'ssrc'` reference list (QTFF p. 53: "the first secondary
+input corresponds to the track input atom with an atom ID value of
+1") — callers resolve an entry against the parent via
+`track.track_refs_of_kind(NonPrimarySource)[atom_id - 1]`. Two
+accessors land on the demuxer: `MovDemuxer::track_input_map(track)`
+returns the parsed [`TrackInputMap`] (or `None` when the track omits
+the atom), and `TrackInputMap::entry_for_ssrc_slot(id)` does the
+atom-id-keyed lookup since writers are not strictly required to emit
+entries in atom-id order. Rejected at open time: an ` in` body shorter
+than the 12-byte QT-style header tail, non-zero values in either
+reserved field, a missing required ` ty`, a ` ty` or `obid` body that
+is not exactly 4 bytes, a duplicate ` ty` or `obid` inside one ` in`,
+an unexpected child FourCC inside ` in` or inside `imap` itself, a
+declared `child_count` that disagrees with the number of children
+actually parsed, and a per-object input-type identifier paired with no
+`obid`. The wrapper atom follows the trak-scope first-wins
+duplicate-merge policy shared with `tapt` / `load` / `cslg` / `clip` /
+`matt`. ISO BMFF does not define `imap` (it is QuickTime-only); for
+plain MP4 / fMP4 / HEIF / AVIF inputs `MovDemuxer::track_input_map`
+returns `None`. The round-176 fuzz harness extends to walk every
+track's `imap` entry list (capped at 16 entries/track to bound
+pathological inputs) and exercises the `entry_for_ssrc_slot` lookup
+against an attacker-influenced 1-based slot id derived from the
+input's first 32-bit word.
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per
