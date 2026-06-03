@@ -27,6 +27,7 @@ use crate::edit::{parse_elst, EditList};
 use crate::fragment::{parse_mfra, parse_mvex, resolve_traf_samples, Mehd, Tfra, TrexDefaults};
 use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
 use crate::header::{parse_ftyp, parse_hdlr, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd};
+use crate::leva::Leva;
 use crate::matte::parse_matt;
 use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
 use crate::pdin::{parse_pdin, Pdin};
@@ -201,6 +202,16 @@ pub struct MovDemuxer {
     /// ticks (§8.8.2). `None` when the file omits `mehd` — in
     /// which case the duration is the sum across all `moof`s.
     pub mehd: Option<Mehd>,
+    /// `mvex/leva` Level Assignment Box (ISO/IEC 14496-12 §8.8.13).
+    /// `None` when the file omits `leva` (the common case — the box
+    /// is `Quantity: Zero or one` and only fragmented streams
+    /// emitting paired `ssix` indices typically carry it). When
+    /// present, the box names the levels the §8.16.4 Subsegment Index
+    /// Box (`ssix`) references; pair via [`Self::ssix`] and
+    /// [`Self::ssix_for_sidx`] for the adaptive-streaming workflow.
+    /// QTFF does not define this box; it stays absent for plain
+    /// `.mov` inputs.
+    pub leva: Option<Leva>,
     /// `mfhd.sequence_number` of each `moof` walked at open time,
     /// in declaration order. Lets callers spot dropped fragments
     /// (the spec requires monotonic increase per §8.8.5.3); empty
@@ -419,6 +430,12 @@ impl MovDemuxer {
         let mut file_bmff_meta: Option<BmffMeta> = None;
         let mut mehd_box: Option<Mehd> = None;
         let mut trex_defaults: Vec<TrexDefaults> = Vec::new();
+        // ISO/IEC 14496-12 §8.8.13 Level Assignment Box (`leva`).
+        // FullBox inside `mvex`; `Quantity: Zero or one`. Pairs with
+        // §8.16.4 `ssix` for adaptive-streaming level selection.
+        // QTFF does not define this box; it stays `None` for `.mov`
+        // inputs and non-fragmented MP4s.
+        let mut leva_box: Option<Leva> = None;
         let mut fragment_sequence_numbers: Vec<u32> = Vec::new();
         let mut tfra_indexes: Vec<Tfra> = Vec::new();
         // ISO/IEC 14496-12 §8.1.3 Progressive Download Information
@@ -671,6 +688,7 @@ impl MovDemuxer {
                         &mut movie_bmff_meta,
                         &mut mehd_box,
                         &mut trex_defaults,
+                        &mut leva_box,
                         &mut movie_ctab,
                         &mut movie_clipping,
                     )?;
@@ -927,6 +945,7 @@ impl MovDemuxer {
             next: 0,
             trex_defaults,
             mehd: mehd_box,
+            leva: leva_box,
             fragment_sequence_numbers,
             tfra_indexes,
             #[cfg(feature = "registry")]
@@ -2527,6 +2546,7 @@ fn parse_moov<R: Read + Seek + ?Sized>(
     bmff_meta: &mut Option<BmffMeta>,
     mehd_out: &mut Option<Mehd>,
     trex_out: &mut Vec<TrexDefaults>,
+    leva_out: &mut Option<Leva>,
     ctab_out: &mut Option<Ctab>,
     clipping_out: &mut Option<Clipping>,
 ) -> Result<()> {
@@ -2585,13 +2605,19 @@ fn parse_moov<R: Read + Seek + ?Sized>(
                 // Movie-extends header (ISO/IEC 14496-12 §8.8.1) —
                 // declares the file as fragmented. Round 18 parses
                 // the optional `mehd` (total fragmented duration) and
-                // the per-track `trex` defaults; both feed the
-                // top-level `moof` walker.
-                let (mehd, trex) = parse_mvex(r, child)?;
+                // the per-track `trex` defaults; round 226 adds the
+                // optional `leva` (Level Assignment Box, §8.8.13)
+                // pairing with the §8.16.4 `ssix` adaptive-streaming
+                // index. First-wins on duplicate `leva` per the
+                // §8.8.13.1 Quantity rule.
+                let (mehd, trex, leva) = parse_mvex(r, child)?;
                 if mehd.is_some() {
                     *mehd_out = mehd;
                 }
                 trex_out.extend(trex);
+                if leva.is_some() && leva_out.is_none() {
+                    *leva_out = leva;
+                }
             }
             _ => {}
         }

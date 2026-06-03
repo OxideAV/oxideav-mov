@@ -24,6 +24,7 @@ pub mod header;
 pub mod heif_write;
 pub mod iprp;
 pub mod kind;
+pub mod leva;
 pub mod matte;
 pub mod media_meta;
 pub mod muxer;
@@ -100,6 +101,7 @@ pub use iprp::{
     LayerSelector, Mdcv, Pixi, PixiInfo, PropertyAssociation,
 };
 pub use kind::{find_kinds_in_udta, parse_kind, KindEntry};
+pub use leva::{parse_leva, AssignmentType, Leva, LevaLevel};
 pub use matte::{parse_kmat, parse_matt, CompressedMatte, Matte, MIN_IMAGE_DESCRIPTION_SIZE};
 pub use media_meta::{
     channel_mask_for_layout_tag, Chan, ChanDescription, Clap, ColorParameters, ColorParametersKind,

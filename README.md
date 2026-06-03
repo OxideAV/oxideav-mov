@@ -848,6 +848,56 @@ fuzz harness extends to walk every collected `ssix` entry (capped at
 overflow-prone anchor values, then exercises the `ssix_for_sidx`
 cross-reference path against each declared `sidx`.
 
+Round 226 parses the **Level Assignment Box** (`leva`) — ISO/IEC
+14496-12 §8.8.13 — at `moov/mvex` scope, naming the *levels* the
+round-219 §8.16.4 Subsegment Index Box (`ssix`) references.
+Adaptive-streaming clients pair the two so a temporal-scalability
+decoder can fetch only the bytes for the base-layer level and skip
+the enhancement layers (§8.8.13.1). Layout per §8.8.13.2 is a 1-byte
+`level_count` followed by `level_count` rows of `(track_id[4],
+padding_flag[1 bit], assignment_type[7 bits])` plus a per-
+`assignment_type` trailer: type 0 carries a 4-byte `grouping_type`
+(sample-group assignment), type 1 carries
+`grouping_type[4] + grouping_type_parameter[4]` (parameterized
+sample-group assignment), types 2 and 3 carry no trailer (track-keyed
+assignment; §8.16.4 distinguishes the two on the consumer side), and
+type 4 carries a 4-byte `sub_track_id` (sub-track assignment, §8.14).
+The new [`Leva`] / [`LevaLevel`] / [`AssignmentType`] types expose
+`Leva::level_count()`, `Leva::level(j)` (1-based per §8.8.13.3 "loop
+entry j"), and `Leva::track_ids()` (declaration-order de-duplicated
+`track_id` set — useful when wiring the box to a §8.8 track table).
+Surfaces on the demuxer via `MovDemuxer::leva: Option<Leva>`
+populated through `parse_mvex`; the field stays `None` when the file
+omits the box, when the file is a plain `.mov` (QTFF does not define
+`leva`), or when the file is a non-fragmented MP4 with no `mvex`
+container. Rejected at open time: unknown FullBox `version` (§8.8.13.2
+spec-fixes at 0), payload shorter than the 5-byte FullBox header +
+`level_count` byte, `level_count` below 2 (§8.8.13.3 fixes the
+minimum at 2), body shorter than `level_count × 5` (every row carries
+at least the 5-byte `track_id + flag/type` prefix), a per-type
+trailer that overruns the remaining body, §8.8.13.3 ordering-rule
+violations ("The sequence of assignment_types is restricted to be a
+set of zero or more of type 2 or 3, followed by zero or more of
+exactly one type" — once a non-2/3 row appears, every subsequent
+non-2/3 row must carry the same `assignment_type`, and a 2/3 row may
+not follow a pinned tail-block row), and any trailing bytes past the
+declared row list. `Reserved { raw }` rows surface unknown
+`assignment_type` values (`5..=127`) verbatim rather than rejecting
+so a future derived spec adding a new code does not break this
+parser; the reserved row consumes no trailer because the spec leaves
+the payload unspecified. A malformed writer emitting two `leva`
+boxes inside one `mvex` is tolerated first-wins (§8.8.13.1 fixes
+Quantity at Zero or one; first-wins matches the conservative-merge
+policy applied to `mehd`, `ctab`, `clip`, `pdin`, and the other
+singletons). QTFF does not define this box; it is ISO BMFF-only and
+stays absent for plain `.mov` inputs. The round-176 fuzz harness
+extends to walk the optional `MovDemuxer::leva` row list (capped at
+64 to bound a writer cramming the max 255 rows) touching
+`level_count`, the per-row `track_id` / `padding_flag` /
+`assignment_type` accessors, `track_ids`, and the 1-based `level()`
+boundaries (0 and `level_count`+1) so the off-by-one path stays
+covered on every `leva`-carrying fuzz input.
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per

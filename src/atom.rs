@@ -440,6 +440,13 @@ pub const RMCD: [u8; 4] = fourcc("rmcd"); // codec qualifier
 pub const MVEX: [u8; 4] = fourcc("mvex"); // movie-extends header inside moov
 pub const TREX: [u8; 4] = fourcc("trex"); // track-extends defaults inside mvex
 pub const MEHD: [u8; 4] = fourcc("mehd"); // movie-extends header
+
+/// Round 226 — Level Assignment Box (ISO/IEC 14496-12 §8.8.13).
+/// FullBox inside `mvex` that names the *levels* the §8.16.4
+/// Subsegment Index Box (`ssix`) references. Adaptive-streaming
+/// clients pair the two so a temporal-scalability decoder can fetch
+/// only the base-layer level. QTFF does not define this box.
+pub const LEVA: [u8; 4] = fourcc("leva");
 pub const MOOF: [u8; 4] = fourcc("moof"); // movie fragment (top-level)
 pub const TRAF: [u8; 4] = fourcc("traf"); // track fragment inside moof
 

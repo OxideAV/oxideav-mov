@@ -38,8 +38,9 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::atom::{
-    read_payload, walk_children, AtomHeader, MEHD, MFRO, SAIO, SAIZ, TFRA, TRAF, TREX,
+    read_payload, walk_children, AtomHeader, LEVA, MEHD, MFRO, SAIO, SAIZ, TFRA, TRAF, TREX,
 };
+use crate::leva::{parse_leva, Leva};
 use crate::sample_aux::{parse_saio, parse_saiz, Saio, Saiz};
 use crate::sample_table::SampleEntry;
 
@@ -264,21 +265,28 @@ pub fn parse_trex(payload: &[u8]) -> Result<TrexDefaults> {
     })
 }
 
-/// Walk a `mvex` container, returning the parsed `mehd` (optional)
-/// and a vector of `trex` defaults (one per fragmented track).
+/// Walk a `mvex` container, returning the parsed `mehd` (optional),
+/// the per-track `trex` defaults (one per fragmented track), and the
+/// optional `leva` (Level Assignment Box) introduced by §8.8.13.
 ///
 /// Unknown children are ignored — derived ISO BMFF specs occasionally
-/// add new sub-atoms inside `mvex` (e.g. `leva` from §8.8.13), and
-/// the round-18 demuxer only needs `mehd` + `trex` to correctly walk
-/// the fragments.
+/// add new sub-atoms inside `mvex`; the round-18 demuxer only needs
+/// `mehd` + `trex` to walk the fragments, while round 226 surfaces
+/// the optional `leva` for callers pairing it with §8.16.4 `ssix`.
+///
+/// `leva` is `Quantity: Zero or one` per §8.8.13.1; a malformed
+/// writer emitting two `leva` boxes inside one `mvex` is tolerated
+/// first-wins (matching the `ctab` / `clip` / `pdin` first-wins
+/// conservative-merge policy).
 pub fn parse_mvex<R: Read + Seek + ?Sized>(
     r: &mut R,
     hdr: &AtomHeader,
-) -> Result<(Option<Mehd>, Vec<TrexDefaults>)> {
+) -> Result<(Option<Mehd>, Vec<TrexDefaults>, Option<Leva>)> {
     let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
     let mut mehd: Option<Mehd> = None;
     let mut trex: Vec<TrexDefaults> = Vec::new();
+    let mut leva: Option<Leva> = None;
     walk_children(r, Some(body_end), |r, child| {
         match &child.fourcc {
             t if t == &MEHD => {
@@ -289,11 +297,22 @@ pub fn parse_mvex<R: Read + Seek + ?Sized>(
                 let body = read_payload(r, child)?;
                 trex.push(parse_trex(&body)?);
             }
+            t if t == &LEVA => {
+                let body = read_payload(r, child)?;
+                let parsed = parse_leva(&body)?;
+                // First-wins on duplicate `leva`: §8.8.13.1 fixes
+                // Quantity at Zero or one, and ignoring the rest
+                // matches the conservative-merge policy applied to
+                // other singletons.
+                if leva.is_none() {
+                    leva = Some(parsed);
+                }
+            }
             _ => {}
         }
         Ok(())
     })?;
-    Ok((mehd, trex))
+    Ok((mehd, trex, leva))
 }
 
 /// Parse a `tfhd` payload per §8.8.7.2. The optional fields are

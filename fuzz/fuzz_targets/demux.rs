@@ -147,6 +147,29 @@ fuzz_target!(|data: &[u8]| {
     for si in 0..dmx.sidx.len().min(64) {
         let _ = dmx.ssix_for_sidx(si);
     }
+    // Round-226 Level Assignment Box (`leva`, ISO/IEC 14496-12
+    // §8.8.13) surface. Quantity is Zero or one and the box lives
+    // inside `moov/mvex`; the parser already rejects malformed
+    // shapes at open time, so reaching here means we have a parsed
+    // `Leva`. Walk the row list (capped at 64 to bound a writer that
+    // crammed the maximum 255 rows) touching the per-row accessor
+    // surfaces (`level_count`, `level()`, `track_ids()`) plus the
+    // 1-based `level()` boundaries (0 and `level_count`+1) so the
+    // off-by-one path stays covered on every fuzz input that ships a
+    // valid `leva`.
+    if let Some(ref leva) = dmx.leva {
+        let _ = leva.level_count();
+        let nlevels = leva.levels.len().min(64);
+        for li in 0..nlevels {
+            let _ = leva.levels[li].track_id;
+            let _ = leva.levels[li].padding_flag;
+            let _ = leva.levels[li].assignment_type;
+        }
+        let _ = leva.level(0);
+        let _ = leva.level(leva.level_count());
+        let _ = leva.level(leva.level_count().saturating_add(1));
+        let _ = leva.track_ids().len();
+    }
     let _ = dmx.styp.len();
     let _ = dmx.prft.len();
     let _ = dmx.ctab.is_some();
