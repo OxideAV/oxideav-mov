@@ -452,6 +452,16 @@ pub const MFRO: [u8; 4] = fourcc("mfro"); // movie-fragment random-access offset
 // FullBox indexing one media stream's subsegments for DASH / CMAF.
 pub const SIDX: [u8; 4] = fourcc("sidx");
 
+/// Round 219 — Subsegment Index Box (ISO/IEC 14496-12 §8.16.4).
+/// File-level FullBox that pairs one-to-one with the immediately
+/// preceding `sidx` (when that `sidx` indexes only leaf subsegments)
+/// and partitions each subsegment into a list of partial subsegments
+/// keyed by *level* (§8.8.13 Level Assignment). Adaptive-streaming
+/// clients use it to download only the levels they care about
+/// (typical example: temporal-scalability base layer only).
+/// QTFF does not define this box; it is ISO BMFF-only.
+pub const SSIX: [u8; 4] = fourcc("ssix");
+
 // Round-125: Segment Type Box (ISO/IEC 14496-12 §8.16.2). File-level
 // box that identifies a DASH / CMAF media segment — same on-disk shape
 // as `ftyp`, distinguished by the box-type FourCC alone. `Quantity:

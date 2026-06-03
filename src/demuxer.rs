@@ -15,9 +15,9 @@ use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CO64, CSLG, CTAB, CTTS,
     DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, IMAP, KEYS, LOAD, MATT, MDAT,
     MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS,
-    RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, STBL, STCO, STDP,
-    STSC, STSD, STSH, STSS, STSZ, STTS, STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR,
-    UDTA, UUID, VMHD, WIDE,
+    RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, SSIX, STBL, STCO,
+    STDP, STSC, STSD, STSH, STSS, STSZ, STTS, STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF,
+    TRGR, UDTA, UUID, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -41,6 +41,7 @@ use crate::sample_table::{
     SubSampleInfo,
 };
 use crate::sidx::{parse_sidx, Sidx};
+use crate::ssix::{parse_ssix, Ssix};
 use crate::styp::{parse_styp, Styp};
 use crate::track::{parse_stsd, Track, TrackRef, TrackRefKind};
 use crate::track_load::parse_load;
@@ -112,6 +113,22 @@ pub struct MovDemuxer {
     /// `sidx`-of-`sidx` references); the box has `Quantity: Zero or
     /// more`. Empty for QTFF and for non-segmented MP4s.
     pub sidx: Vec<Sidx>,
+    /// Top-level Subsegment Index Boxes (ISO/IEC 14496-12 §8.16.4),
+    /// in file order. Each `ssix` pairs one-to-one with the
+    /// immediately preceding `sidx` (the spec sets `Quantity: 0 or 1`
+    /// per associated leaf-indexing `sidx`, §8.16.4.1) and partitions
+    /// every subsegment into level-keyed partial subsegments. Use
+    /// [`Self::ssix_for_sidx`] to resolve which `ssix` (if any)
+    /// describes a given `sidx`. Empty for QTFF and for any
+    /// non-segmented or coarsely-segmented MP4 / fMP4.
+    pub ssix: Vec<Ssix>,
+    /// Parallel-to-`sidx` index map into `ssix`: when entry `i` is
+    /// `Some(j)`, `sidx[i]` is described by `ssix[j]` per §8.16.4.1.
+    /// When `None`, no `ssix` immediately follows that `sidx`.
+    /// Orphan `ssix` entries (out-of-order, not following any sidx)
+    /// are tail-appended to `ssix` but are not referenced from this
+    /// map — they're surfaced for caller diagnostics only.
+    ssix_for_sidx: Vec<Option<usize>>,
     /// Top-level Segment Type Boxes (ISO/IEC 14496-12 §8.16.2), in
     /// file order. The first entry — when present — is the conformance
     /// declaration for a DASH / CMAF / HLS-fMP4 media segment; spec
@@ -413,6 +430,26 @@ impl MovDemuxer {
         // File-level, "Zero or more" — collected in file order. QTFF
         // doesn't define this box; it stays empty for `.mov` inputs.
         let mut file_sidx: Vec<Sidx> = Vec::new();
+        // ISO/IEC 14496-12 §8.16.4 Subsegment Index Boxes (`ssix`).
+        // File-level, "Zero or one per associated leaf-indexing sidx"
+        // (§8.16.4.1). Stored as a parallel vector to `file_sidx`: at
+        // each `sidx` we push a `None`, then if the very next box is
+        // `ssix` we replace that slot with `Some(parsed)`. This
+        // preserves the §8.16.4.1 pairing rule ("the next box after
+        // the associated Segment Index box") without storing a
+        // separate index map. We then unzip the slot vector into
+        // `file_ssix: Vec<Ssix>` (declaration order) plus an internal
+        // index map for `ssix_for_sidx`. QTFF doesn't define this box;
+        // both stay empty for `.mov` inputs.
+        let mut file_ssix_slots: Vec<Option<Ssix>> = Vec::new();
+        // Orphan `ssix` boxes — those that do not immediately follow a
+        // `sidx` per §8.16.4.1. Still parsed and surfaced through the
+        // public Vec (declaration order is preserved by tail-append),
+        // but no `sidx` cross-reference is recorded for them.
+        let mut file_ssix_orphans: Vec<Ssix> = Vec::new();
+        // Track whether the previous top-level box was `sidx`; only
+        // then does §8.16.4.1 permit an `ssix` to bind to it.
+        let mut prev_was_sidx = false;
         // ISO/IEC 14496-12 §8.16.2 Segment Type Boxes (`styp`).
         // File-level, "Zero or more" — collected in file order so a
         // caller can inspect a concatenated segment stream's every
@@ -527,6 +564,48 @@ impl MovDemuxer {
                     // that share the segment.
                     let payload = read_payload(input.as_mut(), &hdr)?;
                     file_sidx.push(parse_sidx(&payload)?);
+                    // Open a new `ssix` slot — if the very next
+                    // top-level box is `ssix` it binds here per
+                    // §8.16.4.1; otherwise the slot stays `None`.
+                    file_ssix_slots.push(None);
+                    prev_was_sidx = true;
+                    // The arm-end `prev_was_sidx = false` reset below
+                    // would clobber the flag, so skip the common
+                    // tail with an early `continue` after seeking.
+                    input.seek(SeekFrom::Start(body_end))?;
+                    continue;
+                }
+                t if t == &SSIX => {
+                    // ISO/IEC 14496-12 §8.16.4 — Subsegment Index Box.
+                    // File-level, "Zero or one per associated leaf-
+                    // indexing `sidx`" (§8.16.4.1). When the previous
+                    // top-level box was a `sidx`, bind this `ssix` to
+                    // the trailing slot we opened there; otherwise the
+                    // `ssix` is orphan / out-of-order — still parsed
+                    // and surfaced via the public `ssix` Vec, but with
+                    // no `sidx` cross-reference.
+                    let payload = read_payload(input.as_mut(), &hdr)?;
+                    let parsed = parse_ssix(&payload)?;
+                    if prev_was_sidx {
+                        // Replace the trailing None we pushed when the
+                        // sidx arm ran. The slot vector is non-empty
+                        // here because `prev_was_sidx` is only set in
+                        // the SIDX arm above.
+                        let last = file_ssix_slots.len() - 1;
+                        file_ssix_slots[last] = Some(parsed);
+                    } else {
+                        // Orphan `ssix` — keep the parsed value
+                        // accessible through the public Vec but do not
+                        // wire it back to any `sidx`. Stash a
+                        // sentinel slot so the unzip preserves order.
+                        // The slot vector remains the
+                        // sidx-index-keyed view; the orphan goes into
+                        // a parallel "tail" appended later.
+                        file_ssix_orphans.push(parsed);
+                    }
+                    prev_was_sidx = false;
+                    input.seek(SeekFrom::Start(body_end))?;
+                    continue;
                 }
                 t if t == &STYP => {
                     // ISO/IEC 14496-12 §8.16.2 — Segment Type Box.
@@ -705,6 +784,12 @@ impl MovDemuxer {
                 }
             }
 
+            // §8.16.4.1 — `ssix` only binds to its `sidx` when it is
+            // the very next top-level box. Any other top-level box
+            // breaks the pairing window. The `SIDX` and `SSIX` arms
+            // above use `continue` to skip this reset so their own
+            // book-keeping survives.
+            prev_was_sidx = false;
             input.seek(SeekFrom::Start(body_end))?;
         }
 
@@ -793,6 +878,30 @@ impl MovDemuxer {
         // standalone build path.
         let _ = resolver;
 
+        // Unzip the `Vec<Option<Ssix>>` slot vector into:
+        //   * `file_ssix`: every parsed Ssix in declaration order
+        //     (bound ones first, then orphans tail-appended), exposed
+        //     as the public Vec.
+        //   * `file_ssix_for_sidx`: a parallel-to-`file_sidx`
+        //     `Vec<Option<usize>>` indexing into `file_ssix`, so
+        //     `ssix_for_sidx(sidx_index)` is an O(1) lookup.
+        let mut file_ssix: Vec<Ssix> =
+            Vec::with_capacity(file_ssix_slots.len() + file_ssix_orphans.len());
+        let mut file_ssix_for_sidx: Vec<Option<usize>> = Vec::with_capacity(file_ssix_slots.len());
+        for slot in file_ssix_slots {
+            match slot {
+                Some(s) => {
+                    file_ssix_for_sidx.push(Some(file_ssix.len()));
+                    file_ssix.push(s);
+                }
+                None => file_ssix_for_sidx.push(None),
+            }
+        }
+        // Tail-append orphans so the public Vec still preserves
+        // declaration order; they are not cross-referenced by
+        // `ssix_for_sidx`.
+        file_ssix.extend(file_ssix_orphans);
+
         Ok(Self {
             input,
             ftyp,
@@ -808,6 +917,8 @@ impl MovDemuxer {
             ctab: movie_ctab,
             clipping: movie_clipping,
             sidx: file_sidx,
+            ssix: file_ssix,
+            ssix_for_sidx: file_ssix_for_sidx,
             styp: file_styp,
             prft: file_prft,
             pnot: file_pnot,
@@ -915,6 +1026,27 @@ impl MovDemuxer {
     /// non-live segmented streams that omit `prft`.
     pub fn first_prft(&self) -> Option<&Prft> {
         self.prft.first()
+    }
+
+    /// The Subsegment Index Box (`ssix`, ISO/IEC 14496-12 §8.16.4) that
+    /// describes the Segment Index Box at `sidx_index` (0-based into
+    /// [`Self::sidx`]), when present. §8.16.4.1 binds `ssix` to the
+    /// immediately preceding `sidx`; the demuxer's top-level walker
+    /// records that pairing at parse time so this lookup is O(1) and
+    /// doesn't rely on the caller knowing on-disk box order.
+    ///
+    /// Returns `None` when:
+    /// * `sidx_index` is out of range,
+    /// * the addressed `sidx` is not followed by an `ssix` (the
+    ///   default case for coarsely-segmented MP4 / fMP4 that does not
+    ///   need a per-level partial-subsegment index), or
+    /// * the file declares an orphan `ssix` (one that does not
+    ///   immediately follow any `sidx`); such orphans are still
+    ///   surfaced through the [`Self::ssix`] Vec but not bound to any
+    ///   `sidx`.
+    pub fn ssix_for_sidx(&self, sidx_index: usize) -> Option<&Ssix> {
+        let j = (*self.ssix_for_sidx.get(sidx_index)?)?;
+        self.ssix.get(j)
     }
 
     // Stub used by `open()` to validate the container before we

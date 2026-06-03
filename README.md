@@ -801,6 +801,53 @@ pathological inputs) and exercises the `entry_for_ssrc_slot` lookup
 against an attacker-influenced 1-based slot id derived from the
 input's first 32-bit word.
 
+Round 219 parses the **Subsegment Index Box** (`ssix`) — ISO/IEC
+14496-12 §8.16.4 — at file scope, completing the §8.16 segment-index
+surface alongside the round-114 `sidx` parser. The FullBox pairs
+one-to-one with the immediately preceding `sidx` box that indexes only
+leaf subsegments (`Quantity: 0 or 1` per associated `sidx`,
+§8.16.4.1) and partitions each subsegment into level-keyed *partial
+subsegments* — a compact "table of contents" letting a DASH / CMAF
+client fetch only the bytes for a chosen Level Assignment Box
+(§8.8.13) level (e.g. the lowest temporal-scalability layer of a
+multi-layer video segment). Layout per §8.16.4.2 is
+`subsegment_count[4]`, then per subsegment a `range_count[4]` and
+`range_count`-many `(level[1], range_size[3])` rows; the per-range
+`range_size` is 24-bit unsigned per §8.16.4.2 / §8.16.4.3. Each
+[`SsixSubsegment`] surfaces the partial-subsegment list verbatim and
+[`Ssix`] exposes `subsegment_count()`, `total_size_for(index)`
+(§8.16.4.1's "each byte assigned to a level" invariant — sums
+`range_size` across a subsegment's chain, widened to `u64` because the
+per-range 24-bit cap doesn't bound the whole subsegment), and
+`partial_subsegment_offset(subsegment_start, index, range_index)`
+(walks the `range_size` chain from a caller-supplied subsegment start,
+typically sourced from the paired `sidx`'s
+[`Sidx::subsegment_offset`]). Surfaces on the demuxer via
+`MovDemuxer::ssix: Vec<Ssix>` (file order — every parsed box stays
+visible) plus the `MovDemuxer::ssix_for_sidx(sidx_index)` accessor:
+the demuxer's top-level walker records the §8.16.4.1 pairing at parse
+time so the lookup is O(1) and doesn't rely on the caller knowing
+on-disk box order. Orphan `ssix` (out-of-order or following something
+other than `sidx`) is still parsed and surfaced through the public Vec
+but is not bound to any `sidx`. A non-`sidx`/`ssix` top-level box
+between a `sidx` and the following `ssix` breaks the pairing window
+per §8.16.4.1's "the next box after the associated Segment Index box"
+rule. Rejected at open time: unknown FullBox `version` (spec fixes at
+0), payload shorter than the 8-byte FullBox header + `subsegment_count`
+u32, a declared `range_count` below 2 (§8.16.4.1: every byte must be
+assigned to a level so a single partial subsegment is illegal), a
+`subsegment_count` or `range_count` overrun, and any trailing bytes
+past the declared subsegment list (the box carries no list past the
+final subsegment). The up-front bound on `subsegment_count × 4`
+against remaining body bytes rejects a forged huge count before
+allocating `Vec::with_capacity`. QTFF does not define this box; it is
+ISO BMFF-only and stays absent for plain `.mov` inputs. The round-176
+fuzz harness extends to walk every collected `ssix` entry (capped at
+64 to bound pathological writers) through `total_size_for` /
+`partial_subsegment_offset` with attacker-influenced indices and
+overflow-prone anchor values, then exercises the `ssix_for_sidx`
+cross-reference path against each declared `sidx`.
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per

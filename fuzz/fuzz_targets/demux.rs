@@ -122,6 +122,31 @@ fuzz_target!(|data: &[u8]| {
     // walk the brand list once.
     let _ = dmx.pdin.is_some();
     let _ = dmx.sidx.len();
+    // Round-219 Subsegment Index Box (`ssix`, ISO/IEC 14496-12 §8.16.4)
+    // surface. The boxes pair one-to-one with `sidx` per §8.16.4.1; we
+    // walk the public Vec (capped at 64 to bound pathological writers)
+    // touching `total_size_for` / `partial_subsegment_offset` on a
+    // couple of attacker-influenced indices, then exercise the
+    // `ssix_for_sidx` cross-reference path against each declared
+    // `sidx`. This keeps the deferred-pairing book-keeping covered
+    // even when the fuzz input declares dozens of out-of-order or
+    // orphan ssix entries.
+    let nssix = dmx.ssix.len().min(64);
+    for si in 0..nssix {
+        let s = &dmx.ssix[si];
+        let _ = s.subsegment_count();
+        let probe = if data.len() >= 4 {
+            u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize
+        } else {
+            0
+        };
+        let _ = s.total_size_for(probe);
+        let _ = s.partial_subsegment_offset(0, probe, 0);
+        let _ = s.partial_subsegment_offset(u64::MAX, 0, 0);
+    }
+    for si in 0..dmx.sidx.len().min(64) {
+        let _ = dmx.ssix_for_sidx(si);
+    }
     let _ = dmx.styp.len();
     let _ = dmx.prft.len();
     let _ = dmx.ctab.is_some();

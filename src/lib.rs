@@ -36,6 +36,7 @@ pub mod sample_aux;
 pub mod sample_groups;
 pub mod sample_table;
 pub mod sidx;
+pub mod ssix;
 pub mod styp;
 pub mod timecode;
 pub mod track;
@@ -122,6 +123,7 @@ pub use sample_table::{
     StshEntry, SubSampleEntry, SubSampleInfo,
 };
 pub use sidx::{parse_sidx, ReferenceType, Sidx, SidxReference};
+pub use ssix::{parse_ssix, Ssix, SsixRange, SsixSubsegment};
 pub use styp::{parse_styp, Styp};
 pub use timecode::{
     parse_tmcd_sample_description, Tmcd, TMCD_FLAG_24_HOUR, TMCD_FLAG_COUNTER,
