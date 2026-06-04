@@ -14,10 +14,10 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CO64, CSLG, CTAB, CTTS,
     DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, IMAP, KEYS, LOAD, MATT, MDAT,
-    MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS,
-    RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, SSIX, STBL, STCO,
-    STDP, STSC, STSD, STSH, STSS, STSZ, STTS, STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF,
-    TRGR, UDTA, UUID, VMHD, WIDE,
+    MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PADB, PDIN, PNOT, PRFT, PROF, RDRF, RMCD,
+    RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, SSIX, STBL,
+    STCO, STDP, STSC, STSD, STSH, STSS, STSZ, STTS, STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK,
+    TREF, TRGR, UDTA, UUID, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -37,9 +37,9 @@ use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
 use crate::sample_aux::{parse_saio, parse_saiz};
 use crate::sample_groups::{parse_sbgp, parse_sgpd};
 use crate::sample_table::{
-    parse_co64, parse_ctts, parse_sdtp, parse_stco, parse_stdp, parse_stsc, parse_stsh, parse_stss,
-    parse_stsz, parse_stts, parse_stz2, parse_subs, SampleEntry, SampleSizeSource, SampleTable,
-    SubSampleInfo,
+    parse_co64, parse_ctts, parse_padb, parse_sdtp, parse_stco, parse_stdp, parse_stsc, parse_stsh,
+    parse_stss, parse_stsz, parse_stts, parse_stz2, parse_subs, SampleEntry, SampleSizeSource,
+    SampleTable, SubSampleInfo,
 };
 use crate::sidx::{parse_sidx, Sidx};
 use crate::ssix::{parse_ssix, Ssix};
@@ -1877,6 +1877,27 @@ impl MovDemuxer {
             .sample_degradation_priority(sample_zero_based)
     }
 
+    /// Look up the `padb` Padding Bits Box (ISO/IEC 14496-12 §8.7.6)
+    /// value for a 0-based decode-order sample on a track.
+    ///
+    /// Returns `None` when the track carries no `padb` box, the sample
+    /// index is past the table, or `track_index` is out of range. The
+    /// returned 3-bit value in `0..=7` reports the number of zero-pad
+    /// bits at the end of the sample beyond its meaningful bitstream
+    /// (§8.7.6.3). Callers that re-pack the sample bytes for a
+    /// downstream decoder use the value to recover the original bit
+    /// length: `bit_length = sample_size_bytes × 8 - padding_bits`.
+    ///
+    /// QTFF does not define this box; it is ISO BMFF-only and the
+    /// accessor returns `None` for every sample on a plain `.mov`
+    /// input.
+    pub fn sample_padding_bits(&self, track_index: usize, sample_zero_based: u32) -> Option<u8> {
+        self.tracks
+            .get(track_index)?
+            .sample_table
+            .sample_padding_bits(sample_zero_based)
+    }
+
     /// Source of `track_index`'s sample-size data: `stsz` (§8.7.3.2),
     /// `stz2` (§8.7.3.3), or `None` when the `stbl` carries no
     /// sample-size box at all (a fragmented-only track whose sizes all
@@ -3161,6 +3182,18 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
             // boxes — `sdtp` itself, plus the various sample-aux boxes).
             t if t == &STDP && stdp_payload.is_none() => {
                 stdp_payload = Some(read_payload(r, child)?);
+            }
+            // ISO/IEC 14496-12 §8.7.6 — Padding Bits Box. Self-sized
+            // (the box carries its own `sample_count` u32 before the
+            // packed table) so the parse runs inline. §8.7.6.1 lists
+            // the box as `Quantity: Zero or one`; a malformed writer
+            // emitting two is tolerated first-wins, matching the
+            // conservative-merge policy applied to every other "at
+            // most once" stbl-scope box (`sdtp` / `stdp` / `sbgp` /
+            // `sgpd` / `saiz` / `saio`).
+            t if t == &PADB && table.padb.is_empty() => {
+                let body = read_payload(r, child)?;
+                table.padb = parse_padb(&body)?;
             }
             t if t == &CSLG => {
                 let body = read_payload(r, child)?;

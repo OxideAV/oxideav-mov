@@ -848,6 +848,63 @@ fuzz harness extends to walk every collected `ssix` entry (capped at
 overflow-prone anchor values, then exercises the `ssix_for_sidx`
 cross-reference path against each declared `sidx`.
 
+Round 234 parses the **Padding Bits Box** (`padb`) — ISO/IEC 14496-12
+§8.7.6 — at `stbl` scope. The FullBox records the number of zero-pad
+bits at the end of each sample for streams whose samples do not occupy
+whole bytes (variable-rate audio whose frame data ends mid-byte; some
+specifications require recording the count externally so a downstream
+decoder can recover the original bit length). Layout per §8.7.6.2:
+
+```text
+aligned(8) class PaddingBitsBox extends FullBox('padb', version=0, 0) {
+    unsigned int(32) sample_count;
+    for (i = 0; i < (sample_count + 1) / 2; i++) {
+        bit(1) reserved = 0;
+        bit(3) pad1;          // padding bits for sample 2*i + 1
+        bit(1) reserved = 0;
+        bit(3) pad2;          // padding bits for sample 2*i + 2
+    }
+}
+```
+
+The packed table holds two 3-bit values per byte: MSB-first the high
+nibble carries `[reserved=0][pad1]` and the low nibble carries
+`[reserved=0][pad2]`, with `pad1` mapping to the 1-based sample
+`2*i + 1` and `pad2` to sample `2*i + 2` (§8.7.6.3). The decoded
+output is a `Vec<u8>` of one value in `0..=7` per sample in decode
+order; the vector's length equals the box's on-disk `sample_count`
+(§8.7.6.3 notes the field "should match the count in other tables"
+but the parser does not enforce a cross-box check — a mismatch
+surfaces verbatim so callers can detect a malformed writer rather
+than have the parser silently truncate or extend). New
+`SampleTable::padb: Vec<u8>` field plus
+`SampleTable::sample_padding_bits(sample_idx)` and
+`MovDemuxer::sample_padding_bits(track, sample)` accessors hand back
+the value 1:1 with what the writer emitted. A caller that re-packs
+the sample bytes for a downstream decoder uses the value to recover
+the original bit length: `bit_length = sample_size_bytes × 8 -
+padding_bits`. Rejected at open time: payload shorter than the
+8-byte FullBox header + `sample_count` u32 (without this guard the
+version / flags / count read would scrape uninitialised bytes);
+non-zero FullBox `flags` (§8.7.6.2 spec-fixes `flags = 0`); non-zero
+reserved bit inside any *fully occupied* packed byte (a leak of
+undefined bits past the parser is detectable and rejected so a
+malformed writer cannot piggy-back vendor data on the reserved
+positions); a body shorter than `ceil(sample_count / 2)` packed
+bytes. For odd `sample_count`, the trailing nibble (the last byte's
+`pad2` slot) addresses no sample and is left unchecked — the parser
+surfaces exactly `sample_count` entries regardless of the
+trailing-nibble value. A duplicate `padb` inside one `stbl` is
+tolerated first-wins (§8.7.6.1 lists the box as `Quantity: Zero or
+one` and first-wins matches the conservative-merge policy applied to
+every other "at most once" stbl-scope box — `sdtp`, `stdp`,
+`sbgp`/`sgpd`, `saiz`/`saio`). QTFF does not define this box; it is
+ISO BMFF-only and stays absent for plain `.mov` inputs. The round-176
+fuzz harness extends to call the new per-track `sample_padding_bits`
+accessor on zero plus an input-derived sample index so a
+`padb`-carrying fuzz input reaches the bounded `Vec::get` accessor
+without panicking.
+
 Round 226 parses the **Level Assignment Box** (`leva`) — ISO/IEC
 14496-12 §8.8.13 — at `moov/mvex` scope, naming the *levels* the
 round-219 §8.16.4 Subsegment Index Box (`ssix`) references.

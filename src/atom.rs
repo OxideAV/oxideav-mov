@@ -361,6 +361,14 @@ pub const SDTP: [u8; 4] = fourcc("sdtp"); // Independent and Disposable Samples 
 /// the base format define the exact meaning and acceptable range
 /// (§8.5.3.1). QTFF does not define this box; it is ISO BMFF-only.
 pub const STDP: [u8; 4] = fourcc("stdp");
+/// Round 234 — Padding Bits Box (ISO/IEC 14496-12 §8.7.6). Records the
+/// number of padding bits at the end of each sample for streams whose
+/// samples do not occupy whole bytes (e.g. variable-rate audio whose
+/// frame data ends mid-byte). Two 3-bit values are packed per byte;
+/// the row count is `(sample_count + 1) / 2` and the box's own
+/// `sample_count` field "should match the count in other tables"
+/// (§8.7.6.3). QTFF does not define this box; it is ISO BMFF-only.
+pub const PADB: [u8; 4] = fourcc("padb");
 pub const SUBS: [u8; 4] = fourcc("subs"); // Sub-Sample Information Box
 pub const SAIZ: [u8; 4] = fourcc("saiz"); // Sample Auxiliary Information Sizes Box
 pub const SAIO: [u8; 4] = fourcc("saio"); // Sample Auxiliary Information Offsets Box

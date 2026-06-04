@@ -30,9 +30,10 @@
 //!     size words at the walker so any unguarded `read_payload`
 //!     call site would surface as an OOM or panic.
 //!   * Sample-table expansion — `stts`, `stsc`, `stsz`/`stz2`,
-//!     `stco`/`co64`, `stss`, `stsh`, `ctts`, `sdtp`, `stdp`, `subs`,
-//!     `sbgp`/`sgpd`, `saiz`/`saio` all have attacker-controlled
-//!     entry counts that drive allocations and per-sample arithmetic.
+//!     `stco`/`co64`, `stss`, `stsh`, `ctts`, `sdtp`, `stdp`, `padb`,
+//!     `subs`, `sbgp`/`sgpd`, `saiz`/`saio` all have
+//!     attacker-controlled entry counts that drive allocations and
+//!     per-sample arithmetic.
 //!   * Fragmented MP4 — `tfhd` per-track defaults, `tfdt` base media
 //!     decode time, `trun` per-sample overrides, and the round-21
 //!     `mfra/tfra/mfro` random-access index, all of which compose
@@ -278,6 +279,19 @@ fuzz_target!(|data: &[u8]| {
         if data.len() >= 4 {
             let probe = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             let _ = dmx.sample_degradation_priority(ti, probe);
+        }
+        // Round-234 Padding Bits Box (`padb`, §8.7.6) per-sample
+        // accessor. The box is self-sized (its on-disk
+        // `sample_count` field drives the packed-table width); a
+        // fuzz input constructing an attacker-controlled count
+        // alongside a runt packed table must reach the
+        // bounded-`Vec::get` accessor without panicking. Probe zero
+        // plus an input-derived index so the off-by-one path stays
+        // exercised on every `padb`-carrying input.
+        let _ = dmx.sample_padding_bits(ti, 0);
+        if data.len() >= 8 {
+            let probe = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+            let _ = dmx.sample_padding_bits(ti, probe);
         }
         // Exercise the round-74 / round-91 edit-list mapper on a
         // couple of attacker-influenced media_pts values. The

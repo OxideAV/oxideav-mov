@@ -330,6 +330,16 @@ pub struct SampleTable {
     /// hand back to callers that consult the specification carrying the
     /// `stdp` track.
     pub stdp: Vec<u16>,
+    /// `padb` Padding Bits Box per-sample padding-bit counts
+    /// (ISO/IEC 14496-12 §8.7.6). One 3-bit value per sample in
+    /// decode order: the number of zero-pad bits at the end of the
+    /// sample beyond its meaningful bitstream. Empty when the track
+    /// carries no `padb` box. The box's on-disk `sample_count` is the
+    /// authoritative row count; §8.7.6.3 notes it "should match the
+    /// count in other tables" but a mismatch surfaces verbatim so
+    /// callers can detect a malformed writer rather than have the
+    /// parser silently truncate or extend.
+    pub padb: Vec<u8>,
     /// `stsh` Shadow Sync Sample Box entries (ISO/IEC 14496-12
     /// §8.6.3), sorted ascending by `shadowed_sample_number`. Empty
     /// when the track carries no `stsh` box. Optional metadata: a
@@ -414,6 +424,18 @@ impl SampleTable {
     /// numeric meaning to derived specifications (§8.5.3.1, §8.5.3.3).
     pub fn sample_degradation_priority(&self, sample_idx: u32) -> Option<u16> {
         self.stdp.get(sample_idx as usize).copied()
+    }
+
+    /// `padb` Padding Bits Box value for a 0-based decode-order
+    /// sample index — ISO/IEC 14496-12 §8.7.6 — or `None` when the
+    /// track carries no `padb` box (or the index is past the table).
+    /// The 3-bit value in `0..=7` reports the number of zero-pad bits
+    /// at the end of the sample beyond its meaningful bitstream
+    /// (§8.7.6.3). Callers that re-pack the sample bytes for a
+    /// downstream decoder use the value to recover the original bit
+    /// length: `bit_length = sample_size_bytes × 8 - padding_bits`.
+    pub fn sample_padding_bits(&self, sample_idx: u32) -> Option<u8> {
+        self.padb.get(sample_idx as usize).copied()
     }
 
     /// Look up the alternative *sync* sample (1-based) that shadows the
@@ -827,6 +849,98 @@ pub fn parse_stdp(payload: &[u8], sample_count: u32) -> Result<Vec<u16>> {
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         out.push(read_u16(&body[i * 2..]));
+    }
+    Ok(out)
+}
+
+/// Parse `padb` (Padding Bits Box) payload — ISO/IEC 14496-12 §8.7.6.
+///
+/// Layout (§8.7.6.2):
+///
+/// ```text
+/// aligned(8) class PaddingBitsBox extends FullBox('padb', version=0, 0) {
+///     unsigned int(32) sample_count;
+///     for (i = 0; i < (sample_count + 1) / 2; i++) {
+///         bit(1) reserved = 0;
+///         bit(3) pad1;          // padding bits for sample 2*i + 1
+///         bit(1) reserved = 0;
+///         bit(3) pad2;          // padding bits for sample 2*i + 2
+///     }
+/// }
+/// ```
+///
+/// Each output `u8` is the 3-bit value in `0..=7` for one sample in
+/// decode order. The vector's length equals the box's on-disk
+/// `sample_count` — §8.7.6.3 notes the field "should match the count
+/// in other tables" but the parser does not enforce a cross-box check
+/// (a mismatch surfaces verbatim so the caller can detect a malformed
+/// writer).
+///
+/// For odd `sample_count`, the trailing nibble (`pad2` of the last
+/// packed byte) carries no sample and is required to be zero per
+/// §8.7.6.2 ("`reserved = 0`" applies to both reserved bits — the
+/// trailing `pad2` slot occupies the byte but encodes no semantically
+/// addressable sample). The parser leaves the trailing-nibble value
+/// unchecked: a non-zero trailing pad2 surfaces only via the row count
+/// invariant (`Vec::len() == sample_count`).
+///
+/// Rejected at open time: payload shorter than the 8-byte FullBox
+/// header + `sample_count` u32; non-zero FullBox `flags` (§8.7.6.2
+/// spec-fixes `flags = 0`); non-zero reserved bit inside any *fully
+/// occupied* packed byte (a leak of undefined bits past the parser is
+/// detectable and rejected so a malformed writer cannot piggy-back
+/// vendor data on the high bit); a body shorter than
+/// `(sample_count + 1) / 2` packed bytes.
+pub fn parse_padb(payload: &[u8]) -> Result<Vec<u8>> {
+    need(payload, 0, 8, "padb header")?;
+    // §8.7.6.2 — FullBox(version=0, 0). Reject a non-zero flags field
+    // rather than silently propagate it; matches the stdp guard.
+    let flags =
+        (u32::from(payload[1]) << 16) | (u32::from(payload[2]) << 8) | u32::from(payload[3]);
+    if flags != 0 {
+        return Err(Error::invalid("MOV: padb non-zero flags"));
+    }
+    let sample_count = read_u32(&payload[4..]);
+    let body = &payload[8..];
+    let packed_rows = (sample_count as u64).div_ceil(2);
+    let packed_rows_usize = usize::try_from(packed_rows)
+        .map_err(|_| Error::invalid("MOV: padb sample_count overflows packed-byte computation"))?;
+    if body.len() < packed_rows_usize {
+        return Err(Error::invalid("MOV: padb truncated packed table"));
+    }
+    let n = sample_count as usize;
+    let mut out = Vec::with_capacity(n);
+    let mut sample_idx: usize = 0;
+    for &b in &body[..packed_rows_usize] {
+        // bit 7: reserved (must be 0)
+        // bits 6..4: pad1 — sample 2*i + 1 (1-based) → samples[2*i]
+        // bit 3: reserved (must be 0)
+        // bits 2..0: pad2 — sample 2*i + 2 (1-based) → samples[2*i + 1]
+        let pad1 = (b >> 4) & 0x07;
+        let pad2 = b & 0x07;
+        let reserved_hi = (b >> 7) & 0x01;
+        let reserved_lo = (b >> 3) & 0x01;
+        // For the last packed byte of an odd sample_count, only the
+        // pad1 nibble carries a real sample — the trailing pad2 nibble
+        // (and its reserved bit) is `reserved = 0` per §8.7.6.2 with
+        // no semantically addressable sample behind it. Skip the
+        // trailing-nibble reserved check on the last odd byte; check
+        // both halves on every fully-occupied byte.
+        let last_odd = sample_idx + 1 == n; // pad2 slot is past end-of-table
+        if reserved_hi != 0 {
+            return Err(Error::invalid("MOV: padb reserved bit (high) non-zero"));
+        }
+        if !last_odd && reserved_lo != 0 {
+            return Err(Error::invalid("MOV: padb reserved bit (low) non-zero"));
+        }
+        if sample_idx < n {
+            out.push(pad1);
+            sample_idx += 1;
+        }
+        if sample_idx < n {
+            out.push(pad2);
+            sample_idx += 1;
+        }
     }
     Ok(out)
 }
@@ -1284,6 +1398,7 @@ mod tests {
             subs: vec![],
             saiz: vec![],
             saio: vec![],
+            padb: vec![],
             sample_size_source: None,
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
@@ -1362,6 +1477,7 @@ mod tests {
             subs: vec![],
             saiz: vec![],
             saio: vec![],
+            padb: vec![],
             sample_size_source: None,
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
@@ -1400,6 +1516,7 @@ mod tests {
             subs: vec![],
             saiz: vec![],
             saio: vec![],
+            padb: vec![],
             sample_size_source: None,
         };
         let v: Vec<_> = table.iter_samples().collect::<Result<_>>().unwrap();
