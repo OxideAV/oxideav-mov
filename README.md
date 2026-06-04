@@ -898,6 +898,47 @@ extends to walk the optional `MovDemuxer::leva` row list (capped at
 boundaries (0 and `level_count`+1) so the off-by-one path stays
 covered on every `leva`-carrying fuzz input.
 
+Round 234 parses the **Padding Bits Box** (`padb`) — ISO/IEC
+14496-12 §8.7.6 — at `stbl` scope. The box records, for each sample,
+how many bits at the end of the sample's media payload are
+writer-inserted padding to round up to a whole-byte boundary; the
+value matters when a downstream stage must re-emit the original
+bit-stream verbatim (§8.7.6.1: "In some streams the media samples do
+not occupy all bits of the bytes given by the sample size, and are
+padded at the end to a byte boundary. In some cases, it is necessary
+to record externally the number of padding bits used."). Unlike
+`sdtp` / `stdp`, `padb` carries its own `sample_count` field on disk
+(§8.7.6.2) so the parse runs at walk time and does not depend on
+`stsz` / `stz2`. Layout per §8.7.6.2 is
+`[version:1][flags:3][sample_count:4]` then `((sample_count + 1) /
+2)` packed bytes, each holding `[reserved:1, pad1:3, reserved:1,
+pad2:3]` most-significant nibble first; `pad1` covers sample
+`(i*2)+1` (1-based per §8.7.6.3) and `pad2` covers sample `(i*2)+2`.
+For an odd `sample_count` the trailing low nibble of the final byte
+is the `pad2` slot for a non-existent "sample N+1" and is silently
+discarded. New [`SampleTable::padb: Vec<u8>`] field plus
+[`SampleTable::sample_padding_bits(sample_idx)`] and
+[`MovDemuxer::sample_padding_bits(track, sample)`] accessors return
+the 3-bit `pad` value (`0..=7`) 1:1 with what the writer emitted.
+Rejected at open time: payload shorter than the 8-byte FullBox
+header + `sample_count` u32, unknown FullBox `version` (§8.7.6.2
+spec-fixes at 0), non-zero `flags` (§8.7.6.2 spec-fixes at 0; silent
+acceptance would let a malformed writer leak undefined bits past the
+parser), body shorter than `(sample_count + 1) / 2` packed bytes
+(truncated table), and a non-zero `reserved` bit in either nibble of
+any packed byte (§8.7.6.2 spec-fixes both the 0x80 and 0x08 bits at
+0). A duplicate `padb` inside the same `stbl` is tolerated first-wins
+(§8.7.6.1 lists the box as `Quantity: Zero or one`; first-wins
+matches the conservative-merge policy applied to every other "at
+most once" stbl-scope box — `sdtp`, `stdp`, `sbgp`/`sgpd`,
+`saiz`/`saio`). QTFF does not define this box; it is ISO BMFF-only
+and stays empty for plain `.mov` inputs. The round-176 fuzz harness
+extends to call the new per-track `sample_padding_bits` accessor on
+two attacker-influenced sample indices (zero plus a value derived
+from the second 32-bit word of the input) so a `padb`-carrying fuzz
+input reaches the parser and the bounded `Vec::get` accessor without
+panicking.
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per
