@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-mov/compare/v0.0.3...v0.0.4) - 2026-06-04
+
+### Other
+
+- Round 234 — Padding Bits Box (padb) parser at stbl scope (ISO/IEC 14496-12 §8.7.6)
+- Round 226 — Level Assignment Box (leva) parser at moov/mvex scope (ISO/IEC 14496-12 §8.8.13)
+- Round 219 — Subsegment Index Box (ssix) parser, ISO/IEC 14496-12 §8.16.4
+- Round 216 — Track Input Map atom (imap) parser (QTFF pp. 51-53)
+- Round 210 — Degradation Priority Box (stdp) parser at stbl scope
+- round 204: parse Compact Sample Size Box (stz2)
+
 ### Other
 
 - Round 234 — Padding Bits Box (`padb`) parser at `stbl` scope (ISO/IEC 14496-12 §8.7.6). The FullBox records the number of zero-pad bits at the end of each sample for streams whose samples do not occupy whole bytes (variable-rate audio whose frame data ends mid-byte). Layout per §8.7.6.2 is `[version:1][flags:3] sample_count:u32` followed by `ceil(sample_count / 2)` packed bytes; each byte holds `[reserved:1][pad1:3][reserved:1][pad2:3]` MSB-first where `pad1` corresponds to the 1-based sample `2*i + 1` and `pad2` to sample `2*i + 2`. New `parse_padb` parser, `SampleTable::padb: Vec<u8>` field (one 3-bit value in `0..=7` per sample), `SampleTable::sample_padding_bits(sample_idx)` and `MovDemuxer::sample_padding_bits(track, sample)` accessors. Rejected at open time: payload shorter than the 8-byte FullBox header + `sample_count` u32; non-zero FullBox `flags` (§8.7.6.2 spec-fixes `flags = 0`); non-zero reserved bit inside any fully occupied packed byte (a leak of undefined bits past the parser is detectable and rejected so a malformed writer cannot piggy-back vendor data on the reserved positions); a body shorter than `ceil(sample_count / 2)` packed bytes. For odd `sample_count`, the trailing nibble (`pad2` of the last byte) carries no sample and is left unchecked — the parser surfaces exactly `sample_count` entries regardless of the trailing-nibble value. A duplicate `padb` inside one `stbl` is tolerated first-wins — §8.7.6.1 lists the box as `Quantity: Zero or one` and first-wins matches the conservative-merge policy applied to every other "at most once" stbl-scope box (`sdtp`, `stdp`, `sbgp`/`sgpd`, `saiz`/`saio`). QTFF does not define this box; it is ISO BMFF-only and the accessor returns `None` for every sample on a plain `.mov` input. The round-176 fuzz harness extends to call `sample_padding_bits` on zero plus an input-derived sample index so a `padb`-carrying fuzz input reaches the bounded `Vec::get` accessor without panicking.
