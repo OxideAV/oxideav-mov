@@ -29,12 +29,118 @@ use crate::standalone::{Error, Result};
 /// Generic media-information header (`gmhd/gmin`). QTFF p. 65.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Gmin {
-    /// Compositing mode (e.g. `0x0040` = ditherCopy, `0x0100` = transparent).
+    /// Compositing mode (Table 4-2, QTFF p. 200). For a typed view use
+    /// [`Gmin::graphics_mode_kind`]; common values include `0x0000`
+    /// (copy), `0x0040` (dither copy), `0x0024` (transparent), and
+    /// `0x0100` (straight alpha).
     pub graphics_mode: u16,
-    /// RGB triple (16-bit per channel) used by certain compositing modes.
+    /// RGB triple (16-bit per channel) used by the compositing modes
+    /// whose Table 4-2 "Uses opcolor" column is set (blend, transparent,
+    /// straight-alpha-blend).
     pub opcolor: [u16; 3],
-    /// Stereo balance (8.8 signed fixed-point). 0 = centered.
+    /// Stereo balance (8.8 signed fixed-point). 0 = centered. See
+    /// [`Gmin::balance_as_f32`] for the [-1.0, +1.0] decoded value
+    /// (QTFF p. 201).
     pub balance: i16,
+}
+
+/// Typed compositing mode (QTFF Table 4-2, p. 200). The numeric
+/// representation in [`Gmin::graphics_mode`] is preserved verbatim;
+/// this enum surfaces the named modes plus a fall-through that keeps
+/// the raw 16-bit value for vendor or future-spec codes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphicsMode {
+    /// `0x0000` — Copy the source image over the destination.
+    Copy,
+    /// `0x0040` — Dither the image (if needed), otherwise do a copy.
+    DitherCopy,
+    /// `0x0020` — Blend source/destination per channel weighted by
+    /// `opcolor`. Uses `opcolor`.
+    Blend,
+    /// `0x0024` — Replace the destination pixel with the source pixel
+    /// when the source is not equal to `opcolor`. Uses `opcolor`.
+    Transparent,
+    /// `0x0100` — Blend source/destination weighted by the source
+    /// alpha channel.
+    StraightAlpha,
+    /// `0x0101` — Same as straight alpha, but the source has been
+    /// pre-multiplied with a white background.
+    PremulWhiteAlpha,
+    /// `0x0102` — Same as straight alpha, but the source has been
+    /// pre-multiplied with a black background.
+    PremulBlackAlpha,
+    /// `0x0103` — (Tracks only) Composition: the track is drawn
+    /// offscreen and composited onto the screen using dither copy.
+    Composition,
+    /// `0x0104` — Straight-alpha-blend: per-channel alpha is the
+    /// combination of the source alpha and the matching channel in
+    /// `opcolor`. Uses `opcolor`.
+    StraightAlphaBlend,
+    /// Any value not in Table 4-2 (vendor / future-spec). The raw
+    /// 16-bit code is preserved.
+    Other(u16),
+}
+
+impl GraphicsMode {
+    /// Map a raw 16-bit compositing-mode code to its typed name per
+    /// QTFF Table 4-2.
+    pub fn from_raw(code: u16) -> Self {
+        match code {
+            0x0000 => Self::Copy,
+            0x0040 => Self::DitherCopy,
+            0x0020 => Self::Blend,
+            0x0024 => Self::Transparent,
+            0x0100 => Self::StraightAlpha,
+            0x0101 => Self::PremulWhiteAlpha,
+            0x0102 => Self::PremulBlackAlpha,
+            0x0103 => Self::Composition,
+            0x0104 => Self::StraightAlphaBlend,
+            other => Self::Other(other),
+        }
+    }
+
+    /// The on-disk 16-bit code for this mode. Round-trips with
+    /// [`GraphicsMode::from_raw`].
+    pub fn raw(&self) -> u16 {
+        match *self {
+            Self::Copy => 0x0000,
+            Self::DitherCopy => 0x0040,
+            Self::Blend => 0x0020,
+            Self::Transparent => 0x0024,
+            Self::StraightAlpha => 0x0100,
+            Self::PremulWhiteAlpha => 0x0101,
+            Self::PremulBlackAlpha => 0x0102,
+            Self::Composition => 0x0103,
+            Self::StraightAlphaBlend => 0x0104,
+            Self::Other(raw) => raw,
+        }
+    }
+
+    /// Whether this mode consults the accompanying `opcolor` field
+    /// (Table 4-2, "Uses opcolor" column). `Other` is reported as
+    /// `false` so a caller doesn't read meaning into an opcolor that
+    /// the spec hasn't bound to the unknown code.
+    pub fn uses_opcolor(&self) -> bool {
+        matches!(
+            self,
+            Self::Blend | Self::Transparent | Self::StraightAlphaBlend
+        )
+    }
+}
+
+impl Gmin {
+    /// Typed view of [`Gmin::graphics_mode`] per QTFF Table 4-2.
+    pub fn graphics_mode_kind(&self) -> GraphicsMode {
+        GraphicsMode::from_raw(self.graphics_mode)
+    }
+
+    /// Decode [`Gmin::balance`] from 8.8 signed fixed-point to the
+    /// real-valued setting in the [-1.0, +1.0] range that QTFF p. 201
+    /// defines: negative weights the left speaker, positive the right,
+    /// zero is centered.
+    pub fn balance_as_f32(&self) -> f32 {
+        self.balance as f32 / 256.0
+    }
 }
 
 /// Text-track media-information header (`gmhd/text`). QTFF p. 144.
@@ -259,5 +365,115 @@ mod tests {
         let t = parse_tcmi(&p).unwrap();
         assert_eq!(t.text_size, 10);
         assert_eq!(t.font_name, "");
+    }
+
+    // ─────────────── GraphicsMode (Table 4-2) ───────────────
+
+    #[test]
+    fn graphics_mode_table_4_2_round_trip() {
+        // Every named row of Table 4-2 round-trips through from_raw / raw.
+        let pairs = [
+            (0x0000u16, GraphicsMode::Copy),
+            (0x0040, GraphicsMode::DitherCopy),
+            (0x0020, GraphicsMode::Blend),
+            (0x0024, GraphicsMode::Transparent),
+            (0x0100, GraphicsMode::StraightAlpha),
+            (0x0101, GraphicsMode::PremulWhiteAlpha),
+            (0x0102, GraphicsMode::PremulBlackAlpha),
+            (0x0103, GraphicsMode::Composition),
+            (0x0104, GraphicsMode::StraightAlphaBlend),
+        ];
+        for (code, mode) in pairs {
+            assert_eq!(GraphicsMode::from_raw(code), mode);
+            assert_eq!(mode.raw(), code);
+        }
+    }
+
+    #[test]
+    fn graphics_mode_unknown_codes_survive_as_other() {
+        // Vendor / future-spec codes preserve the raw bit pattern.
+        for code in [0x0001u16, 0x0050, 0x0105, 0xBEEF, 0xFFFF] {
+            let mode = GraphicsMode::from_raw(code);
+            assert_eq!(mode, GraphicsMode::Other(code));
+            assert_eq!(mode.raw(), code);
+            assert!(!mode.uses_opcolor());
+        }
+    }
+
+    #[test]
+    fn graphics_mode_uses_opcolor_per_table_4_2() {
+        // Table 4-2's "Uses opcolor" column: Blend, Transparent,
+        // StraightAlphaBlend.
+        assert!(GraphicsMode::Blend.uses_opcolor());
+        assert!(GraphicsMode::Transparent.uses_opcolor());
+        assert!(GraphicsMode::StraightAlphaBlend.uses_opcolor());
+        // The alpha-only / copy / composition modes do not.
+        assert!(!GraphicsMode::Copy.uses_opcolor());
+        assert!(!GraphicsMode::DitherCopy.uses_opcolor());
+        assert!(!GraphicsMode::StraightAlpha.uses_opcolor());
+        assert!(!GraphicsMode::PremulWhiteAlpha.uses_opcolor());
+        assert!(!GraphicsMode::PremulBlackAlpha.uses_opcolor());
+        assert!(!GraphicsMode::Composition.uses_opcolor());
+    }
+
+    #[test]
+    fn gmin_graphics_mode_kind_routes_via_field() {
+        let g = Gmin {
+            graphics_mode: 0x0024,
+            opcolor: [0, 0, 0],
+            balance: 0,
+        };
+        assert_eq!(g.graphics_mode_kind(), GraphicsMode::Transparent);
+        assert!(g.graphics_mode_kind().uses_opcolor());
+    }
+
+    // ─────────────── Balance (8.8 signed fixed-point, p. 201) ───────────────
+
+    #[test]
+    fn balance_decodes_endpoints_and_centre() {
+        // 0 → 0.0 (centered).
+        let g = Gmin {
+            graphics_mode: 0,
+            opcolor: [0; 3],
+            balance: 0,
+        };
+        assert_eq!(g.balance_as_f32(), 0.0);
+
+        // +1.0 → 0x0100 (integer part = 1, fraction = 0). The spec
+        // states the high-order 8 bits hold the integer portion.
+        let g = Gmin {
+            graphics_mode: 0,
+            opcolor: [0; 3],
+            balance: 0x0100,
+        };
+        assert!((g.balance_as_f32() - 1.0).abs() < 1e-6);
+
+        // -1.0 → 0xFF00 reinterpreted as i16 = -256.
+        let g = Gmin {
+            graphics_mode: 0,
+            opcolor: [0; 3],
+            balance: -256,
+        };
+        assert!((g.balance_as_f32() + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn balance_decodes_intermediate_fixed_point() {
+        // 0x0080 = +0.5 (integer 0, fraction 0x80 / 0x100).
+        let g = Gmin {
+            graphics_mode: 0,
+            opcolor: [0; 3],
+            balance: 0x0080,
+        };
+        assert!((g.balance_as_f32() - 0.5).abs() < 1e-6);
+
+        // -0.25 — fraction 0xC0 in two's-complement low byte.
+        // -0.25 × 256 = -64 → i16 0xFFC0.
+        let g = Gmin {
+            graphics_mode: 0,
+            opcolor: [0; 3],
+            balance: -64,
+        };
+        assert!((g.balance_as_f32() + 0.25).abs() < 1e-6);
     }
 }

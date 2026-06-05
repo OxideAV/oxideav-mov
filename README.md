@@ -939,6 +939,34 @@ from the second 32-bit word of the input) so a `padb`-carrying fuzz
 input reaches the parser and the bounded `Vec::get` accessor without
 panicking.
 
+Round 240 promotes the round-5 `Gmin::graphics_mode: u16` and
+`Gmin::balance: i16` raw fields into typed accessors driven directly
+by QTFF Chapter 4 "Basic Data Types" — Table 4-2 (p. 200, "Graphics
+Modes") and the Balance paragraph (p. 201). The new `GraphicsMode`
+enum surfaces every named mode in Table 4-2 — `Copy` (`0x0000`),
+`DitherCopy` (`0x0040`), `Blend` (`0x0020`), `Transparent`
+(`0x0024`), `StraightAlpha` (`0x0100`), `PremulWhiteAlpha`
+(`0x0101`), `PremulBlackAlpha` (`0x0102`), `Composition` (`0x0103`,
+documented as tracks-only), and `StraightAlphaBlend` (`0x0104`) —
+plus an `Other(u16)` fall-through that preserves the raw 16-bit code
+for vendor or future-spec values without committing the parser to a
+meaning. `GraphicsMode::raw()` round-trips back to the on-disk code
+1:1 with `from_raw()`, and `GraphicsMode::uses_opcolor()` reports the
+Table 4-2 "Uses opcolor" column (true for `Blend`, `Transparent`,
+`StraightAlphaBlend`; false for `Other` so a caller doesn't read
+meaning into an opcolor the spec hasn't bound to the unknown code).
+`Gmin::graphics_mode_kind()` is the typed view of `graphics_mode`;
+`Gmin::balance_as_f32()` decodes the 16-bit 8.8 signed
+fixed-point field per p. 201 into the real-valued [-1.0, +1.0]
+balance setting (high-order 8 bits = integer portion, low-order 8
+bits = fraction; negative = left, positive = right, zero =
+centered). The raw `graphics_mode: u16` and `balance: i16` fields
+stay exposed for callers that need the exact on-disk encoding for
+round-trip remuxing; the new accessors are additive. This round also
+corrects a doc-comment slip on `Gmin::graphics_mode` that paired
+`0x0100` with "transparent" — Table 4-2 fixes the transparent code at
+`0x0024` and reserves `0x0100` for straight alpha.
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per

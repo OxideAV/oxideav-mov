@@ -91,7 +91,9 @@ pub use fragment::{
     TRUN_FIRST_SAMPLE_FLAGS_PRESENT, TRUN_SAMPLE_CTS_OFFSET_PRESENT, TRUN_SAMPLE_DURATION_PRESENT,
     TRUN_SAMPLE_FLAGS_PRESENT, TRUN_SAMPLE_SIZE_PRESENT,
 };
-pub use gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, Tcmi, TextHeader};
+pub use gmhd::{
+    parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, GraphicsMode, Tcmi, TextHeader,
+};
 pub use header::{BrandClass, Ftyp, Hdlr, Mdhd, Mvhd, Tkhd, TrackRotation};
 pub use heif_write::{HeifDerivation, HeifItem, HeifItemReference, HeifProperty, HeifWriter};
 pub use iprp::{
