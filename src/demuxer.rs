@@ -1627,6 +1627,119 @@ impl MovDemuxer {
             .unwrap_or(&[])
     }
 
+    /// Resolve a 1-based `tkhd.track_id` to its 0-based index inside
+    /// [`Self::tracks`]. Returns `None` when the file declares no track
+    /// with that id, when the supplied id is `0` (QTFF p. 51 reserves
+    /// `0` as the "no reference" sentinel for `tref` slots), or when
+    /// the file is empty. This is the building block underneath the
+    /// per-`tref`-type index resolvers (`sync_track_indices` /
+    /// `transcript_track_indices` / `hint_track_indices` /
+    /// `non_primary_source_track_indices` / `timecode_track_index`)
+    /// and the existing `chapters_for` chapter-track resolver, but it
+    /// is exported directly so external callers can resolve any other
+    /// `tkhd.track_id` reference they may encounter (e.g. a
+    /// `traf.tfhd.track_id`, a `tfra.track_id`, or an `mvex/trex`
+    /// default-association id).
+    pub fn track_index_for_id(&self, track_id: u32) -> Option<usize> {
+        if track_id == 0 {
+            return None;
+        }
+        self.tracks.iter().position(|t| t.tkhd.track_id == track_id)
+    }
+
+    /// Resolve every `tref/<kind>` reference declared by `track_index`
+    /// to the 0-based index inside [`Self::tracks`] of the referenced
+    /// peer. References whose 1-based `track_id` does not appear in
+    /// the file (a writer slip — every QTFF `tref` slot SHOULD point
+    /// at an in-file track per p. 49) and the spec-defined `0` "unused
+    /// slot" sentinel (p. 51) are both filtered out so callers see
+    /// only resolvable indices. The result preserves declaration order
+    /// across every reference-type atom of the requested `kind` inside
+    /// the source track's `tref`. Returns an empty `Vec` when
+    /// `track_index` is out of range or when the track declares no
+    /// reference of that kind.
+    pub fn tref_track_indices(&self, track_index: usize, kind: TrackRefKind) -> Vec<usize> {
+        let Some(track) = self.tracks.get(track_index) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for id in track.track_refs_of_kind(kind) {
+            if let Some(idx) = self.track_index_for_id(id) {
+                out.push(idx);
+            }
+        }
+        out
+    }
+
+    /// 0-based track index of the `tref/tmcd` time-code track this
+    /// `track_index` points at — QTFF p. 50 Table 2-2 row `'tmcd'`
+    /// ("Time code. Usually references a time code track."). Returns
+    /// `None` when the track declares no `'tmcd'` reference, when the
+    /// referenced `track_id` does not appear in the file, or when
+    /// `track_index` is out of range. Multiple `'tmcd'` references on
+    /// one track are unusual but permitted; this accessor returns the
+    /// first resolvable one (matching the existing
+    /// [`Track::timecode_track_ref`] convention) — callers that need
+    /// every entry should use [`Self::tref_track_indices`] with
+    /// [`TrackRefKind::Timecode`].
+    pub fn timecode_track_index(&self, track_index: usize) -> Option<usize> {
+        self.tref_track_indices(track_index, TrackRefKind::Timecode)
+            .into_iter()
+            .next()
+    }
+
+    /// 0-based track indices of every `tref/sync` peer of
+    /// `track_index` — QTFF p. 50 Table 2-2 row `'sync'`
+    /// ("Synchronization. Usually between a video and sound track.
+    /// Indicates that the two tracks are synchronized."). The
+    /// reference may be reciprocated by the peer track listing this
+    /// track as its own `'sync'` source; the spec leaves the
+    /// directionality at the writer's discretion (p. 49 "uni-
+    /// directional"; p. 50 "The reference can be from either track to
+    /// the other, or there may be two references."). Result preserves
+    /// declaration order; the 0-id slot and unresolvable ids are
+    /// filtered out.
+    pub fn sync_track_indices(&self, track_index: usize) -> Vec<usize> {
+        self.tref_track_indices(track_index, TrackRefKind::Sync)
+    }
+
+    /// 0-based track indices of every `tref/scpt` peer of
+    /// `track_index` — QTFF p. 50 Table 2-2 row `'scpt'`
+    /// ("Transcript. Usually references a text track."). The result
+    /// preserves declaration order; the 0-id slot and unresolvable ids
+    /// are filtered out.
+    pub fn transcript_track_indices(&self, track_index: usize) -> Vec<usize> {
+        self.tref_track_indices(track_index, TrackRefKind::Transcript)
+    }
+
+    /// 0-based track indices of every `tref/hint` peer of
+    /// `track_index` — QTFF p. 50 Table 2-2 row `'hint'` ("The
+    /// referenced tracks contain the original media for this hint
+    /// track."). A QuickTime hint track (RTP packetization metadata,
+    /// QTFF "Hint Media" p. 145) names its source media tracks through
+    /// these references so a streaming server can locate the bytes
+    /// each packet hint cites without re-walking the file's codec
+    /// tags. Result preserves declaration order; the 0-id slot and
+    /// unresolvable ids are filtered out.
+    pub fn hint_track_indices(&self, track_index: usize) -> Vec<usize> {
+        self.tref_track_indices(track_index, TrackRefKind::Hint)
+    }
+
+    /// 0-based track indices of every `tref/ssrc` peer of
+    /// `track_index` — QTFF p. 50 Table 2-2 row `'ssrc'`
+    /// ("Nonprimary source. Indicates that the referenced track
+    /// should send its data to this track, rather than presenting
+    /// it."). The 1-based atom-id slots of the track's
+    /// [`crate::track_input_map::TrackInputMap`] (when present) index
+    /// into this list per QTFF p. 53 — so a caller resolving an
+    /// `imap` entry's modulation target can pair the returned indices
+    /// with the input-map entries directly. Result preserves
+    /// declaration order; the 0-id slot and unresolvable ids are
+    /// filtered out.
+    pub fn non_primary_source_track_indices(&self, track_index: usize) -> Vec<usize> {
+        self.tref_track_indices(track_index, TrackRefKind::NonPrimarySource)
+    }
+
     /// All tracks that belong to the same §8.3.4 track group, given the
     /// group's `(track_group_type, track_group_id)` key. Returns the
     /// 0-based track indices in track-declaration order. A return of an

@@ -327,6 +327,65 @@ impl Track {
             .collect()
     }
 
+    /// 1-based track-ids of every track this track declares a `tref/sync`
+    /// reference to — QTFF p. 50 Table 2-2 row `'sync'`
+    /// ("Synchronization. Usually between a video and sound track.
+    /// Indicates that the two tracks are synchronized."). Each entry is
+    /// a peer the writer pinned for tight A/V lockstep. The reference
+    /// is directional from this track to the listed peers; spec note on
+    /// p. 50 records that the relationship may be reciprocated by the
+    /// peer track listing this track as a `'sync'` source as well. A
+    /// 0-valued slot (permitted on p. 51 for "unused entries") is
+    /// filtered out so callers see only resolvable track-ids. The
+    /// result preserves declaration order across every `'sync'`
+    /// reference-type atom inside the track's `tref`.
+    pub fn sync_track_refs(&self) -> Vec<u32> {
+        self.track_refs_of_kind(TrackRefKind::Sync)
+    }
+
+    /// 1-based track-ids of every track this track declares a
+    /// `tref/scpt` reference to — QTFF p. 50 Table 2-2 row `'scpt'`
+    /// ("Transcript. Usually references a text track."). The writer
+    /// pairs the track with a sibling text track that carries a
+    /// transcribed dialogue / narration line stream. As with every
+    /// other `tref` accessor on this type, a 0-valued slot is filtered
+    /// out and the result preserves declaration order across every
+    /// `'scpt'` reference-type atom inside `tref`.
+    pub fn transcript_track_refs(&self) -> Vec<u32> {
+        self.track_refs_of_kind(TrackRefKind::Transcript)
+    }
+
+    /// 1-based track-ids of every track this track declares a
+    /// `tref/hint` reference to — QTFF p. 50 Table 2-2 row `'hint'`
+    /// ("The referenced tracks contain the original media for this
+    /// hint track."). A QuickTime hint track (RTP packetization
+    /// metadata, QTFF "Hint Media" p. 145) names its source media
+    /// tracks through this reference so a streaming server can locate
+    /// the bytes each packet hint cites without re-walking the file's
+    /// codec tags. As with the other `tref` accessors a 0-valued slot
+    /// is filtered out and the result preserves declaration order
+    /// across every `'hint'` reference-type atom inside `tref`.
+    pub fn hint_track_refs(&self) -> Vec<u32> {
+        self.track_refs_of_kind(TrackRefKind::Hint)
+    }
+
+    /// 1-based track-ids of every track this track declares a
+    /// `tref/ssrc` reference to — QTFF p. 50 Table 2-2 row `'ssrc'`
+    /// ("Nonprimary source. Indicates that the referenced track should
+    /// send its data to this track, rather than presenting it. The
+    /// referencing track will use the data to modify how it presents
+    /// its data."). The atom-id-indexed [`crate::track_input_map::TrackInputMap`]
+    /// (when this track also carries an `imap`) describes how each
+    /// 1-based slot in this list modulates the track's presentation
+    /// (transform matrix, clip region, volume, balance, graphics mode,
+    /// per-object variants). As with the other `tref` accessors a
+    /// 0-valued slot is filtered out and the result preserves
+    /// declaration order across every `'ssrc'` reference-type atom
+    /// inside `tref`.
+    pub fn non_primary_source_track_refs(&self) -> Vec<u32> {
+        self.track_refs_of_kind(TrackRefKind::NonPrimarySource)
+    }
+
     /// Track-level `dref` data-reference list. Empty when the track
     /// has no `dinf/dref` atom (legal per QTFF, in which case the
     /// media is implicitly self-referential).

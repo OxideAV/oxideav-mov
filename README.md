@@ -967,6 +967,52 @@ corrects a doc-comment slip on `Gmin::graphics_mode` that paired
 `0x0100` with "transparent" — Table 4-2 fixes the transparent code at
 `0x0024` and reserves `0x0100` for straight alpha.
 
+Round 243 extends the typed `tref` surface to cover every remaining
+QTFF Table 2-2 (p. 50) reference kind — Apple QuickTime File Format
+Specification (2001-03-01) pp. 49 – 51, Figure 2-13 "Track reference
+atom" layout, Table 2-2 "Track reference types". Round 240 left
+[`Track::chapter_track_ref`] and [`Track::timecode_track_ref`] typed
+but the remaining four kinds (`'sync'` synchronization between peer
+tracks, `'scpt'` transcript pairing with a text track, `'hint'` hint-
+track source media for RTP packetization, `'ssrc'` non-primary source
+modulating presentation via the round-216 `imap`) were reachable only
+via the generic [`Track::track_refs_of_kind`] helper. The four new
+symmetrical accessors are [`Track::sync_track_refs`],
+[`Track::transcript_track_refs`], [`Track::hint_track_refs`], and
+[`Track::non_primary_source_track_refs`]; each returns the
+declaration-ordered list of 1-based `tkhd.track_id` values across
+every reference-type atom of that kind, with the spec p. 51 `0`-valued
+"unused-entry slot" sentinel filtered out so callers see only
+resolvable ids. Demuxer-side track-id-to-index resolvers complete the
+surface so callers no longer have to walk
+`MovDemuxer::tracks.iter().position(|t| t.tkhd.track_id == id)` by
+hand: [`MovDemuxer::track_index_for_id`] is the underlying lookup
+that translates a 1-based `tkhd.track_id` to its 0-based index inside
+[`MovDemuxer::tracks`] (returns `None` for the `0` sentinel and for
+any id missing from the file); a generic
+[`MovDemuxer::tref_track_indices`] resolves every `tref/<kind>`
+reference declared by a `track_index` to the 0-based peer indices;
+and five per-kind helpers — [`MovDemuxer::timecode_track_index`] (the
+first resolvable entry as `Option<usize>`, matching the existing
+[`Track::timecode_track_ref`] singleton shape),
+[`MovDemuxer::sync_track_indices`],
+[`MovDemuxer::transcript_track_indices`],
+[`MovDemuxer::hint_track_indices`], and
+[`MovDemuxer::non_primary_source_track_indices`] — wrap the generic
+resolver. The 0-id slot and unresolvable ids (writer slip — the
+pointed-at track is absent from the file) are both filtered out at
+the demuxer resolver layer; declaration order is preserved across
+every reference-type atom of the requested kind, so a track that
+emits two separate `'hint'` rows surfaces all member ids in a single
+declaration-ordered list. Out-of-range `track_index` returns the
+empty surface (the accessors stay total functions). The
+[`MovDemuxer::non_primary_source_track_indices`] resolver pairs
+directly with the round-216 [`TrackInputMap::entry_for_ssrc_slot`]
+lookup — the 1-based atom-id slots inside the `imap` index into the
+ordered list returned by the resolver. The underlying
+[`Track::references`] raw surface stays public; the new accessors are
+purely additive and no parsing behaviour changes.
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per
