@@ -1013,6 +1013,49 @@ ordered list returned by the resolver. The underlying
 [`Track::references`] raw surface stays public; the new accessors are
 purely additive and no parsing behaviour changes.
 
+Round 246 completes the round-74 / round-91 edit-list mapper with its
+**inverse direction**: `movie_pts → media_pts` (QTFF Chapter 2 "Edit
+Atoms" pp. 46 – 48 and Chapter 5 "Playing With Edit Lists" pp. 226 –
+227). The new free function
+[`movie_pts_to_media_pts`]`(segments, movie_pts, movie_timescale,
+media_timescale) -> Option<i64>` is the symmetric counterpart of
+[`media_pts_to_movie_pts`]: the typical caller is a seek-by-
+presentation-time entry point — the user requests "jump to 0:30 in the
+movie", the helper converts that movie-time to a media-time, and the
+caller drives the per-track sample walker (`MovDemuxer::seek_to`,
+whose input is already media-PTS) with the resolved value. Two thin
+wrappers complete the surface: [`Track::movie_pts_to_media_pts`]
+resolves the track's edit segments against a supplied movie timescale
+and routes through the free function (mirroring the existing
+[`Track::media_pts_to_movie_pts`] symmetry), and
+[`MovDemuxer::media_pts_for`] is the demuxer-level inverse of
+[`MovDemuxer::movie_pts_for`] honouring the parsed `mvhd` timescale
+and duration. Algorithm scans the resolved segment list in
+declaration order and matches each segment's half-open
+`[movie_time_start, movie_time_end)` window against the queried
+`movie_pts`; zero-duration segments collapse to the single boundary
+tick. [`EditSegmentKind::Empty`] returns `None` (the movie-time slice
+emits silence/black per QTFF p. 47 and so has no media correspondence);
+[`EditSegmentKind::Dwell`] returns the held `media_time` (ISO/IEC
+14496-12 §8.6.6.3 every movie-time tick in the segment maps to the
+same media frame); [`EditSegmentKind::Media`] inverts the round-91
+formula via `Δmedia = Δmovie × media_ts × rate_fp / (movie_ts ×
+65536)`, mirroring the QTFF p. 226 – 227 worked example (600 movie
+ticks at media_rate 2.0 consume 200 media ticks, so 1 movie tick at
+rate 2.0 advances the source by 2 media ticks). Rate stays 16.16
+fixed-point so the arithmetic remains integer end-to-end; rounding is
+half-up via `(num + denom/2) / denom` matching the convention used
+everywhere else in this module. QTFF p. 48 forbids `media_rate <= 0`
+on a Media segment so the helper rejects those segments on a per-
+segment basis and continues scanning. Negative `movie_pts` always
+returns `None` — the presentation timeline starts at movie tick 0.
+The round-176 fuzz harness extends to call `media_pts_for` on the
+same three boundary `movie_pts` values it already probes for the
+forward mapper (`0` / `i64::MIN` / `i64::MAX`) plus a value derived
+from input bytes 8 – 15, so the fixed-point math runs against
+attacker-influenced inputs without panicking — matching the existing
+forward-direction fuzz coverage.
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per

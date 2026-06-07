@@ -10,7 +10,9 @@
 
 use crate::bmff_meta::BmffMeta;
 use crate::clip::Clipping;
-use crate::edit::{media_pts_to_movie_pts, resolve_edit_segments, EditList, EditSegment};
+use crate::edit::{
+    media_pts_to_movie_pts, movie_pts_to_media_pts, resolve_edit_segments, EditList, EditSegment,
+};
 use crate::gmhd::Gmhd;
 use crate::header::{Hdlr, Mdhd, Tkhd};
 use crate::kind::KindEntry;
@@ -555,6 +557,29 @@ impl Track {
     ) -> Option<i64> {
         let segs = self.edit_segments(movie_timescale, movie_duration);
         media_pts_to_movie_pts(&segs, media_pts, movie_timescale, self.mdhd.time_scale)
+    }
+
+    /// Inverse of [`Track::media_pts_to_movie_pts`]. Maps a
+    /// movie-timescale presentation timestamp `movie_pts` back to its
+    /// corresponding media-timescale presentation timestamp via the
+    /// track's edit list. Returns `None` when the queried `movie_pts`
+    /// falls inside an empty-edit window (no media correspondence),
+    /// past the end of the resolved segment list, or before the
+    /// timeline starts (negative `movie_pts`).
+    ///
+    /// `movie_timescale` is the movie-header timescale
+    /// (`Mvhd::time_scale`). The seek-by-presentation-time entry
+    /// point: walk the per-track sample queue keyed on the
+    /// `Some(media_pts)` returned here when the caller knows the
+    /// desired movie-time tick.
+    pub fn movie_pts_to_media_pts(
+        &self,
+        movie_pts: i64,
+        movie_timescale: u32,
+        movie_duration: Option<u64>,
+    ) -> Option<i64> {
+        let segs = self.edit_segments(movie_timescale, movie_duration);
+        movie_pts_to_media_pts(&segs, movie_pts, movie_timescale, self.mdhd.time_scale)
     }
 }
 

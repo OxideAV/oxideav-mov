@@ -1514,6 +1514,35 @@ impl MovDemuxer {
         track.media_pts_to_movie_pts(media_pts, mvhd.time_scale, Some(mvhd.duration))
     }
 
+    /// Inverse of [`MovDemuxer::movie_pts_for`]. Resolve a
+    /// movie-timescale presentation timestamp `movie_pts` to its
+    /// corresponding media-timescale presentation timestamp on the
+    /// track at `track_index`, honouring the track's edit list per
+    /// QTFF Chapter 2 (pp. 46–48) and ISO/IEC 14496-12 §8.6.5 /
+    /// §8.6.6 — including dwell, the §8.6.6.1 composition shift, and
+    /// the implicit trailing empty edit when `sum(elst.track_duration)
+    /// < mvhd.duration`.
+    ///
+    /// Returns `None` when the track index is out of range, when the
+    /// movie header is absent (no `mvhd` was parsed), when the
+    /// requested `movie_pts` is negative, when it lands inside an
+    /// empty-edit window (the player would emit silence/black at that
+    /// movie-time so no media-time correspondence exists), or when it
+    /// falls past every edit segment.
+    ///
+    /// The typical caller is a seek-by-presentation-time entry point:
+    /// the user requests "jump to 0:30 in the movie", the resolver
+    /// converts the requested `movie_pts` to media-time, and the
+    /// caller drives the per-track sample-table walker with the
+    /// returned media-PTS to land on the right sample. Pairs with the
+    /// existing `MovDemuxer::seek_to(stream, pts)` whose input is
+    /// already media-PTS.
+    pub fn media_pts_for(&self, track_index: usize, movie_pts: i64) -> Option<i64> {
+        let track = self.tracks.get(track_index)?;
+        let mvhd = self.mvhd.as_ref()?;
+        track.movie_pts_to_media_pts(movie_pts, mvhd.time_scale, Some(mvhd.duration))
+    }
+
     /// Resolve the per-track edit segments for `track_index` against
     /// the movie header. See [`crate::Track::edit_segments`].
     pub fn edit_segments_for(&self, track_index: usize) -> Option<Vec<crate::EditSegment>> {

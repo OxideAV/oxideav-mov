@@ -297,6 +297,19 @@ fuzz_target!(|data: &[u8]| {
         let _ = dmx.movie_pts_for(ti, 0);
         let _ = dmx.movie_pts_for(ti, i64::MIN);
         let _ = dmx.movie_pts_for(ti, i64::MAX);
+        // Round 246 inverse mapper: probe boundary values plus a
+        // value derived from the input bytes. The mapper must
+        // survive every i64 input on the fixed-point math without
+        // panicking, just like the forward direction.
+        let _ = dmx.media_pts_for(ti, 0);
+        let _ = dmx.media_pts_for(ti, i64::MIN);
+        let _ = dmx.media_pts_for(ti, i64::MAX);
+        if data.len() >= 16 {
+            let probe = i64::from_le_bytes([
+                data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
+            ]);
+            let _ = dmx.media_pts_for(ti, probe);
+        }
     }
 
     // Drain packets up to MAX_PACKETS_PER_INPUT. The loop terminates
