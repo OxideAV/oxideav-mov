@@ -1120,6 +1120,34 @@ Decoding stays in codec crates; this crate calls
 `CodecId`s and never opens a decoder itself (per
 `docs/IMPLEMENTOR_ROUND.md` §"Crate-purpose discipline").
 
+Round 259 lands the Compressed Movie atom (`cmov`) parser and its
+two subatoms, the Data Compression atom (`dcom`) and the Compressed
+Movie Data atom (`cmvd`) — QuickTime File Format spec pp. 80 – 81 /
+Table 2-5. Beginning with QuickTime 3 (p. 80), a writer may
+losslessly compress the movie resource; the resulting file's
+top-level `moov` carries a single `cmov` child whose `dcom`
+identifies the compression algorithm (4-byte FourCC; `'zlib'` is the
+field-observed value but the spec leaves the field generic) and
+whose `cmvd` carries a 4-byte big-endian uncompressed size followed
+by the compressed payload. New `cmov` module exposes [`parse_dcom`]
+/ [`parse_cmvd`] / [`parse_cmov`] and the matching [`Dcom`] /
+[`Cmvd`] / [`Cmov`] result types, plus `DCOM_BODY_LEN`,
+`CMVD_MIN_BODY_LEN`, and `DCOM_ALG_ZLIB` constants. Scope is
+deliberately narrow: the parser surfaces the on-disk structure of
+all three atoms but does **not** perform the decompression step. A
+follow-up round can wire the workspace's compression crate behind
+the algorithm FourCC and feed the uncompressed inner movie back
+through the existing parser; the current round keeps the surface as
+a free-function entry point so the `moov` walker is unchanged and
+no behaviour-change-on-compressed-input regression is possible. 19
+unit tests in `src/cmov.rs` cover the canonical Table 2-5 layout,
+reversed child order, unknown sibling atoms ignored, missing-child
+rejection, duplicate-child first-wins, QTFF p. 19 open-ended
+`size == 0` on the trailing child, the `u32::MAX` uncompressed-size
+boundary, and short / empty body rejection on all three leaf
+parsers. Both the `registry` feature and the standalone
+configuration build and pass.
+
 ## Follow-ups
 
 - `MovMuxer` write-side `saiz` / `saio` emission at either `stbl` or
@@ -1137,6 +1165,13 @@ Decoding stays in codec crates; this crate calls
   the math against the QTFF worked example via synth fixtures, but a
   real `ffmpeg -filter:v setpts=PTS*2` reference would harden against
   rounding-convention drift.
+- Compressed-movie (`cmov`) `moov`-walker integration: round 259
+  ships `parse_cmov` / `parse_dcom` / `parse_cmvd` as free-function
+  entry points, but the top-level `moov` walker still ignores the
+  atom. Wiring it in needs a decompressor for the `dcom` algorithm
+  FourCC (commonly `'zlib'`); the workspace's compression crate is
+  the natural producer, and the uncompressed inner bytes feed back
+  through the existing `moov` parser unchanged.
 
 ## Standalone build
 

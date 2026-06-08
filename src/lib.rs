@@ -14,6 +14,7 @@ pub mod atom;
 pub mod bmff_meta;
 pub mod chapter;
 pub mod clip;
+pub mod cmov;
 pub mod ctab;
 pub mod demuxer;
 pub mod derived;
@@ -69,6 +70,10 @@ pub use chapter::{
     TextSampleStyles,
 };
 pub use clip::{parse_clip, parse_crgn, Clipping, ClippingRegion, QdRect};
+pub use cmov::{
+    parse_cmov, parse_cmvd, parse_dcom, Cmov, Cmvd, Dcom, CMVD_MIN_BODY_LEN, DCOM_ALG_ZLIB,
+    DCOM_BODY_LEN,
+};
 pub use ctab::{parse_ctab, ColorTableEntry, Ctab};
 pub use demuxer::{open_file_url, MovDemuxer, MAX_ALIAS_DEPTH};
 pub use derived::{
