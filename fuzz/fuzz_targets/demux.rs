@@ -310,6 +310,40 @@ fuzz_target!(|data: &[u8]| {
             ]);
             let _ = dmx.media_pts_for(ti, probe);
         }
+        // Round 256 chunk-walking primitives. The accessors decode
+        // QTFF p. 75 `stsc` rows against the p. 78 `stco` / `co64`
+        // chunk-offset table and the p. 76 `stsz` sample-size box;
+        // an attacker-supplied combination (rows whose
+        // `samples_per_chunk == 0`, chunk-offset shorter than the
+        // last row's first_chunk, summed offsets overflowing u64) is
+        // the surface they must survive without panicking. Probe
+        // chunk-count zero plus an attacker-derived chunk-number,
+        // and the same for the sample-keyed accessors.
+        let cc = dmx.chunk_count(ti).unwrap_or(0);
+        let _ = dmx.samples_in_chunk(ti, 0);
+        let _ = dmx.samples_in_chunk(ti, 1);
+        let _ = dmx.chunk_for_sample(ti, 0);
+        let _ = dmx.sample_offset(ti, 0);
+        let _ = dmx.chunk_byte_extent(ti, 0);
+        let _ = dmx.chunk_byte_extent(ti, 1);
+        if cc > 0 {
+            let _ = dmx.chunk_byte_extent(ti, cc);
+            // Beyond the chunk-offset table — accessor must return None
+            // rather than panic on the index-out-of-range path.
+            let _ = dmx.chunk_byte_extent(ti, cc.saturating_add(1));
+            let _ = dmx.samples_in_chunk(ti, cc);
+            let _ = dmx.samples_in_chunk(ti, cc.saturating_add(1));
+        }
+        if data.len() >= 4 {
+            let probe_chunk = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            let _ = dmx.samples_in_chunk(ti, probe_chunk);
+            let _ = dmx.chunk_byte_extent(ti, probe_chunk);
+        }
+        if data.len() >= 8 {
+            let probe_sample = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+            let _ = dmx.chunk_for_sample(ti, probe_sample);
+            let _ = dmx.sample_offset(ti, probe_sample);
+        }
     }
 
     // Drain packets up to MAX_PACKETS_PER_INPUT. The loop terminates

@@ -1056,6 +1056,65 @@ from input bytes 8 – 15, so the fixed-point math runs against
 attacker-influenced inputs without panicking — matching the existing
 forward-direction fuzz coverage.
 
+Round 256 exposes the QTFF p. 79 "Finding a Sample" four-step
+walker as a **typed random-access surface** over the `stsc`
+Sample-to-Chunk (p. 75), `stco` / `co64` Chunk Offset (p. 78), and
+`stsz` Sample Size (p. 76) tables. The decode-order
+[`SampleTable::iter_samples`] walker has always summed `stsz` sizes
+inside each chunk to locate per-sample byte offsets, but the only
+way to ask "which chunk holds sample N" or "what is the absolute
+file offset of sample N" without iterating every prior sample was to
+re-implement the walker out-of-tree. The new accessors close that
+gap. On [`SampleTable`]: [`SampleTable::chunk_count`] (length of the
+`stco` / `co64` table), [`SampleTable::samples_in_chunk`] (the
+`samples_per_chunk` of the `stsc` row that applies to 1-based
+`chunk_1based`, per QTFF p. 76 "Each table entry corresponds to a
+set of consecutive chunks…"), [`SampleTable::sample_description_id_for_chunk`]
+(the row's `sample_description_id`),
+[`SampleTable::chunk_first_sample`] (0-based decode-order index of
+the first sample in the chunk — sums `samples_per_chunk` across
+preceding chunks within and across `stsc` rows),
+[`SampleTable::chunk_for_sample`] (the random-access form of step 2
+of QTFF p. 79: scans `stsc` rows to find the chunk whose
+sample-range covers 0-based decode-order `sample_idx`, returning
+`(chunk_1based, sample_offset_in_chunk_0based)`),
+[`SampleTable::sample_size_at`] (uniform-or-table `stsz` /
+`stz2` lookup wrapped as one accessor), [`SampleTable::sample_offset`]
+(mirrors all four steps end-to-end: chunk-base from `chunk_offsets`
+plus the sum of every earlier sample's size inside the chunk —
+companion of [`SampleTable::iter_samples`] but without iterating
+prior samples), and [`SampleTable::chunk_byte_extent`] (total file
+byte span of a chunk as `(start, end_exclusive)` for chunk-aligned
+prefetch or HTTP-range reads, per QTFF p. 74 "Chunks ... allow
+optimized data access"). Five corresponding [`MovDemuxer`]
+wrappers ([`MovDemuxer::chunk_count`],
+[`MovDemuxer::samples_in_chunk`], [`MovDemuxer::chunk_for_sample`],
+[`MovDemuxer::sample_offset`], [`MovDemuxer::chunk_byte_extent`])
+take a 0-based `track_index` and otherwise delegate. The accessors
+are purely additive: existing iter-walker and `Packet` byte
+offsets are unchanged, and no parsing behaviour is touched. Total
+functions across out-of-range inputs (zero or past-end chunk
+number, sample index past `sample_count`, malformed
+`samples_per_chunk == 0` row) — every error path returns `None`
+rather than panicking, so the bounded `Vec::get` discipline applied
+to the rest of the sample-table surface carries through to the new
+shape. Pinned by 9 unit tests in `src/sample_table.rs`
+(QTFF p. 76 Figure 2-35 worked-example layout: 3 `stsc` rows
+spanning 5 chunks — 3+3+1+1+1 samples — exercising every accessor
+plus the single-row "common case" shape, the empty-`stbl`
+fragmented-only shape, and the malformed `samples_per_chunk == 0`
+shape) plus 5 integration tests in
+`tests/synth_round256_chunk_walking.rs` against a hand-built QT
+file carrying the same QTFF p. 76 Figure 2-35 layout, verified
+end-to-end through the public [`MovDemuxer`] accessors with the
+demuxer-resolved offsets cross-checked against the actual mdat
+bytes at the resolved positions. The round-176 fuzz harness
+extends to call all five demuxer accessors with attacker-derived
+chunk numbers and sample indices (including zero, `chunk_count + 1`,
+and a value drawn from the input's first / second 32-bit words),
+so a fuzz input crafting a row count vs chunk-offset table mismatch
+reaches every accessor without panicking.
+
 Decoding stays in codec crates; this crate calls
 `oxideav_core::CodecResolver` to map sample-description FourCCs to
 `CodecId`s and never opens a decoder itself (per

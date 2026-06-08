@@ -2062,6 +2062,74 @@ impl MovDemuxer {
             .sample_size_source
     }
 
+    /// Number of chunks declared by `stco` / `co64` for `track_index`
+    /// — the length of the chunk-offset table (QTFF p. 78, ISO/IEC
+    /// 14496-12 §8.7.5). Returns `None` when `track_index` is out of
+    /// range; returns `Some(0)` for a fragmented-only track whose
+    /// `stbl` carries no chunk-offset box (every sample comes from
+    /// `trun` instead).
+    pub fn chunk_count(&self, track_index: usize) -> Option<u32> {
+        Some(self.tracks.get(track_index)?.sample_table.chunk_count())
+    }
+
+    /// Number of samples in 1-based chunk `chunk_1based` on
+    /// `track_index`, per the `stsc` Sample-to-Chunk row that applies
+    /// to it (QTFF p. 75 "Sample-to-chunk atom"). Returns `None` when
+    /// `track_index` is out of range, `chunk_1based == 0` (chunk
+    /// numbers are 1-based per QTFF p. 76), or `chunk_1based` exceeds
+    /// the chunk-offset table.
+    pub fn samples_in_chunk(&self, track_index: usize, chunk_1based: u32) -> Option<u32> {
+        self.tracks
+            .get(track_index)?
+            .sample_table
+            .samples_in_chunk(chunk_1based)
+    }
+
+    /// Resolve a 0-based decode-order `sample_idx` to its
+    /// `(chunk_1based, sample_offset_in_chunk_0based)` location, per
+    /// QTFF p. 79 "Finding a Sample" step 2 ("scan the
+    /// sample-to-chunk atom to discover the chunk which contains the
+    /// sample in question"). Random-access companion of the
+    /// [`SampleTable::iter_samples`] walker — callers can locate any
+    /// sample's chunk without iterating every prior sample. Returns
+    /// `None` when `track_index` is out of range, `sample_idx >=
+    /// sample_count`, or the `stsc` / chunk-offset tables are empty
+    /// or malformed for the queried sample.
+    pub fn chunk_for_sample(&self, track_index: usize, sample_idx: u32) -> Option<(u32, u32)> {
+        self.tracks
+            .get(track_index)?
+            .sample_table
+            .chunk_for_sample(sample_idx)
+    }
+
+    /// Absolute file byte offset of sample at 0-based decode-order
+    /// index `sample_idx` on `track_index`, per the QTFF p. 79
+    /// four-step "Finding a Sample" algorithm. Random-access
+    /// companion of the [`SampleTable::iter_samples`] walker — the
+    /// caller can read a single sample's bytes without iterating to
+    /// it. Returns `None` when `track_index` is out of range,
+    /// `sample_idx` is past the sample-count, or any per-sample size
+    /// lookup fails.
+    pub fn sample_offset(&self, track_index: usize, sample_idx: u32) -> Option<u64> {
+        self.tracks
+            .get(track_index)?
+            .sample_table
+            .sample_offset(sample_idx)
+    }
+
+    /// Total byte extent of 1-based chunk `chunk_1based` on
+    /// `track_index` — as `(start, end_exclusive)` absolute file
+    /// coordinates — for chunk-aligned prefetch / HTTP-range reads
+    /// (QTFF p. 74 "Chunks ... allow optimized data access"). Returns
+    /// `None` when `track_index` is out of range, the chunk number
+    /// is out of range, or any per-sample size lookup fails.
+    pub fn chunk_byte_extent(&self, track_index: usize, chunk_1based: u32) -> Option<(u64, u64)> {
+        self.tracks
+            .get(track_index)?
+            .sample_table
+            .chunk_byte_extent(chunk_1based)
+    }
+
     /// Look up the alternative sync sample for a shadowed sample via the
     /// `stsh` (Shadow Sync Sample Box, ISO/IEC 14496-12 §8.6.3).
     ///

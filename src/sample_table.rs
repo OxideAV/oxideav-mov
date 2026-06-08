@@ -415,6 +415,233 @@ impl SampleTable {
         SampleIter::new(self)
     }
 
+    /// Size of sample at 0-based decode-order index `sample_idx`.
+    /// Returns the `stsz` constant size when `stsz` declared a uniform
+    /// size (QTFF p. 77 "Sample size: 32-bit integer that specifies the
+    /// sample size. If all the samples are the same size, this field
+    /// contains that size value."); otherwise looks up the entry in
+    /// the per-sample table populated by either `stsz` or `stz2`
+    /// (ISO/IEC 14496-12 §8.7.3.2 / §8.7.3.3). Returns `None` when
+    /// `sample_idx >= sample_count()`.
+    pub fn sample_size_at(&self, sample_idx: u32) -> Option<u32> {
+        if sample_idx >= self.stsz_count {
+            return None;
+        }
+        if let Some(s) = self.stsz_default_size {
+            return Some(s);
+        }
+        self.stsz_table.get(sample_idx as usize).copied()
+    }
+
+    /// Number of chunks declared by `stco` / `co64` for this track —
+    /// the length of [`Self::chunk_offsets`] (QTFF p. 78, ISO/IEC
+    /// 14496-12 §8.7.5). One chunk holds one or more contiguous
+    /// samples whose grouping is named by `stsc`.
+    pub fn chunk_count(&self) -> u32 {
+        self.chunk_offsets.len() as u32
+    }
+
+    /// `stsc` row index applicable to the 1-based chunk
+    /// `chunk_1based` — the largest `stsc[i].first_chunk` that is
+    /// `<= chunk_1based`. Each `stsc` row applies to a run of
+    /// consecutive chunks that share the same `samples_per_chunk`
+    /// and `sample_description_id`; a new row marks the next change
+    /// (QTFF p. 76 Figure 2-34 + the p. 76 paragraph "Each table
+    /// entry corresponds to a set of consecutive chunks…"). Returns
+    /// `None` when the table is empty or `chunk_1based == 0` (chunk
+    /// numbers are 1-based per QTFF p. 76).
+    fn stsc_row_for_chunk(&self, chunk_1based: u32) -> Option<usize> {
+        if chunk_1based == 0 || self.stsc.is_empty() {
+            return None;
+        }
+        // The table is sorted strictly ascending by `first_chunk`
+        // (enforced at parse time in `parse_stsc`), and the first row
+        // is pinned at `first_chunk == 1`. Binary-search for the
+        // largest `first_chunk <= chunk_1based`.
+        match self
+            .stsc
+            .binary_search_by(|r| r.first_chunk.cmp(&chunk_1based))
+        {
+            Ok(i) => Some(i),
+            Err(0) => None, // chunk_1based < stsc[0].first_chunk; spec-illegal but be total
+            Err(i) => Some(i - 1),
+        }
+    }
+
+    /// Samples in 1-based chunk `chunk_1based`, per the row of `stsc`
+    /// that applies to it (QTFF p. 75 "Sample-to-chunk atom"). Returns
+    /// `None` when the table is empty, `chunk_1based == 0`, or
+    /// `chunk_1based > chunk_count()` (the chunk is not addressable by
+    /// `stco`/`co64`).
+    pub fn samples_in_chunk(&self, chunk_1based: u32) -> Option<u32> {
+        if chunk_1based == 0 || chunk_1based > self.chunk_count() {
+            return None;
+        }
+        let i = self.stsc_row_for_chunk(chunk_1based)?;
+        Some(self.stsc[i].samples_per_chunk)
+    }
+
+    /// 1-based `sample_description_id` associated with 1-based chunk
+    /// `chunk_1based`, per the `stsc` row that applies to it (QTFF
+    /// p. 76 "Sample description ID"). Returns `None` under the same
+    /// conditions as [`Self::samples_in_chunk`].
+    pub fn sample_description_id_for_chunk(&self, chunk_1based: u32) -> Option<u32> {
+        if chunk_1based == 0 || chunk_1based > self.chunk_count() {
+            return None;
+        }
+        let i = self.stsc_row_for_chunk(chunk_1based)?;
+        Some(self.stsc[i].sample_description_id)
+    }
+
+    /// 0-based decode-order index of the first sample in 1-based
+    /// chunk `chunk_1based`, summing `samples_per_chunk` across every
+    /// chunk that precedes it. Returns `None` when the chunk is past
+    /// the end of `stco`/`co64`, or when the table is empty.
+    ///
+    /// Companion to [`Self::samples_in_chunk`]: the chunk's sample
+    /// range in 0-based decode-order is
+    /// `chunk_first_sample(c) .. chunk_first_sample(c) +
+    /// samples_in_chunk(c)`.
+    pub fn chunk_first_sample(&self, chunk_1based: u32) -> Option<u32> {
+        if chunk_1based == 0 || chunk_1based > self.chunk_count() {
+            return None;
+        }
+        if self.stsc.is_empty() {
+            return None;
+        }
+        // Walk stsc rows; each row covers chunks
+        // `[stsc[i].first_chunk .. stsc[i+1].first_chunk)` (or
+        // `..=chunk_count()` for the last row) at `samples_per_chunk`
+        // each. Sum chunks-before-target across the rows. The row
+        // count is bounded by the on-disk `entry_count`, so an O(n)
+        // scan stays cheap in the wild (ffmpeg-encoded `.mov`s
+        // typically emit a single row).
+        let target = chunk_1based;
+        let mut acc: u64 = 0;
+        for (i, row) in self.stsc.iter().enumerate() {
+            let row_end_exclusive = self
+                .stsc
+                .get(i + 1)
+                .map(|n| n.first_chunk)
+                .unwrap_or(self.chunk_count() + 1);
+            if row.first_chunk > target {
+                break;
+            }
+            let chunks_in_row_before_target =
+                (row_end_exclusive.min(target) - row.first_chunk) as u64;
+            acc = acc.saturating_add(chunks_in_row_before_target * row.samples_per_chunk as u64);
+            if row_end_exclusive > target {
+                break;
+            }
+        }
+        // `acc` cannot exceed `u32::MAX` for any well-formed file
+        // (sample indices are u32 across `stsz`/`stts`/`stss`); a
+        // malformed file that overflows is squashed to u32::MAX so
+        // the caller's bounded `Vec::get` rejects it.
+        Some(acc.min(u32::MAX as u64) as u32)
+    }
+
+    /// Resolve a 0-based decode-order `sample_idx` to its
+    /// `(chunk_1based, sample_offset_in_chunk_0based)` location per
+    /// QTFF p. 79 "Finding a Sample" step 2 ("scan `stsc` to find the
+    /// chunk that contains that sample"). Returns `None` when
+    /// `sample_idx >= sample_count()`, or when the `stsc` table is
+    /// empty / malformed (no row covers the queried sample).
+    ///
+    /// Combined with [`Self::chunk_offsets`] and [`Self::sample_size_at`]
+    /// this is the random-access form of the [`Self::iter_samples`]
+    /// walker: the caller can locate any sample's byte range without
+    /// iterating every prior sample.
+    pub fn chunk_for_sample(&self, sample_idx: u32) -> Option<(u32, u32)> {
+        if sample_idx >= self.stsz_count {
+            return None;
+        }
+        if self.stsc.is_empty() || self.chunk_offsets.is_empty() {
+            return None;
+        }
+        // Walk stsc rows, accumulating chunks. For each row,
+        // determine how many samples it covers before the next row
+        // starts; if `sample_idx` falls inside this run, compute the
+        // exact chunk + offset.
+        let mut samples_seen: u64 = 0;
+        let target = sample_idx as u64;
+        let chunk_max = self.chunk_count();
+        for (i, row) in self.stsc.iter().enumerate() {
+            let row_end_chunk_exclusive = self
+                .stsc
+                .get(i + 1)
+                .map(|n| n.first_chunk)
+                .unwrap_or(chunk_max + 1);
+            let chunks_in_row = row_end_chunk_exclusive.saturating_sub(row.first_chunk);
+            let samples_in_row = (chunks_in_row as u64) * (row.samples_per_chunk as u64);
+            if target < samples_seen + samples_in_row {
+                // Sample lives in this row.
+                let rel = target - samples_seen;
+                let per = row.samples_per_chunk as u64;
+                if per == 0 {
+                    return None; // spec-illegal but be total
+                }
+                let chunk_in_row = (rel / per) as u32;
+                let off_in_chunk = (rel % per) as u32;
+                let chunk_1based = row.first_chunk + chunk_in_row;
+                if chunk_1based > chunk_max {
+                    return None;
+                }
+                return Some((chunk_1based, off_in_chunk));
+            }
+            samples_seen += samples_in_row;
+        }
+        None
+    }
+
+    /// Absolute file byte offset of sample at 0-based decode-order
+    /// index `sample_idx`, mirroring the QTFF p. 79 four-step walker
+    /// ("Finding a Sample") without iterating prior samples. The
+    /// result is `chunk_offsets[chunk - 1] + sum(sample_size_at(j))`
+    /// for j in `[chunk_first_sample(chunk) .. sample_idx)`. Returns
+    /// `None` when the sample index is out of range, the resolved
+    /// chunk is out of range, or any intra-chunk size lookup fails.
+    pub fn sample_offset(&self, sample_idx: u32) -> Option<u64> {
+        let (chunk_1based, off_in_chunk) = self.chunk_for_sample(sample_idx)?;
+        let chunk_base = self
+            .chunk_offsets
+            .get((chunk_1based - 1) as usize)
+            .copied()?;
+        if off_in_chunk == 0 {
+            return Some(chunk_base);
+        }
+        let first_in_chunk = sample_idx - off_in_chunk;
+        let mut cursor: u64 = chunk_base;
+        for j in first_in_chunk..sample_idx {
+            cursor = cursor.checked_add(self.sample_size_at(j)? as u64)?;
+        }
+        Some(cursor)
+    }
+
+    /// Total byte extent of 1-based chunk `chunk_1based` — sum of
+    /// every sample size in the chunk — as `(start, end_exclusive)`
+    /// file-byte coordinates. Useful for a prefetch / chunk-aligned
+    /// HTTP-range read (QTFF p. 74 "Chunks ... allow optimized data
+    /// access"). Returns `None` when the chunk is out of range or any
+    /// per-sample size lookup fails.
+    pub fn chunk_byte_extent(&self, chunk_1based: u32) -> Option<(u64, u64)> {
+        if chunk_1based == 0 || chunk_1based > self.chunk_count() {
+            return None;
+        }
+        let chunk_base = self
+            .chunk_offsets
+            .get((chunk_1based - 1) as usize)
+            .copied()?;
+        let first = self.chunk_first_sample(chunk_1based)?;
+        let count = self.samples_in_chunk(chunk_1based)?;
+        let mut total: u64 = 0;
+        for j in first..first.saturating_add(count) {
+            total = total.checked_add(self.sample_size_at(j)? as u64)?;
+        }
+        let end = chunk_base.checked_add(total)?;
+        Some((chunk_base, end))
+    }
+
     /// `sdtp` row for a 0-based decode-order sample index, or `None`
     /// when the track carries no `sdtp` box (or the index is past the
     /// table). ISO/IEC 14496-12 §8.6.4.
@@ -1987,5 +2214,250 @@ mod tests {
     fn sub_samples_for_empty_table_is_none() {
         let table = SampleTable::default();
         assert!(table.sub_samples_for(1).is_none());
+    }
+
+    // ─────────────── round-256 chunk-walking primitives ───────────────
+
+    /// Build a SampleTable mirroring QTFF p. 76 Figure 2-35: three
+    /// `stsc` rows packing samples across 5 chunks at two different
+    /// `samples_per_chunk` settings. Row 1 covers chunks 1..=2 at 3
+    /// samples/chunk (6 samples); row 2 covers chunks 3..=4 at 1
+    /// sample/chunk (2 samples); row 3 covers chunk 5 at 1
+    /// sample/chunk (1 sample). Total 9 samples across 5 chunks.
+    /// Uniform 100-byte samples, chunk offsets at
+    /// 1000/2000/3000/4000/5000 — chosen so each sample's expected
+    /// byte offset stays human-readable (chunk_base + offset_in_chunk
+    /// * 100).
+    fn qtff_figure_2_35_table() -> SampleTable {
+        SampleTable {
+            stts: vec![SttsEntry {
+                sample_count: 9,
+                sample_duration: 10,
+            }],
+            stsc: vec![
+                StscEntry {
+                    first_chunk: 1,
+                    samples_per_chunk: 3,
+                    sample_description_id: 23,
+                },
+                StscEntry {
+                    first_chunk: 3,
+                    samples_per_chunk: 1,
+                    sample_description_id: 23,
+                },
+                StscEntry {
+                    first_chunk: 5,
+                    samples_per_chunk: 1,
+                    sample_description_id: 24,
+                },
+            ],
+            stsz_default_size: Some(100),
+            stsz_count: 9,
+            stsz_table: vec![],
+            chunk_offsets: vec![1000, 2000, 3000, 4000, 5000],
+            ..SampleTable::default()
+        }
+    }
+
+    #[test]
+    fn chunk_count_matches_chunk_offset_table_len() {
+        let t = qtff_figure_2_35_table();
+        assert_eq!(t.chunk_count(), 5);
+        let empty = SampleTable::default();
+        assert_eq!(empty.chunk_count(), 0);
+    }
+
+    #[test]
+    fn samples_in_chunk_walks_stsc_row_boundaries() {
+        let t = qtff_figure_2_35_table();
+        // Row 1: first_chunk=1, samples_per_chunk=3 → chunks 1,2 each
+        // hold 3 samples. (Row 2 is first_chunk=3 so it claims chunk 3
+        // first; row 1 covers strictly chunks [1, 3).)
+        assert_eq!(t.samples_in_chunk(1), Some(3));
+        assert_eq!(t.samples_in_chunk(2), Some(3));
+        // Row 2: first_chunk=3, samples_per_chunk=1 → chunks 3,4 each
+        // hold 1 sample. (Row 3 is first_chunk=5 so row 2 covers
+        // chunks [3, 5).)
+        assert_eq!(t.samples_in_chunk(3), Some(1));
+        assert_eq!(t.samples_in_chunk(4), Some(1));
+        // Row 3: first_chunk=5, samples_per_chunk=1 → only chunk 5.
+        assert_eq!(t.samples_in_chunk(5), Some(1));
+        // Past end + zero (chunk numbers are 1-based per QTFF p. 76).
+        assert_eq!(t.samples_in_chunk(0), None);
+        assert_eq!(t.samples_in_chunk(6), None);
+    }
+
+    #[test]
+    fn sample_description_id_for_chunk_picks_row_id() {
+        let t = qtff_figure_2_35_table();
+        assert_eq!(t.sample_description_id_for_chunk(1), Some(23));
+        assert_eq!(t.sample_description_id_for_chunk(2), Some(23));
+        assert_eq!(t.sample_description_id_for_chunk(3), Some(23));
+        assert_eq!(t.sample_description_id_for_chunk(4), Some(23));
+        assert_eq!(t.sample_description_id_for_chunk(5), Some(24));
+        assert_eq!(t.sample_description_id_for_chunk(0), None);
+        assert_eq!(t.sample_description_id_for_chunk(6), None);
+    }
+
+    #[test]
+    fn chunk_first_sample_sums_preceding_chunks() {
+        let t = qtff_figure_2_35_table();
+        // Chunk 1 holds samples [0,3); chunk 2 [3,6); chunk 3 [6,7);
+        // chunk 4 [7,8); chunk 5 [8,9).
+        assert_eq!(t.chunk_first_sample(1), Some(0));
+        assert_eq!(t.chunk_first_sample(2), Some(3));
+        assert_eq!(t.chunk_first_sample(3), Some(6));
+        assert_eq!(t.chunk_first_sample(4), Some(7));
+        assert_eq!(t.chunk_first_sample(5), Some(8));
+        assert_eq!(t.chunk_first_sample(0), None);
+        assert_eq!(t.chunk_first_sample(6), None);
+    }
+
+    #[test]
+    fn chunk_for_sample_resolves_every_sample_in_figure_2_35() {
+        let t = qtff_figure_2_35_table();
+        // Samples 0,1,2 live in chunk 1 at sub-offsets 0,1,2.
+        assert_eq!(t.chunk_for_sample(0), Some((1, 0)));
+        assert_eq!(t.chunk_for_sample(1), Some((1, 1)));
+        assert_eq!(t.chunk_for_sample(2), Some((1, 2)));
+        // Samples 3,4,5 live in chunk 2.
+        assert_eq!(t.chunk_for_sample(3), Some((2, 0)));
+        assert_eq!(t.chunk_for_sample(5), Some((2, 2)));
+        // Sample 6 lives in chunk 3 (row 2: 1 sample/chunk starts at chunk 3).
+        assert_eq!(t.chunk_for_sample(6), Some((3, 0)));
+        // Sample 7 → chunk 4 (still row 2). Sample 8 → chunk 5 (row 3 starts).
+        assert_eq!(t.chunk_for_sample(7), Some((4, 0)));
+        assert_eq!(t.chunk_for_sample(8), Some((5, 0)));
+        // Past sample_count → None.
+        assert_eq!(t.chunk_for_sample(9), None);
+        assert_eq!(t.chunk_for_sample(u32::MAX), None);
+    }
+
+    #[test]
+    fn sample_offset_matches_iter_samples_byte_offsets() {
+        let t = qtff_figure_2_35_table();
+        // Walk the iterator + the random-access offset accessor in
+        // parallel; they must agree for every sample the iterator
+        // emits. Sample sizes are uniform 100 so chunk_base +
+        // off_in_chunk * 100.
+        for entry in t.iter_samples().filter_map(Result::ok) {
+            let off = t.sample_offset(entry.index).expect("offset");
+            assert_eq!(
+                off, entry.offset,
+                "sample {} disagrees: random-access={} iter={}",
+                entry.index, off, entry.offset
+            );
+        }
+        // Spot-check: sample 5 lives in chunk 2 at sub-offset 2 →
+        // chunk_offsets[1] (=2000) + 2 × 100 = 2200.
+        assert_eq!(t.sample_offset(5), Some(2200));
+        // Out-of-range sample.
+        assert_eq!(t.sample_offset(9), None);
+    }
+
+    #[test]
+    fn sample_size_at_handles_uniform_and_table_sources() {
+        let mut t = qtff_figure_2_35_table();
+        // Uniform-size (`stsz` constant size) path.
+        assert_eq!(t.sample_size_at(0), Some(100));
+        assert_eq!(t.sample_size_at(8), Some(100));
+        assert_eq!(t.sample_size_at(9), None);
+        // Switch to per-sample table.
+        t.stsz_default_size = None;
+        t.stsz_table = (1..=9).map(|n| n as u32 * 10).collect();
+        assert_eq!(t.sample_size_at(0), Some(10));
+        assert_eq!(t.sample_size_at(5), Some(60));
+        assert_eq!(t.sample_size_at(8), Some(90));
+        assert_eq!(t.sample_size_at(9), None);
+    }
+
+    #[test]
+    fn chunk_byte_extent_sums_samples_in_chunk() {
+        let mut t = qtff_figure_2_35_table();
+        // Uniform-size: chunk 1 holds 3 × 100-byte samples starting
+        // at offset 1000 → (1000, 1300).
+        assert_eq!(t.chunk_byte_extent(1), Some((1000, 1300)));
+        assert_eq!(t.chunk_byte_extent(2), Some((2000, 2300)));
+        // Chunk 3 (row 2): 1 sample × 100 starting at 3000.
+        assert_eq!(t.chunk_byte_extent(3), Some((3000, 3100)));
+        assert_eq!(t.chunk_byte_extent(0), None);
+        assert_eq!(t.chunk_byte_extent(6), None);
+        // Variable-size: rewrite stsz_table to give each sample a
+        // distinct size, then verify the chunk-1 byte extent reflects
+        // exactly samples 0+1+2.
+        t.stsz_default_size = None;
+        t.stsz_table = (1..=9).map(|n| n as u32 * 10).collect();
+        // Sample 0=10, sample 1=20, sample 2=30 → 60-byte extent.
+        assert_eq!(t.chunk_byte_extent(1), Some((1000, 1060)));
+    }
+
+    #[test]
+    fn chunk_for_sample_handles_empty_stbl() {
+        let t = SampleTable::default();
+        assert_eq!(t.chunk_for_sample(0), None);
+        assert_eq!(t.samples_in_chunk(1), None);
+        assert_eq!(t.chunk_first_sample(1), None);
+        assert_eq!(t.sample_offset(0), None);
+        assert_eq!(t.chunk_byte_extent(1), None);
+        assert_eq!(t.sample_description_id_for_chunk(1), None);
+        assert_eq!(t.sample_size_at(0), None);
+    }
+
+    #[test]
+    fn chunk_for_sample_single_chunk_single_row() {
+        // QTFF p. 76 "If all the chunks have the same number of
+        // samples per chunk and use the same sample description, this
+        // table has one entry." Verify the common-case shape.
+        let t = SampleTable {
+            stsc: vec![StscEntry {
+                first_chunk: 1,
+                samples_per_chunk: 4,
+                sample_description_id: 1,
+            }],
+            stsz_default_size: Some(50),
+            stsz_count: 8,
+            stsz_table: vec![],
+            chunk_offsets: vec![100, 1000],
+            ..SampleTable::default()
+        };
+        assert_eq!(t.chunk_count(), 2);
+        assert_eq!(t.samples_in_chunk(1), Some(4));
+        assert_eq!(t.samples_in_chunk(2), Some(4));
+        assert_eq!(t.chunk_first_sample(2), Some(4));
+        assert_eq!(t.chunk_for_sample(0), Some((1, 0)));
+        assert_eq!(t.chunk_for_sample(3), Some((1, 3)));
+        assert_eq!(t.chunk_for_sample(4), Some((2, 0)));
+        assert_eq!(t.chunk_for_sample(7), Some((2, 3)));
+        // Sample 3 = chunk 1 sub-offset 3 → 100 + 3*50 = 250.
+        assert_eq!(t.sample_offset(3), Some(250));
+        // Sample 4 = chunk 2 sub-offset 0 → 1000.
+        assert_eq!(t.sample_offset(4), Some(1000));
+        assert_eq!(t.chunk_byte_extent(1), Some((100, 300)));
+        assert_eq!(t.chunk_byte_extent(2), Some((1000, 1200)));
+    }
+
+    #[test]
+    fn chunk_for_sample_zero_samples_per_chunk_is_total() {
+        // A malformed writer that emits an stsc row with
+        // samples_per_chunk == 0 cannot be resolved (every chunk
+        // would hold zero samples → no chunk contains the queried
+        // sample). The accessor must stay total — return None — and
+        // never panic on a div-by-zero.
+        let t = SampleTable {
+            stsc: vec![StscEntry {
+                first_chunk: 1,
+                samples_per_chunk: 0,
+                sample_description_id: 1,
+            }],
+            stsz_default_size: Some(1),
+            stsz_count: 4,
+            stsz_table: vec![],
+            chunk_offsets: vec![0, 100, 200, 300],
+            ..SampleTable::default()
+        };
+        // No row covers any sample (zero per chunk × 4 chunks = 0
+        // samples in scope), so every sample query returns None.
+        assert_eq!(t.chunk_for_sample(0), None);
+        assert_eq!(t.chunk_for_sample(3), None);
     }
 }
