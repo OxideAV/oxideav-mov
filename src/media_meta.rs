@@ -4,6 +4,10 @@
 //! and audio sample descriptions plus track-level metadata:
 //!
 //! * `gama` — gamma 16.16 fixed-point (QTFF p. 94, Table 3-2).
+//! * `fiel` — Field Handling (QTFF p. 94, Table 3-2). Two 8-bit
+//!   integers — field count + ordering — surfaced as the typed
+//!   [`Fiel`] / [`FieldOrdering`] pair. QuickTime-only; ISO BMFF
+//!   does not define this sample-description extension.
 //! * `clap` — Clean Aperture (ISO BMFF §12.1.4, also Apple).
 //! * `pasp` — Pixel Aspect Ratio (ISO BMFF §12.1.4).
 //! * `colr` — Colour Information (Apple `nclc` *or* ISO `nclx`,
@@ -159,6 +163,117 @@ pub fn parse_colr(payload: &[u8]) -> Result<ColorParameters> {
         },
     };
     Ok(ColorParameters { kind })
+}
+
+/// Field handling — `fiel` video sample-description extension
+/// (QTFF p. 94, Table 3-2).
+///
+/// Two 8-bit integers that tell a downstream display pipeline how a
+/// sample is broken into discrete fields. Used both at decode time
+/// (when a decompressor component honours the declaration) and at
+/// presentation time (to decide which field draws first when
+/// rendering interlaced video).
+///
+/// * The first byte is the **field count**, legally `1` (progressive)
+///   or `2` (interlaced). Other values are out-of-spec but Apple's
+///   Toolbox historically forwarded them verbatim to the
+///   decompressor, so the parser surfaces the raw byte alongside the
+///   typed [`Fiel::is_interlaced`] accessor for callers that want to
+///   distinguish "spec-conformant interlaced" from "writer noise".
+/// * The second byte is the **field ordering**. The spec
+///   enumerates exactly three legal values when the field count is
+///   2 — `0` (unknown), `1` (T first), `6` (B first) — and is silent
+///   on the meaning of any other value, including the byte's
+///   contents when the field count is 1. The parser therefore
+///   keeps the raw byte and maps it through [`FieldOrdering`] only
+///   when the spec assigns the value a name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Fiel {
+    /// Number of fields per QuickTime sample. `1` is progressive
+    /// (the sample is one whole frame); `2` is interlaced (the
+    /// sample is two adjacent compressed fields). The spec
+    /// enumerates only those two; any other byte is preserved
+    /// verbatim and is flagged as not-spec by
+    /// [`Fiel::is_spec_field_count`].
+    pub field_count: u8,
+    /// Raw second byte. When [`Fiel::field_count`] is `2` this picks
+    /// between the three documented [`FieldOrdering`] variants;
+    /// otherwise the byte is undefined by the spec but kept here
+    /// for round-trip fidelity.
+    pub field_ordering: u8,
+}
+
+impl Fiel {
+    /// True when `field_count == 2` (interlaced).
+    pub fn is_interlaced(&self) -> bool {
+        self.field_count == 2
+    }
+
+    /// True when `field_count` is one of the two spec-enumerated
+    /// values (`1` progressive or `2` interlaced). Anything else
+    /// is a writer convention or a corrupted byte.
+    pub fn is_spec_field_count(&self) -> bool {
+        matches!(self.field_count, 1 | 2)
+    }
+
+    /// Typed view of [`Fiel::field_ordering`].
+    ///
+    /// Returns `None` when the byte is not one of the three values
+    /// the spec enumerates (`0` / `1` / `6`). The unenumerated bytes
+    /// (and the second byte of a progressive declaration) are
+    /// undefined per QTFF p. 94 and surfaced as `None` rather than
+    /// invented out of whole cloth.
+    pub fn ordering(&self) -> Option<FieldOrdering> {
+        match self.field_ordering {
+            0 => Some(FieldOrdering::Unknown),
+            1 => Some(FieldOrdering::TopFieldFirst),
+            6 => Some(FieldOrdering::BottomFieldFirst),
+            _ => None,
+        }
+    }
+}
+
+/// Spec-enumerated values of the `fiel` field-ordering byte
+/// (QTFF p. 94, Table 3-2). The three named variants are the
+/// **only** values the spec assigns meaning to; any other byte is
+/// out-of-spec and surfaced as `None` by [`Fiel::ordering`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldOrdering {
+    /// Spec value `0`: "field ordering is unknown" — the writer
+    /// declared the sample interlaced but did not commit to which
+    /// field is topmost / earliest. Players typically fall back to a
+    /// motion-adaptive heuristic.
+    Unknown,
+    /// Spec value `1`: "T is displayed earliest, T is stored first
+    /// in the file" — top-field first.
+    TopFieldFirst,
+    /// Spec value `6`: "B is displayed earliest, B is stored first
+    /// in the file" — bottom-field first.
+    BottomFieldFirst,
+}
+
+/// On-disk byte length of a `fiel` body — exactly two 8-bit integers
+/// per QTFF p. 94, Table 3-2. Used as both the minimum and the
+/// maximum: `fiel` is fixed-width with no trailing data.
+pub const FIEL_BODY_LEN: usize = 2;
+
+/// Parse a `fiel` body (QTFF p. 94, Table 3-2).
+///
+/// `payload` is the bytes inside the atom — the caller has already
+/// stripped the 8-byte `[size, type]` header. The body must be
+/// exactly [`FIEL_BODY_LEN`] bytes; anything else is a writer error
+/// (the spec is fixed-width with no list or version-flags prologue).
+pub fn parse_fiel(payload: &[u8]) -> Result<Fiel> {
+    if payload.len() != FIEL_BODY_LEN {
+        return Err(Error::invalid(format!(
+            "MOV: fiel payload length {} != 2 bytes (QTFF p. 94: field_count + field_ordering)",
+            payload.len()
+        )));
+    }
+    Ok(Fiel {
+        field_count: payload[0],
+        field_ordering: payload[1],
+    })
 }
 
 /// Apple Track Aperture Mode Dimensions (`tapt`).
@@ -887,5 +1002,111 @@ mod tests {
         assert_eq!(kv.len(), 1);
         assert_eq!(kv[0].key, "com.test.title");
         assert_eq!(kv[0].as_str(), Some("hi"));
+    }
+
+    // ────────────────────────── `fiel` ────────────────────────────
+
+    #[test]
+    fn fiel_progressive_round_trip() {
+        // QTFF p. 94: field_count=1 → progressive sample. The second
+        // byte is undefined; we keep it raw and surface `None` from
+        // the typed accessor.
+        let f = parse_fiel(&[1, 0]).unwrap();
+        assert_eq!(f.field_count, 1);
+        assert_eq!(f.field_ordering, 0);
+        assert!(!f.is_interlaced());
+        assert!(f.is_spec_field_count());
+        // 0 is a spec-named ordering value (Unknown), even though
+        // the spec describes it as meaningful only when count=2 —
+        // the typed accessor does not gate on field_count to keep
+        // the mapping a pure function of the raw byte.
+        assert_eq!(f.ordering(), Some(FieldOrdering::Unknown));
+    }
+
+    #[test]
+    fn fiel_interlaced_top_field_first() {
+        // QTFF p. 94: "1 – T is displayed earliest, T is stored first
+        // in the file."
+        let f = parse_fiel(&[2, 1]).unwrap();
+        assert!(f.is_interlaced());
+        assert!(f.is_spec_field_count());
+        assert_eq!(f.ordering(), Some(FieldOrdering::TopFieldFirst));
+    }
+
+    #[test]
+    fn fiel_interlaced_bottom_field_first() {
+        // QTFF p. 94: "6 – B is displayed earliest, B is stored first
+        // in the file."
+        let f = parse_fiel(&[2, 6]).unwrap();
+        assert!(f.is_interlaced());
+        assert_eq!(f.ordering(), Some(FieldOrdering::BottomFieldFirst));
+    }
+
+    #[test]
+    fn fiel_interlaced_unknown_ordering() {
+        // QTFF p. 94: "0 – field ordering is unknown" — interlaced
+        // sample without a documented field order.
+        let f = parse_fiel(&[2, 0]).unwrap();
+        assert!(f.is_interlaced());
+        assert_eq!(f.ordering(), Some(FieldOrdering::Unknown));
+    }
+
+    #[test]
+    fn fiel_unspec_ordering_byte_surfaces_none() {
+        // Bytes 2/3/4/5/7..=255 are not enumerated by the spec;
+        // the typed accessor returns None and the raw byte is
+        // preserved on the struct for round-trip fidelity.
+        for raw in [2u8, 3, 4, 5, 7, 9, 0x55, 0xFF] {
+            let f = parse_fiel(&[2, raw]).unwrap();
+            assert_eq!(f.field_ordering, raw);
+            assert_eq!(
+                f.ordering(),
+                None,
+                "byte 0x{raw:02X} should not be spec-named"
+            );
+        }
+    }
+
+    #[test]
+    fn fiel_out_of_spec_field_count_preserved() {
+        // QTFF p. 94 enumerates only field_count ∈ {1, 2}. A writer
+        // that emits 0 (or 3, 17, etc.) is out-of-spec; the parser
+        // preserves the byte for diagnostics and flags it through
+        // `is_spec_field_count`.
+        for raw in [0u8, 3, 17, 0x80, 0xFF] {
+            let f = parse_fiel(&[raw, 0]).unwrap();
+            assert_eq!(f.field_count, raw);
+            assert!(!f.is_spec_field_count());
+            // `is_interlaced` is a strict equality on 2, so any
+            // non-2 byte — including the spec-progressive byte — is
+            // not "interlaced" by the typed accessor's definition.
+            assert!(!f.is_interlaced());
+        }
+    }
+
+    #[test]
+    fn fiel_rejects_wrong_payload_length() {
+        // QTFF p. 94 fixes the body at exactly 2 bytes; the parser
+        // rejects every other length (1, 3, 4, …) rather than
+        // tolerating silent truncation / trailing data.
+        for len in [0usize, 1, 3, 4, 8] {
+            let body = vec![0u8; len];
+            let err = parse_fiel(&body).unwrap_err();
+            assert!(format!("{err}").contains("fiel payload length"));
+        }
+    }
+
+    #[test]
+    fn fiel_default_is_progressive_unknown() {
+        // Default Fiel is the all-zero byte pair; the typed
+        // accessor still returns the spec-named `Unknown` for the
+        // ordering byte and `false` for `is_spec_field_count`
+        // because 0 isn't in {1, 2}.
+        let f = Fiel::default();
+        assert_eq!(f.field_count, 0);
+        assert_eq!(f.field_ordering, 0);
+        assert!(!f.is_interlaced());
+        assert!(!f.is_spec_field_count());
+        assert_eq!(f.ordering(), Some(FieldOrdering::Unknown));
     }
 }

@@ -1148,6 +1148,42 @@ boundary, and short / empty body rejection on all three leaf
 parsers. Both the `registry` feature and the standalone
 configuration build and pass.
 
+Round 264 lands the Field Handling (`fiel`) video sample-description
+extension parser plus the typed gamma (`gama`) accessor — Apple
+QuickTime File Format spec p. 94, Table 3-2 "Video sample
+description extensions". Table 3-2 lists `fiel` as a two-byte
+extension carrying a field count (`1` progressive, `2` interlaced)
+and, when the count is 2, a field-ordering selector (`0` "field
+ordering is unknown", `1` T-displayed-earliest/T-stored-first =
+top-field first, `6` B-displayed-earliest/B-stored-first =
+bottom-field first). The atom was previously opaque inside
+[`SampleDescription::extra`]; round-2 recognised `gama` / `pasp` /
+`clap` / `colr` but not `fiel`. New `media_meta` additions: typed
+[`Fiel`] struct preserving both raw bytes for round-trip fidelity,
+typed [`FieldOrdering`] enum naming exactly the three spec-listed
+values (no fall-through variant — the spec leaves any other byte's
+meaning unspecified), free function [`parse_fiel`] enforcing the
+fixed 2-byte body length, `FIEL_BODY_LEN = 2` constant, and three
+typed accessors on [`Fiel`]: `is_interlaced()` (`field_count == 2`),
+`is_spec_field_count()` (`field_count ∈ {1, 2}`), and `ordering()`
+returning the named [`FieldOrdering`] variant or `None` when the
+byte is outside the enumerated set. The companion `gama` accessor
+[`SampleDescription::gamma_value`] returns the typed 16.16
+fixed-point view of the raw `Option<u32>` (divides by 65536.0,
+returns `None` when the field is absent — no default substitution).
+The 16.16 reading mirrors every other "32-bit fixed-point" QTFF
+field in Chapter 4 (mvhd `rate`, tkhd matrix coefficients, `tapt`
+width/height, sound `balance`). Both fields are populated by the
+existing `scan_video_extensions` walker so no caller code changes
+are required to receive them; the round is purely additive. 8 new
+unit tests in `src/media_meta.rs` plus 6 end-to-end demuxer
+integration tests in `tests/synth_round264_fiel.rs` pin every
+spec-named shape, the out-of-spec field-count preservation across
+{0, 3, 17, 0x80, 0xFF}, the unspec ordering-byte fall-through, and
+the body-length rejection on lengths {0, 1, 3, 4, 8}. ISO BMFF does
+not define `fiel`; it is a QuickTime-only extension and stays absent
+for non-QTFF inputs reaching this demuxer.
+
 ## Follow-ups
 
 - `MovMuxer` write-side `saiz` / `saio` emission at either `stbl` or

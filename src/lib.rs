@@ -112,8 +112,8 @@ pub use kind::{find_kinds_in_udta, parse_kind, KindEntry};
 pub use leva::{parse_leva, AssignmentType, Leva, LevaLevel};
 pub use matte::{parse_kmat, parse_matt, CompressedMatte, Matte, MIN_IMAGE_DESCRIPTION_SIZE};
 pub use media_meta::{
-    channel_mask_for_layout_tag, Chan, ChanDescription, Clap, ColorParameters, ColorParametersKind,
-    Cslg, MetaKeyValue, Pasp, Tapt,
+    channel_mask_for_layout_tag, parse_fiel, Chan, ChanDescription, Clap, ColorParameters,
+    ColorParametersKind, Cslg, Fiel, FieldOrdering, MetaKeyValue, Pasp, Tapt, FIEL_BODY_LEN,
 };
 pub use muxer::{FragmentationMode, MovMuxer, MuxSample, MuxTrackKind};
 pub use pdin::{parse_pdin, Pdin, PdinEntry};

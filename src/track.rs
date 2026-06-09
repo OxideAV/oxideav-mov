@@ -18,8 +18,8 @@ use crate::header::{Hdlr, Mdhd, Tkhd};
 use crate::kind::KindEntry;
 use crate::matte::Matte;
 use crate::media_meta::{
-    parse_chan, parse_clap, parse_colr, parse_pasp, Chan, Clap, ColorParameters, Cslg,
-    MetaKeyValue, Pasp, Tapt,
+    parse_chan, parse_clap, parse_colr, parse_fiel, parse_pasp, Chan, Clap, ColorParameters, Cslg,
+    Fiel, MetaKeyValue, Pasp, Tapt,
 };
 use crate::reference::DataReference;
 use crate::sample_table::{SampleEntry, SampleTable};
@@ -114,7 +114,10 @@ pub struct SampleDescription {
     pub extra: Vec<u8>,
 
     // ─────── Round-2 video extension atoms ───────
-    /// `gama` — 16.16 fixed-point gamma; `None` when absent.
+    /// `gama` — gamma 16.16 fixed-point (QTFF p. 94, Table 3-2:
+    /// "32-bit fixed-point number"). `None` when absent. The raw
+    /// word is preserved verbatim; see [`SampleDescription::gamma_value`]
+    /// for the typed 16.16 → `f64` accessor.
     pub gamma: Option<u32>,
     /// `pasp` — pixel aspect ratio.
     pub pasp: Option<Pasp>,
@@ -122,6 +125,12 @@ pub struct SampleDescription {
     pub clap: Option<Clap>,
     /// `colr` — colour parameters (Apple `nclc` or ISO `nclx`).
     pub colr: Option<ColorParameters>,
+    /// `fiel` — Field Handling (QTFF p. 94, Table 3-2). Surfaces
+    /// the field count + ordering; `None` when the sample
+    /// description carries no `fiel` extension (the implicit
+    /// "progressive" case). QuickTime-only; ISO BMFF samples
+    /// arriving via this decoder will not set this field.
+    pub fiel: Option<Fiel>,
 
     // ─────── Round-2 audio extension atoms ───────
     /// `chan` — Apple Core Audio channel layout (raw fields surfaced).
@@ -132,6 +141,30 @@ pub struct SampleDescription {
     /// track's handler is a time-code track (`hdlr.is_timecode()`) and
     /// the entry's format FourCC is `tmcd`. See [`Tmcd`].
     pub tmcd: Option<Tmcd>,
+}
+
+impl SampleDescription {
+    /// Typed view of [`SampleDescription::gamma`] as a floating-point
+    /// gamma value.
+    ///
+    /// QTFF p. 94 Table 3-2 describes the `gama` payload as a "32-bit
+    /// fixed-point number indicating the gamma level at which the
+    /// image was captured." The spec does not call out the radix
+    /// point's position explicitly in that line, but every other
+    /// QuickTime "32-bit fixed-point" value in the same chapter
+    /// (matrix coefficients `a` / `b` / `d` / `e`, mvhd `rate`,
+    /// `tapt` width / height — all 16.16) follows the QuickDraw
+    /// convention of 16 integer + 16 fractional bits, and the
+    /// values observed by ProRes / DV-encoding pipelines (`0x00023333`
+    /// ≈ 2.2) round-trip cleanly under that interpretation. The
+    /// accessor therefore divides by 65536.0, returning `None` when
+    /// the field is absent.
+    ///
+    /// Callers that need the unscaled wire value should read
+    /// [`SampleDescription::gamma`] directly.
+    pub fn gamma_value(&self) -> Option<f64> {
+        self.gamma.map(|g| g as f64 / 65536.0)
+    }
 }
 
 /// One track's accumulated state.
@@ -693,6 +726,12 @@ fn scan_video_extensions(entry: &mut SampleDescription) -> Result<()> {
             }
             b"colr" => {
                 entry.colr = Some(parse_colr(payload)?);
+            }
+            b"fiel" => {
+                // QTFF p. 94, Table 3-2: two 8-bit integers —
+                // field_count + field_ordering. Surface as the typed
+                // pair; the parser rejects any other body length.
+                entry.fiel = Some(parse_fiel(payload)?);
             }
             _ => {}
         }
