@@ -1184,6 +1184,41 @@ the body-length rejection on lengths {0, 1, 3, 4, 8}. ISO BMFF does
 not define `fiel`; it is a QuickTime-only extension and stays absent
 for non-QTFF inputs reaching this demuxer.
 
+Round 267 continues the QTFF p. 94 Table 3-2 "Video sample description
+extensions" chain with the **default Motion-JPEG quantization table**
+(`mjqt`). Table 3-2 names `mjqt` as "the default quantization table
+for a Motion-JPEG data stream"; it is the fallback a Motion-JPEG field
+consults when its own *quantization table offset* is `0` (QTFF p. 95
+Motion-JPEG format A APP1 marker, p. 96 format B header — "If this
+field is set to 0, check the image description for a default
+quantization table"), where the image description is the sample
+description carrying this extension. The atom was previously opaque
+inside [`SampleDescription::extra`] — the round-2 visual-extension scan
+recognised `gama` / `pasp` / `clap` / `colr` and (round 264) `fiel` but
+not `mjqt`. QTFF defines no internal structure for the body beyond that
+one-line description: the bytes are a JPEG `DQT` marker-segment body
+whose precision/identifier nibble pair plus 64-entry zig-zag table per
+table are owned by the ISO JPEG specification, so this container crate
+surfaces them verbatim through [`Mjqt::data`] and leaves
+interpretation to the Motion-JPEG codec — the same opaque-surface
+treatment given the `colr` ICC-profile payload and the codec-specific
+`extra` blob. New `media_meta` additions: a typed [`Mjqt`] struct
+preserving the body verbatim, the free function [`parse_mjqt`] (the
+atom carries no header / list-count / version-flags prologue, so the
+whole body is the table data; no length is rejected — Table 3-2 fixes
+no minimum, and a zero-byte body is a degenerate-but-valid declaration
+surfaced through `is_empty()` rather than dropped), the `len()` /
+`is_empty()` accessors on [`Mjqt`], and a new `Option<Mjqt>` field on
+[`SampleDescription`] populated by the existing `scan_video_extensions`
+walker. The round is purely additive — no caller code changes are
+required to receive the field. 4 new unit tests in `src/media_meta.rs`
+plus 4 end-to-end demuxer integration tests in
+`tests/synth_round267_mjqt.rs` pin the DQT round-trip, the
+empty-body-preserved case, the missing-`mjqt`-leaves-field-unset
+baseline, and an arbitrary-payload verbatim survival. ISO BMFF does
+not define `mjqt`; it is a QuickTime-only extension and stays absent
+for non-QTFF inputs reaching this demuxer.
+
 ## Follow-ups
 
 - `MovMuxer` write-side `saiz` / `saio` emission at either `stbl` or
@@ -1208,6 +1243,12 @@ for non-QTFF inputs reaching this demuxer.
   FourCC (commonly `'zlib'`); the workspace's compression crate is
   the natural producer, and the uncompressed inner bytes feed back
   through the existing `moov` parser unchanged.
+- `mjht` (default Motion-JPEG Huffman table) is the last unparsed
+  entry in QTFF p. 94 Table 3-2 "Video sample description extensions"
+  after round 267's `mjqt`. It has the identical surface shape — a
+  verbatim JPEG `DHT` marker-segment body deferred to when a
+  Motion-JPEG field's Huffman-table offset is `0` (QTFF pp. 95 – 96) —
+  and is the natural next step in the same chain.
 
 ## Standalone build
 

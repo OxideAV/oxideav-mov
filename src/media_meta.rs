@@ -276,6 +276,65 @@ pub fn parse_fiel(payload: &[u8]) -> Result<Fiel> {
     })
 }
 
+/// Default Motion-JPEG quantization table — `mjqt` video
+/// sample-description extension (QTFF p. 94, Table 3-2).
+///
+/// Table 3-2 names `mjqt` as "the default quantization table for a
+/// Motion-JPEG data stream." It is the fallback consulted when a
+/// Motion-JPEG field's own *quantization table offset* (QTFF p. 95
+/// Motion-JPEG format A APP1 marker, p. 96 format B header) is set to
+/// `0` — "If this field is set to 0, check the image description for a
+/// default quantization table." The image description is the sample
+/// description carrying this extension.
+///
+/// The byte content is a JPEG quantization-table marker segment (a
+/// `DQT` body) whose internal layout — the precision/identifier
+/// nibble pair plus the 64-entry zig-zag table per table — is owned
+/// by the ISO JPEG specification, not by QTFF. This container crate
+/// therefore surfaces the raw bytes verbatim through [`Mjqt::data`]
+/// and leaves their interpretation to the Motion-JPEG codec, exactly
+/// as the `colr` ICC-profile payload and the codec-specific `extra`
+/// blob are surfaced opaque. The atom carries no QTFF-defined header,
+/// list-count, or version/flags prologue, so the whole body is the
+/// table data.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Mjqt {
+    /// The raw default-quantization-table bytes, verbatim. A
+    /// Motion-JPEG decoder feeds these as the `DQT` data the QTFF
+    /// p. 95 / p. 96 "quantization table offset == 0" rule defers to.
+    pub data: Vec<u8>,
+}
+
+impl Mjqt {
+    /// Byte length of the surfaced default-quantization-table data.
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// True when the extension carried an empty body. QTFF p. 94
+    /// Table 3-2 does not fix a minimum length, so a writer emitting a
+    /// zero-byte `mjqt` is preserved rather than rejected; callers that
+    /// require a usable table can gate on this predicate.
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+}
+
+/// Parse an `mjqt` body (QTFF p. 94, Table 3-2).
+///
+/// `payload` is the bytes inside the atom — the caller has already
+/// stripped the 8-byte `[size, type]` header. QTFF defines no
+/// internal structure beyond "the default quantization table for a
+/// Motion-JPEG data stream", so the entire body is preserved verbatim
+/// as JPEG `DQT` data for the Motion-JPEG codec to interpret. No
+/// length is rejected — an empty body is a (degenerate) valid table
+/// declaration and is surfaced through [`Mjqt::is_empty`].
+pub fn parse_mjqt(payload: &[u8]) -> Result<Mjqt> {
+    Ok(Mjqt {
+        data: payload.to_vec(),
+    })
+}
+
 /// Apple Track Aperture Mode Dimensions (`tapt`).
 ///
 /// `tapt` contains three optional sub-atoms, each carrying a 16.16
@@ -1108,5 +1167,48 @@ mod tests {
         assert!(!f.is_interlaced());
         assert!(!f.is_spec_field_count());
         assert_eq!(f.ordering(), Some(FieldOrdering::Unknown));
+    }
+
+    #[test]
+    fn mjqt_round_trips_dqt_bytes_verbatim() {
+        // QTFF p. 94 Table 3-2: the `mjqt` body is the default JPEG
+        // quantization-table data, surfaced verbatim. A representative
+        // single-table DQT marker segment body (Pq/Tq byte + 64
+        // zig-zag entries) round-trips byte-for-byte.
+        let mut body = Vec::with_capacity(65);
+        body.push(0x00); // Pq=0 (8-bit precision), Tq=0 (table 0)
+        body.extend((0u8..64).map(|i| i.wrapping_add(1)));
+        let m = parse_mjqt(&body).unwrap();
+        assert_eq!(m.data, body);
+        assert_eq!(m.len(), 65);
+        assert!(!m.is_empty());
+    }
+
+    #[test]
+    fn mjqt_empty_body_is_preserved_not_rejected() {
+        // QTFF Table 3-2 fixes no minimum length; a zero-byte body is
+        // a degenerate-but-valid table declaration, surfaced through
+        // `is_empty` rather than rejected.
+        let m = parse_mjqt(&[]).unwrap();
+        assert!(m.is_empty());
+        assert_eq!(m.len(), 0);
+        assert_eq!(m.data, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn mjqt_preserves_arbitrary_payload() {
+        // The container does not interpret the JPEG-owned bytes, so a
+        // payload that is not a well-formed DQT is still preserved
+        // verbatim for the codec to validate.
+        let body = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF];
+        let m = parse_mjqt(&body).unwrap();
+        assert_eq!(m.data, body);
+    }
+
+    #[test]
+    fn mjqt_default_is_empty() {
+        let m = Mjqt::default();
+        assert!(m.is_empty());
+        assert_eq!(m.len(), 0);
     }
 }

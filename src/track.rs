@@ -18,8 +18,8 @@ use crate::header::{Hdlr, Mdhd, Tkhd};
 use crate::kind::KindEntry;
 use crate::matte::Matte;
 use crate::media_meta::{
-    parse_chan, parse_clap, parse_colr, parse_fiel, parse_pasp, Chan, Clap, ColorParameters, Cslg,
-    Fiel, MetaKeyValue, Pasp, Tapt,
+    parse_chan, parse_clap, parse_colr, parse_fiel, parse_mjqt, parse_pasp, Chan, Clap,
+    ColorParameters, Cslg, Fiel, MetaKeyValue, Mjqt, Pasp, Tapt,
 };
 use crate::reference::DataReference;
 use crate::sample_table::{SampleEntry, SampleTable};
@@ -131,6 +131,13 @@ pub struct SampleDescription {
     /// "progressive" case). QuickTime-only; ISO BMFF samples
     /// arriving via this decoder will not set this field.
     pub fiel: Option<Fiel>,
+    /// `mjqt` — default Motion-JPEG quantization table (QTFF p. 94,
+    /// Table 3-2). Surfaces the raw `DQT` data a Motion-JPEG field
+    /// defers to when its own quantization-table offset is `0` (QTFF
+    /// p. 95 / p. 96); `None` when the sample description carries no
+    /// `mjqt` extension. QuickTime-only — ISO BMFF samples arriving
+    /// via this decoder will not set this field.
+    pub mjqt: Option<Mjqt>,
 
     // ─────── Round-2 audio extension atoms ───────
     /// `chan` — Apple Core Audio channel layout (raw fields surfaced).
@@ -732,6 +739,12 @@ fn scan_video_extensions(entry: &mut SampleDescription) -> Result<()> {
                 // field_count + field_ordering. Surface as the typed
                 // pair; the parser rejects any other body length.
                 entry.fiel = Some(parse_fiel(payload)?);
+            }
+            b"mjqt" => {
+                // QTFF p. 94, Table 3-2: default Motion-JPEG
+                // quantization table. Surface the raw DQT bytes
+                // verbatim; the JPEG codec owns their interpretation.
+                entry.mjqt = Some(parse_mjqt(payload)?);
             }
             _ => {}
         }
