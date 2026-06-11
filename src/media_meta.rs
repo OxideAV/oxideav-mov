@@ -335,6 +335,65 @@ pub fn parse_mjqt(payload: &[u8]) -> Result<Mjqt> {
     })
 }
 
+/// Default Motion-JPEG Huffman table — `mjht` video
+/// sample-description extension (QTFF p. 94, Table 3-2).
+///
+/// Table 3-2 names `mjht` as "the default Huffman table for a
+/// Motion-JPEG data stream." It is the fallback consulted when a
+/// Motion-JPEG field's own *Huffman table offset* (QTFF p. 95
+/// Motion-JPEG format A APP1 marker, p. 96 format B header) is set to
+/// `0` — "If this field is set to 0, check the image description for a
+/// default Huffman table." The image description is the sample
+/// description carrying this extension.
+///
+/// The byte content is a JPEG Huffman-table marker segment (a `DHT`
+/// body) whose internal layout — the class/identifier nibble pair, the
+/// 16 per-code-length counts, and the symbol-value list per table — is
+/// owned by the ISO JPEG specification, not by QTFF. This container
+/// crate therefore surfaces the raw bytes verbatim through
+/// [`Mjht::data`] and leaves their interpretation to the Motion-JPEG
+/// codec, exactly as the sibling `mjqt` quantization-table payload and
+/// the codec-specific `extra` blob are surfaced opaque. The atom
+/// carries no QTFF-defined header, list-count, or version/flags
+/// prologue, so the whole body is the table data.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Mjht {
+    /// The raw default-Huffman-table bytes, verbatim. A Motion-JPEG
+    /// decoder feeds these as the `DHT` data the QTFF p. 95 / p. 96
+    /// "Huffman table offset == 0" rule defers to.
+    pub data: Vec<u8>,
+}
+
+impl Mjht {
+    /// Byte length of the surfaced default-Huffman-table data.
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// True when the extension carried an empty body. QTFF p. 94
+    /// Table 3-2 does not fix a minimum length, so a writer emitting a
+    /// zero-byte `mjht` is preserved rather than rejected; callers that
+    /// require a usable table can gate on this predicate.
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+}
+
+/// Parse an `mjht` body (QTFF p. 94, Table 3-2).
+///
+/// `payload` is the bytes inside the atom — the caller has already
+/// stripped the 8-byte `[size, type]` header. QTFF defines no
+/// internal structure beyond "the default Huffman table for a
+/// Motion-JPEG data stream", so the entire body is preserved verbatim
+/// as JPEG `DHT` data for the Motion-JPEG codec to interpret. No
+/// length is rejected — an empty body is a (degenerate) valid table
+/// declaration and is surfaced through [`Mjht::is_empty`].
+pub fn parse_mjht(payload: &[u8]) -> Result<Mjht> {
+    Ok(Mjht {
+        data: payload.to_vec(),
+    })
+}
+
 /// Apple Track Aperture Mode Dimensions (`tapt`).
 ///
 /// `tapt` contains three optional sub-atoms, each carrying a 16.16
@@ -1208,6 +1267,53 @@ mod tests {
     #[test]
     fn mjqt_default_is_empty() {
         let m = Mjqt::default();
+        assert!(m.is_empty());
+        assert_eq!(m.len(), 0);
+    }
+
+    #[test]
+    fn mjht_round_trips_dht_bytes_verbatim() {
+        // QTFF p. 94 Table 3-2: the `mjht` body is the default JPEG
+        // Huffman-table data, surfaced verbatim. A representative
+        // single-table DHT marker segment body (Tc/Th byte + 16
+        // per-code-length counts + symbol values) round-trips
+        // byte-for-byte.
+        let mut body = Vec::with_capacity(1 + 16 + 3);
+        body.push(0x00); // Tc=0 (DC), Th=0 (table 0)
+        let mut counts = [0u8; 16];
+        counts[1] = 3; // three codes of length 2
+        body.extend_from_slice(&counts);
+        body.extend_from_slice(&[0x04, 0x05, 0x06]); // symbol values
+        let m = parse_mjht(&body).unwrap();
+        assert_eq!(m.data, body);
+        assert_eq!(m.len(), 20);
+        assert!(!m.is_empty());
+    }
+
+    #[test]
+    fn mjht_empty_body_is_preserved_not_rejected() {
+        // QTFF Table 3-2 fixes no minimum length; a zero-byte body is
+        // a degenerate-but-valid table declaration, surfaced through
+        // `is_empty` rather than rejected.
+        let m = parse_mjht(&[]).unwrap();
+        assert!(m.is_empty());
+        assert_eq!(m.len(), 0);
+        assert_eq!(m.data, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn mjht_preserves_arbitrary_payload() {
+        // The container does not interpret the JPEG-owned bytes, so a
+        // payload that is not a well-formed DHT is still preserved
+        // verbatim for the codec to validate.
+        let body = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0xFF];
+        let m = parse_mjht(&body).unwrap();
+        assert_eq!(m.data, body);
+    }
+
+    #[test]
+    fn mjht_default_is_empty() {
+        let m = Mjht::default();
         assert!(m.is_empty());
         assert_eq!(m.len(), 0);
     }

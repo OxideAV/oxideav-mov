@@ -18,8 +18,8 @@ use crate::header::{Hdlr, Mdhd, Tkhd};
 use crate::kind::KindEntry;
 use crate::matte::Matte;
 use crate::media_meta::{
-    parse_chan, parse_clap, parse_colr, parse_fiel, parse_mjqt, parse_pasp, Chan, Clap,
-    ColorParameters, Cslg, Fiel, MetaKeyValue, Mjqt, Pasp, Tapt,
+    parse_chan, parse_clap, parse_colr, parse_fiel, parse_mjht, parse_mjqt, parse_pasp, Chan, Clap,
+    ColorParameters, Cslg, Fiel, MetaKeyValue, Mjht, Mjqt, Pasp, Tapt,
 };
 use crate::reference::DataReference;
 use crate::sample_table::{SampleEntry, SampleTable};
@@ -138,6 +138,13 @@ pub struct SampleDescription {
     /// `mjqt` extension. QuickTime-only — ISO BMFF samples arriving
     /// via this decoder will not set this field.
     pub mjqt: Option<Mjqt>,
+    /// `mjht` — default Motion-JPEG Huffman table (QTFF p. 94,
+    /// Table 3-2). Surfaces the raw `DHT` data a Motion-JPEG field
+    /// defers to when its own Huffman-table offset is `0` (QTFF
+    /// p. 95 / p. 96); `None` when the sample description carries no
+    /// `mjht` extension. QuickTime-only — ISO BMFF samples arriving
+    /// via this decoder will not set this field.
+    pub mjht: Option<Mjht>,
 
     // ─────── Round-2 audio extension atoms ───────
     /// `chan` — Apple Core Audio channel layout (raw fields surfaced).
@@ -712,7 +719,8 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
 }
 
 /// Scan the `extra` blob of a video sample description for the
-/// well-known atom-style extensions (`gama`, `pasp`, `clap`, `colr`).
+/// well-known atom-style extensions (`gama`, `pasp`, `clap`, `colr`,
+/// `fiel`, `mjqt`, `mjht`).
 /// Recognised atoms are extracted into typed fields; the original
 /// `extra` blob is left intact so codec-specific bytes (e.g. `avcC`,
 /// `hvcC`) remain available for downstream consumers.
@@ -745,6 +753,12 @@ fn scan_video_extensions(entry: &mut SampleDescription) -> Result<()> {
                 // quantization table. Surface the raw DQT bytes
                 // verbatim; the JPEG codec owns their interpretation.
                 entry.mjqt = Some(parse_mjqt(payload)?);
+            }
+            b"mjht" => {
+                // QTFF p. 94, Table 3-2: default Motion-JPEG Huffman
+                // table. Surface the raw DHT bytes verbatim; the JPEG
+                // codec owns their interpretation.
+                entry.mjht = Some(parse_mjht(payload)?);
             }
             _ => {}
         }
