@@ -1257,6 +1257,26 @@ description, each routing to its own typed field). ISO BMFF does not
 define `mjht`; it is a QuickTime-only extension and stays absent for
 non-QTFF inputs reaching this demuxer.
 
+Round 279 also closes the second finding from the scheduled fuzz
+harness: `oom-33f049eec4ac8b768b06765a75ed350bfeb5a331` declared a
+`keys` atom with `entry_count = 0x0a0a0a0a` (≈168 M), driving
+`parse_keys`'s count-sized `Vec::with_capacity` into a single ~5.4 GB
+allocation before the per-entry loop could reject the truncated
+table. The fix front-loads the byte-bound check already used by the
+`ssix` / `leva` parsers — a declared count whose minimum on-disk
+footprint exceeds the remaining body bytes is rejected on arithmetic
+alone — and the same audit closed the four sibling
+count-driven pre-allocation sites reachable from `MovDemuxer::open`:
+`parse_chan` and `parse_dref` (capped at the byte-backed bound,
+preserving their lenient parse semantics), `parse_stsd` (capped at
+the 16-byte universal-header minimum), and `parse_sgpd` (capped, plus
+a rejection of the deprecated-v0 zero-implicit-size fallback that
+could previously be pushed into unbounded `Vec` growth). Pinned by
+`tests/synth_round279_count_prealloc_oom.rs` (the verbatim 82-byte
+reproducer, the arithmetic rejection, the exact-fit boundary
+acceptance, and end-to-end `sgpd`-v0 / `stsd` over-declared-count
+sweeps).
+
 ## Follow-ups
 
 - `MovMuxer` write-side `saiz` / `saio` emission at either `stbl` or

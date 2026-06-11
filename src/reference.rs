@@ -96,7 +96,12 @@ pub fn parse_dref(payload: &[u8]) -> Result<Vec<DataReference>> {
         return Err(Error::invalid("MOV: dref payload < 8 bytes"));
     }
     let n = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
-    let mut out = Vec::with_capacity(n);
+    // Allocate for the byte-backed entry count, not the declared one:
+    // each child reference atom occupies at least 12 bytes (`size >= 12`
+    // enforced below), and the lenient loop below already tolerates a
+    // count larger than the body holds — but `Vec::with_capacity` must
+    // not turn a forged count into a multi-gigabyte allocation.
+    let mut out = Vec::with_capacity(n.min((payload.len() - 8) / 12));
     let mut p = 8usize;
     while p < payload.len() && out.len() < n {
         if p + 8 > payload.len() {

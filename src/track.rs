@@ -638,7 +638,14 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
     }
     let _ver_flags = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
     let n = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
-    let mut out = Vec::with_capacity(n as usize);
+    // Allocate for the byte-backed entry count, not the declared one:
+    // each sample description occupies at least 16 bytes (the QTFF
+    // p. 70 universal header, `size >= 16` enforced below), so cap the
+    // pre-allocation at what the body can actually hold —
+    // `Vec::with_capacity` must not turn a forged count into a
+    // multi-gigabyte allocation. An overdeclared count still errors in
+    // the loop when it runs out of bytes.
+    let mut out = Vec::with_capacity((n as usize).min((payload.len() - 8) / 16));
     let mut p = 8usize;
     for _ in 0..n {
         if p + 16 > payload.len() {

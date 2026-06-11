@@ -296,7 +296,11 @@ pub fn parse_sgpd(payload: &[u8]) -> Result<SampleGroupDescription> {
     let n = read_u32(&payload[cursor..]) as usize;
     cursor += 4;
 
-    let mut entries = Vec::with_capacity(n);
+    // Allocate for the byte-backed entry count, not the declared one —
+    // a forged `entry_count` must not drive `Vec::with_capacity` (or,
+    // via the v0 zero-implicit-size fallback below, `Vec::push`)
+    // beyond what the (64 MiB-capped) atom body can actually hold.
+    let mut entries = Vec::with_capacity(n.min(payload.len() - cursor));
     // Decode the per-entry size: v1 uses `default_length` (or per-row
     // `description_length`); v0 uses the typed catalogue.
     let v0_implicit_size = implicit_v0_size(&grouping_type);
@@ -318,9 +322,20 @@ pub fn parse_sgpd(payload: &[u8]) -> Result<SampleGroupDescription> {
                 None => {
                     // Spec deprecated v0 with no implicit size; fall
                     // back to "remainder / entry_count" so we don't
-                    // hard-fail on unknown grouping_types.
+                    // hard-fail on unknown grouping_types. A division
+                    // that rounds to zero means the declared count
+                    // exceeds the body's bytes — reject rather than
+                    // push `entry_count` zero-length entries (an
+                    // attacker-controlled unbounded `Vec` growth).
                     let remaining = payload.len() - cursor;
-                    remaining.checked_div(n).unwrap_or(0)
+                    let sz = remaining.checked_div(n).unwrap_or(0);
+                    if sz == 0 {
+                        return Err(Error::invalid(format!(
+                            "MOV: sgpd v0 entry_count {n} exceeds {remaining} body bytes \
+                             (zero-size implicit entries)"
+                        )));
+                    }
+                    sz
                 }
             }
         };

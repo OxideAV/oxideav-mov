@@ -638,8 +638,11 @@ pub fn parse_chan(payload: &[u8]) -> Result<Chan> {
     // we cap it and stop parsing rather than fail the whole atom (the
     // raw bytes stay in `descriptions` for forensic recovery).
     const REC: usize = 20;
-    let mut parsed = Vec::with_capacity(num as usize);
     let cap = (descriptions_blob.len() / REC).min(num as usize);
+    // Allocate for the byte-backed entry count, not the declared one —
+    // a forged `num` must not drive `Vec::with_capacity` beyond what
+    // the (64 MiB-capped) atom body can actually hold.
+    let mut parsed = Vec::with_capacity(cap);
     for i in 0..cap {
         let off = i * REC;
         let label = u32::from_be_bytes([
@@ -795,6 +798,20 @@ pub fn parse_keys(payload: &[u8]) -> Result<Vec<(String, [u8; 4])>> {
     }
     let n = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
     let mut p = 8usize;
+    // Bound the up-front allocation: every key entry carries at least
+    // 8 bytes (`[size:4][namespace:4]`, with `size >= 8` enforced
+    // below), so a declared count above `(payload.len() - 8) / 8`
+    // cannot fit even the lightest representation — refuse before
+    // `Vec::with_capacity` turns the attacker-supplied count into a
+    // multi-gigabyte allocation. (The per-entry loop would reject the
+    // same input as truncated; this just front-loads the rejection to
+    // the cheap arithmetic check.)
+    let remaining = payload.len() - 8;
+    if (n as u64).saturating_mul(8) > remaining as u64 {
+        return Err(Error::invalid(format!(
+            "MOV: keys entry_count {n} cannot fit in {remaining} body bytes"
+        )));
+    }
     let mut out = Vec::with_capacity(n as usize);
     for _ in 0..n {
         if p + 8 > payload.len() {
