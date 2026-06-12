@@ -1277,6 +1277,46 @@ reproducer, the arithmetic rejection, the exact-fit boundary
 acceptance, and end-to-end `sgpd`-v0 / `stsd` over-declared-count
 sweeps).
 
+Round 283 wires **compressed movie resources end-to-end**: the
+round-259 `cmov` / `dcom` / `cmvd` parsers now feed an actual
+decompression step and the demuxer opens compressed-movie files
+transparently (QTFF pp. 80 – 81 / Table 2-5; p. 30 — "the movie atom
+contains only a single child atom — the compressed movie atom
+('cmov'). When this child atom is uncompressed, its contents conform
+to the structure shown in the following illustration", i.e. the
+standard uncompressed movie resource, a complete `moov` atom). New
+[`Cmov::decompress`] inflates the `cmvd` payload through the
+workspace's `compcol` crate (RFC 1950 zlib — the conventional `dcom`
+FourCC; any other algorithm value errors with the verbatim bytes so a
+caller can route the payload to its own decompressor), bounded
+against decompression bombs by the declared 32-bit uncompressed size
+(QTFF p. 81 makes the size word authoritative — output is capped at
+it and a length mismatch rejects). The `moov` walker recognises a
+`cmov` child, decompresses it, validates the result is a complete
+`moov` atom under the crate-wide 64 MiB in-memory cap, and re-enters
+the same walk over an in-memory cursor — every downstream field
+(tracks, sample tables, meta, mvex, rmra, …) populates exactly as for
+an uncompressed file, and chunk offsets in the decompressed `moov`
+address the host file's `mdat` unchanged. A second compression layer
+inside the decompressed resource is rejected (p. 30 describes a
+single layer), closing the recursion-bomb shape. The new
+`MovDemuxer::compressed_movie_algorithm` field surfaces the `dcom`
+FourCC (`None` for the common uncompressed layout), and
+`probe_reference_movies` sees through the compression layer so
+compressed reference movies still resolve aliases. Writer-side
+counterparts land for round-trip fidelity: [`compress_movie_resource`]
+builds a spec-shaped [`Cmov`] from an uncompressed movie resource and
+[`Cmov::to_body_bytes`] serializes the Table 2-5 `dcom` + `cmvd`
+children. 6 new unit tests in `src/cmov.rs` (compress/decompress
+round-trip, serialize/re-parse round-trip, non-zlib rejection,
+under-/over-declared size rejection, corrupt-stream rejection) plus 8
+end-to-end tests in `tests/synth_round283_cmov.rs` (compressed and
+uncompressed layouts open to identical track/packet state, the
+algorithm-FourCC surface, non-zlib / size-mismatch / nested-cmov /
+non-moov-resource / oversize-declaration / truncated-stream
+rejections) pin the behaviour. The daily fuzz harness reaches the
+decompression path automatically through `MovDemuxer::open`.
+
 ## Follow-ups
 
 - `MovMuxer` write-side `saiz` / `saio` emission at either `stbl` or
@@ -1294,13 +1334,13 @@ sweeps).
   the math against the QTFF worked example via synth fixtures, but a
   real `ffmpeg -filter:v setpts=PTS*2` reference would harden against
   rounding-convention drift.
-- Compressed-movie (`cmov`) `moov`-walker integration: round 259
-  ships `parse_cmov` / `parse_dcom` / `parse_cmvd` as free-function
-  entry points, but the top-level `moov` walker still ignores the
-  atom. Wiring it in needs a decompressor for the `dcom` algorithm
-  FourCC (commonly `'zlib'`); the workspace's compression crate is
-  the natural producer, and the uncompressed inner bytes feed back
-  through the existing `moov` parser unchanged.
+- `MovMuxer` write-side `cmov` emission: round 283 lands the full
+  read path plus the `compress_movie_resource` / `Cmov::to_body_bytes`
+  building blocks, but the muxer never elects to compress the movie
+  resource it writes (the QTFF p. 81 "Allowing QuickTime to Compress
+  the Movie Resource" flatten-time option). An opt-in muxer flag
+  could wrap the serialized `moov` body in `moov > cmov > dcom+cmvd`
+  at finalize time.
 - The Motion-JPEG sample-data surface itself (QTFF pp. 94 – 97):
   with both default tables (`mjqt` round 267, `mjht` round 279) now
   typed, the remaining grounded Motion-JPEG work is the format A

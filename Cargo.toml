@@ -27,3 +27,13 @@ registry = ["dep:oxideav-core"]
 # `default-features = false` and avoid the framework dependency tree
 # entirely.
 oxideav-core = { version = "0.1", optional = true }
+
+# `compcol` (Karpelès Lab's compression collection, the workspace-wide
+# choice for byte-stream codecs) supplies the RFC 1950 zlib stream that
+# QTFF compressed movie resources are stored in (QTFF pp. 80 – 81: the
+# `cmov/dcom` atom names the lossless algorithm and `'zlib'` is the
+# conventional value). `default-features = false` keeps the dependency
+# to exactly that one algorithm. Present in both the registry and the
+# standalone build paths — the decompression step is part of the core
+# parsing surface, not of the framework wiring.
+compcol = { version = "0.6", default-features = false, features = ["zlib"] }

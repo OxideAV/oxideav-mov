@@ -33,6 +33,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "compcol"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee26dd71986eb7da02906b1e0835c4a0c5693a4c5d5d8cd1d769acdb9812f993"
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -103,6 +109,7 @@ dependencies = [
 name = "oxideav-mov"
 version = "0.0.3"
 dependencies = [
+ "compcol",
  "oxideav-core",
 ]
 

@@ -71,8 +71,8 @@ pub use chapter::{
 };
 pub use clip::{parse_clip, parse_crgn, Clipping, ClippingRegion, QdRect};
 pub use cmov::{
-    parse_cmov, parse_cmvd, parse_dcom, Cmov, Cmvd, Dcom, CMVD_MIN_BODY_LEN, DCOM_ALG_ZLIB,
-    DCOM_BODY_LEN,
+    compress as compress_movie_resource, parse_cmov, parse_cmvd, parse_dcom, Cmov, Cmvd, Dcom,
+    CMVD_MIN_BODY_LEN, DCOM_ALG_ZLIB, DCOM_BODY_LEN,
 };
 pub use ctab::{parse_ctab, ColorTableEntry, Ctab};
 pub use demuxer::{open_file_url, MovDemuxer, MAX_ALIAS_DEPTH};

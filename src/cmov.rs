@@ -24,16 +24,17 @@
 //!
 //! ## Scope of this module
 //!
-//! The parser surfaces the **on-disk structure** of all three atoms; it
-//! does **not** perform the decompression step. Decompression is a
-//! follow-up concern — QTFF Table 2-5 names only the layout, and the
-//! `dcom` four-character code (commonly `'zlib'` in field-observed files
-//! but the spec does not mandate any particular value) selects a
-//! decompressor that the caller is responsible for invoking. Surfacing
-//! the parsed `algorithm` FourCC + the compressed payload + the
-//! uncompressed size keeps the parser narrow (clean-room: only what the
-//! spec tells us in bytes) and lets a separate round wire in the
-//! decompressor through the workspace's compression crate.
+//! The parsers surface the **on-disk structure** of all three atoms,
+//! and [`Cmov::decompress`] performs the decompression step for the
+//! conventional `'zlib'` algorithm through the workspace's `compcol`
+//! crate (RFC 1950 stream). The `dcom` four-character code (commonly
+//! `'zlib'` in field-observed files, but the spec does not mandate any
+//! particular value) selects the decompressor; a FourCC this module
+//! does not implement surfaces as an error carrying the verbatim
+//! bytes, so a caller with its own decompressor can still drive
+//! [`Cmvd::compressed_data`] directly. The writer-side counterparts
+//! ([`compress`] / [`Cmov::to_body_bytes`]) build a spec-shaped `cmov`
+//! body from an uncompressed movie resource so the pair round-trips.
 //!
 //! ## QTFF lineage and ISO BMFF
 //!
@@ -142,6 +143,105 @@ impl Cmvd {
     pub fn compressed_size(&self) -> usize {
         self.compressed_data.len()
     }
+}
+
+impl Cmov {
+    /// Decompress the wrapped movie resource (QTFF pp. 80 – 81).
+    ///
+    /// Dispatches on the [`Dcom::algorithm`] FourCC; the only
+    /// algorithm implemented is the conventional `'zlib'`
+    /// ([`DCOM_ALG_ZLIB`], RFC 1950) — any other FourCC returns
+    /// `Error::invalid` carrying the verbatim bytes so the caller can
+    /// route [`Cmvd::compressed_data`] to its own decompressor.
+    ///
+    /// Bounded against decompression bombs: the decoder refuses to
+    /// produce more than the declared [`Cmvd::uncompressed_size`]
+    /// bytes (QTFF p. 81: "The first 32-bit integer in the compressed
+    /// movie data atom indicates the uncompressed size of the movie
+    /// resource"), and a decoded stream whose length does not equal
+    /// that declaration is rejected as a writer error — the size word
+    /// exists precisely so a reader can pre-validate the output.
+    ///
+    /// On success the returned bytes are the complete uncompressed
+    /// movie resource — per QTFF p. 30 ("When this child atom is
+    /// uncompressed, its contents conform to the structure shown in
+    /// the following illustration"), a full `moov` atom including its
+    /// own size/type header.
+    pub fn decompress(&self) -> Result<Vec<u8>> {
+        if !self.dcom.is_zlib() {
+            return Err(Error::invalid(format!(
+                "MOV: cmov dcom algorithm '{}' is not implemented (only 'zlib'; QTFF p. 81 \
+                 names the field generically)",
+                String::from_utf8_lossy(&self.dcom.algorithm)
+            )));
+        }
+        let declared = self.cmvd.uncompressed_size as u64;
+        let decoded = compcol::vec::decompress_to_vec_capped::<compcol::zlib::Zlib>(
+            &self.cmvd.compressed_data,
+            declared,
+        )
+        .map_err(|e| Error::invalid(format!("MOV: cmvd zlib decompression failed: {e}")))?;
+        if decoded.len() as u64 != declared {
+            return Err(Error::invalid(format!(
+                "MOV: cmvd decompressed to {} bytes but declared uncompressed size is {declared} \
+                 (QTFF p. 81)",
+                decoded.len()
+            )));
+        }
+        Ok(decoded)
+    }
+
+    /// Serialize this `cmov`'s **body** — the two child atoms (`dcom`
+    /// then `cmvd`, the QTFF Table 2-5 order) each wrapped in the
+    /// standard 8-byte size/type header. The caller wraps the result
+    /// in the `cmov` atom header and that in turn in the outer `moov`
+    /// header to produce the complete compressed-movie layout of
+    /// QTFF p. 81. Round-trips through [`parse_cmov`].
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let cmvd_body_len = CMVD_MIN_BODY_LEN + self.cmvd.compressed_data.len();
+        let mut out = Vec::with_capacity(8 + DCOM_BODY_LEN + 8 + cmvd_body_len);
+        // dcom — fixed 12-byte atom (8-byte header + 4-byte FourCC).
+        out.extend_from_slice(&((8 + DCOM_BODY_LEN) as u32).to_be_bytes());
+        out.extend_from_slice(b"dcom");
+        out.extend_from_slice(&self.dcom.algorithm);
+        // cmvd — 8-byte header + 4-byte size word + compressed run.
+        out.extend_from_slice(&((8 + cmvd_body_len) as u32).to_be_bytes());
+        out.extend_from_slice(b"cmvd");
+        out.extend_from_slice(&self.cmvd.uncompressed_size.to_be_bytes());
+        out.extend_from_slice(&self.cmvd.compressed_data);
+        out
+    }
+}
+
+/// Compress an uncompressed movie resource into a [`Cmov`] using the
+/// conventional `'zlib'` algorithm (QTFF p. 81; RFC 1950 via the
+/// workspace's `compcol` crate) — the writer-side counterpart of
+/// [`Cmov::decompress`].
+///
+/// `movie_resource` is the complete uncompressed movie resource (per
+/// QTFF p. 30, a full `moov` atom including its own header). Returns
+/// `Error::invalid` when the input exceeds `u32::MAX` bytes — the
+/// `cmvd` size word is a 32-bit field (QTFF p. 81) and cannot declare
+/// a larger resource.
+pub fn compress(movie_resource: &[u8]) -> Result<Cmov> {
+    let uncompressed_size = u32::try_from(movie_resource.len()).map_err(|_| {
+        Error::invalid(format!(
+            "MOV: movie resource {} bytes exceeds the 32-bit cmvd uncompressed-size field \
+             (QTFF p. 81)",
+            movie_resource.len()
+        ))
+    })?;
+    let compressed_data = compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(movie_resource)
+        .map_err(|e| Error::invalid(format!("MOV: cmvd zlib compression failed: {e}")))?;
+    Ok(Cmov {
+        dcom: Dcom {
+            algorithm: DCOM_ALG_ZLIB,
+        },
+        cmvd: Cmvd {
+            uncompressed_size,
+            compressed_data,
+        },
+    })
 }
 
 /// Parsed Compressed Movie atom (`cmov`, QTFF p. 81).
@@ -495,6 +595,74 @@ mod tests {
         assert_eq!(cmov.dcom.algorithm, DCOM_ALG_ZLIB);
         assert_eq!(cmov.cmvd.uncompressed_size, 64);
         assert_eq!(cmov.cmvd.compressed_data, vec![0xAA, 0xBB, 0xCC]);
+    }
+
+    #[test]
+    fn compress_decompress_round_trips() {
+        // Writer-side `compress` (QTFF p. 81 'zlib') feeds the
+        // reader-side `Cmov::decompress` and reproduces the input
+        // byte-for-byte, with the size word filled in correctly.
+        let resource: Vec<u8> = (0u16..512).map(|i| (i % 251) as u8).collect();
+        let cmov = compress(&resource).unwrap();
+        assert!(cmov.dcom.is_zlib());
+        assert_eq!(cmov.cmvd.uncompressed_size as usize, resource.len());
+        assert_eq!(cmov.decompress().unwrap(), resource);
+    }
+
+    #[test]
+    fn to_body_bytes_round_trips_through_parse_cmov() {
+        // Serialized body (dcom + cmvd children per Table 2-5)
+        // re-parses into an equal Cmov.
+        let cmov = compress(b"movie resource bytes").unwrap();
+        let body = cmov.to_body_bytes();
+        let reparsed = parse_cmov(&body).unwrap();
+        assert_eq!(reparsed, cmov);
+        assert_eq!(reparsed.decompress().unwrap(), b"movie resource bytes");
+    }
+
+    #[test]
+    fn decompress_non_zlib_algorithm_rejects() {
+        // QTFF p. 81 names the dcom field generically; an algorithm
+        // we don't implement must error rather than misinterpret the
+        // payload as a zlib stream.
+        let mut cmov = compress(b"payload").unwrap();
+        cmov.dcom.algorithm = *b"none";
+        assert!(cmov.decompress().is_err());
+    }
+
+    #[test]
+    fn decompress_under_declared_size_rejects_without_unbounded_growth() {
+        // A writer (or attacker) that declares a size smaller than
+        // the stream actually inflates to must hit the output cap —
+        // the declared word bounds the allocation (QTFF p. 81 makes
+        // it the authoritative uncompressed size).
+        let mut cmov = compress(&vec![0u8; 4096]).unwrap();
+        cmov.cmvd.uncompressed_size = 16;
+        assert!(cmov.decompress().is_err());
+    }
+
+    #[test]
+    fn decompress_over_declared_size_rejects() {
+        // The dual writer error: a declared size larger than what the
+        // stream produces is a length mismatch, not a silent accept.
+        let mut cmov = compress(b"twelve bytes").unwrap();
+        cmov.cmvd.uncompressed_size += 1;
+        assert!(cmov.decompress().is_err());
+    }
+
+    #[test]
+    fn decompress_corrupt_stream_rejects() {
+        // Garbage that is not an RFC 1950 stream errors cleanly.
+        let cmov = Cmov {
+            dcom: Dcom {
+                algorithm: DCOM_ALG_ZLIB,
+            },
+            cmvd: Cmvd {
+                uncompressed_size: 64,
+                compressed_data: vec![0xFF, 0x00, 0xAB, 0xCD, 0xEF],
+            },
+        };
+        assert!(cmov.decompress().is_err());
     }
 
     #[test]

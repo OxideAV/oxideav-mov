@@ -318,6 +318,10 @@ pub const fn fourcc(s: &str) -> [u8; 4] {
 // walker but parsed in later rounds.
 pub const FTYP: [u8; 4] = fourcc("ftyp");
 pub const MOOV: [u8; 4] = fourcc("moov");
+/// Round 283 — Compressed Movie atom (QTFF pp. 80 – 81, Table 2-5).
+/// The single `moov` child of a compressed-movie file; wraps `dcom`
+/// + `cmvd`.
+pub const CMOV: [u8; 4] = fourcc("cmov");
 /// Round 105 — Progressive Download Information Box (ISO/IEC 14496-12
 /// §8.1.3). File-level FullBox of `(rate, initial_delay)` pairs.
 pub const PDIN: [u8; 4] = fourcc("pdin");

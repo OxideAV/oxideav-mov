@@ -9,19 +9,20 @@
 //! monotonically-increasing read pattern friendly to disk and
 //! mmap-backed inputs.
 
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::atom::{
-    read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CO64, CSLG, CTAB, CTTS,
-    DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, IMAP, KEYS, LOAD, MATT, MDAT,
-    MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PADB, PDIN, PNOT, PRFT, PROF, RDRF, RMCD,
-    RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, SSIX, STBL,
-    STCO, STDP, STSC, STSD, STSH, STSS, STSZ, STTS, STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK,
-    TREF, TRGR, UDTA, UUID, VMHD, WIDE,
+    read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CMOV, CO64, CSLG, CTAB,
+    CTTS, DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, IMAP, KEYS, LOAD, MATT,
+    MAX_INMEMORY_ATOM_BODY, MDAT, MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PADB, PDIN,
+    PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD,
+    SIDX, SKIP, SMHD, SSIX, STBL, STCO, STDP, STSC, STSD, STSH, STSS, STSZ, STTS, STYP, STZ2, SUBS,
+    TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
 use crate::clip::{parse_clip, Clipping};
+use crate::cmov::parse_cmov;
 use crate::ctab::{parse_ctab, Ctab};
 use crate::edit::{parse_elst, EditList};
 use crate::fragment::{parse_mfra, parse_mvex, resolve_traf_samples, Mehd, Tfra, TrexDefaults};
@@ -87,6 +88,16 @@ pub struct MovDemuxer {
     /// the parsed alias list around so callers that treat `rmra` as
     /// purely informational can still inspect it.
     pub reference_movies: Vec<ReferenceMovie>,
+    /// `dcom` compression-algorithm FourCC when the input stored its
+    /// movie resource compressed (QTFF pp. 80 – 81: the top-level
+    /// `moov` carried a single `cmov` child, which `open` decompressed
+    /// and re-parsed transparently — every other field on this struct
+    /// reflects the *decompressed* movie resource). `None` for the
+    /// common uncompressed layout. The only FourCC the decompressor
+    /// implements is the conventional `'zlib'`
+    /// ([`crate::cmov::DCOM_ALG_ZLIB`]); any other value fails the
+    /// open with a spec-citing error rather than landing here.
+    pub compressed_movie_algorithm: Option<[u8; 4]>,
     /// Movie-level ISO BMFF §8.11 `meta` box, when the file's
     /// `moov/meta` is in the ISO/IEC 14496-12 (HEIF / MIAF / MPEG-7)
     /// shape rather than the Apple key-value shape (which lives in
@@ -400,6 +411,26 @@ impl MovDemuxer {
                 walk_children(input, Some(body_end), |r, child| {
                     if child.fourcc == RMRA {
                         refs = parse_rmra(r, child)?;
+                    } else if child.fourcc == CMOV {
+                        // QTFF pp. 80 – 81: a compressed movie
+                        // resource may itself be a reference movie —
+                        // decompress and scan the inner moov for the
+                        // `rmra` so alias discovery sees through the
+                        // compression layer.
+                        let body = read_payload(r, child)?;
+                        let (_, decoded, inner_hdr) = decompress_cmov_body(&body)?;
+                        let inner_end = inner_hdr
+                            .total_size
+                            .map(|t| inner_hdr.payload_offset + (t - inner_hdr.header_len))
+                            .unwrap_or(decoded.len() as u64);
+                        let mut cur = Cursor::new(decoded);
+                        cur.seek(SeekFrom::Start(inner_hdr.payload_offset))?;
+                        walk_children(&mut cur, Some(inner_end), |r2, c2| {
+                            if c2.fourcc == RMRA {
+                                refs = parse_rmra(r2, c2)?;
+                            }
+                            Ok(())
+                        })?;
                     }
                     Ok(())
                 })?;
@@ -426,6 +457,10 @@ impl MovDemuxer {
         let mut movie_meta: Vec<MetaKeyValue> = Vec::new();
         let mut movie_user_data: Vec<UserDataEntry> = Vec::new();
         let mut reference_movies: Vec<ReferenceMovie> = Vec::new();
+        // QTFF pp. 80 – 81 compressed movie resource: records the
+        // `cmov/dcom` algorithm FourCC when the `moov` walk found (and
+        // transparently decompressed) a compressed movie resource.
+        let mut compressed_movie_algorithm: Option<[u8; 4]> = None;
         let mut movie_bmff_meta: Option<BmffMeta> = None;
         let mut file_bmff_meta: Option<BmffMeta> = None;
         let mut mehd_box: Option<Mehd> = None;
@@ -691,6 +726,13 @@ impl MovDemuxer {
                         &mut leva_box,
                         &mut movie_ctab,
                         &mut movie_clipping,
+                        &mut compressed_movie_algorithm,
+                        // QTFF p. 30: a compressed movie resource is a
+                        // single layer — the decompressed contents
+                        // follow the standard uncompressed structure —
+                        // so only the on-disk (outermost) `moov` may
+                        // carry a `cmov`.
+                        true,
                     )?;
                 }
                 t if t == &META => {
@@ -928,6 +970,7 @@ impl MovDemuxer {
             meta: movie_meta,
             user_data: movie_user_data,
             reference_movies,
+            compressed_movie_algorithm,
             bmff_meta: movie_bmff_meta,
             file_bmff_meta,
             faststart: seen_moov_before_mdat,
@@ -2766,6 +2809,55 @@ fn build_streams(tracks: &[Track], resolver: &dyn CodecResolver) -> Vec<StreamIn
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Decompress a `cmov` atom body (QTFF pp. 80 – 81) and validate the
+/// result is a complete movie resource — per QTFF p. 30 the
+/// decompressed contents are the standard uncompressed structure,
+/// whose outermost atom is `moov`. Returns the `dcom` algorithm
+/// FourCC, the decompressed buffer, and the inner `moov`'s header
+/// (offsets relative to the start of the buffer) so the caller can
+/// re-enter the regular `moov` walk over an in-memory cursor.
+fn decompress_cmov_body(body: &[u8]) -> Result<([u8; 4], Vec<u8>, AtomHeader)> {
+    let cmov = parse_cmov(body)?;
+    // Same in-memory ceiling as `read_payload` (round 162): the
+    // decompressed movie resource is held in RAM in full, so a
+    // declared uncompressed size past the crate-wide cap is rejected
+    // before the decoder allocates toward it.
+    if cmov.cmvd.uncompressed_size as u64 > MAX_INMEMORY_ATOM_BODY {
+        return Err(Error::invalid(format!(
+            "MOV: cmvd declares a {} byte movie resource, over the {MAX_INMEMORY_ATOM_BODY} \
+             byte in-memory cap",
+            cmov.cmvd.uncompressed_size
+        )));
+    }
+    let decoded = cmov.decompress()?;
+    let mut cur = Cursor::new(&decoded);
+    let inner_hdr = read_atom_header(&mut cur)?.ok_or_else(|| {
+        Error::invalid("MOV: decompressed movie resource too short for an atom header (QTFF p. 80)")
+    })?;
+    if inner_hdr.fourcc != MOOV {
+        return Err(Error::invalid(format!(
+            "MOV: decompressed movie resource starts with '{}', expected 'moov' (QTFF p. 30)",
+            inner_hdr.type_str()
+        )));
+    }
+    // Inner injection-robustness check, mirroring the top-level walk:
+    // a forged size word on the decompressed moov must not declare a
+    // body past the end of the buffer.
+    let inner_end = inner_hdr
+        .total_size
+        .map(|t| inner_hdr.payload_offset + (t - inner_hdr.header_len))
+        .unwrap_or(decoded.len() as u64);
+    if inner_end > decoded.len() as u64 {
+        return Err(Error::invalid(format!(
+            "MOV: decompressed moov declares body end {inner_end} past the {} byte movie \
+             resource",
+            decoded.len()
+        )));
+    }
+    Ok((cmov.dcom.algorithm, decoded, inner_hdr))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn parse_moov<R: Read + Seek + ?Sized>(
     r: &mut R,
     hdr: &AtomHeader,
@@ -2781,10 +2873,60 @@ fn parse_moov<R: Read + Seek + ?Sized>(
     leva_out: &mut Option<Leva>,
     ctab_out: &mut Option<Ctab>,
     clipping_out: &mut Option<Clipping>,
+    cmov_alg_out: &mut Option<[u8; 4]>,
+    allow_cmov: bool,
 ) -> Result<()> {
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
     walk_children(r, Some(body_end), |r, child| {
         match &child.fourcc {
+            t if t == &CMOV => {
+                // QTFF pp. 80 – 81 compressed movie resource. The
+                // on-disk `moov` of a compressed-movie file carries a
+                // single `cmov` child; decompressing it yields the
+                // complete uncompressed movie resource (a full `moov`
+                // atom, QTFF p. 30), which re-enters this same walk
+                // over an in-memory cursor so every downstream field
+                // (tracks, meta, mvex, …) populates exactly as for an
+                // uncompressed file.
+                if !allow_cmov {
+                    // QTFF p. 30: "When this child atom is
+                    // uncompressed, its contents conform to the
+                    // structure shown in the following illustration"
+                    // — the standard *uncompressed* layout. A second
+                    // compression layer is not spec-conformant and
+                    // would otherwise allow unbounded recursion.
+                    return Err(Error::invalid(
+                        "MOV: nested cmov inside a decompressed movie resource (QTFF p. 30 \
+                         allows a single compression layer)",
+                    ));
+                }
+                let body = read_payload(r, child)?;
+                let (algorithm, decoded, inner_hdr) = decompress_cmov_body(&body)?;
+                let inner_end = inner_hdr
+                    .total_size
+                    .map(|t| inner_hdr.payload_offset + (t - inner_hdr.header_len))
+                    .unwrap_or(decoded.len() as u64);
+                let mut cur = Cursor::new(decoded);
+                parse_moov(
+                    &mut cur,
+                    &inner_hdr,
+                    inner_end,
+                    mvhd,
+                    tracks,
+                    meta,
+                    user_data,
+                    reference_movies,
+                    bmff_meta,
+                    mehd_out,
+                    trex_out,
+                    leva_out,
+                    ctab_out,
+                    clipping_out,
+                    cmov_alg_out,
+                    false,
+                )?;
+                *cmov_alg_out = Some(algorithm);
+            }
             t if t == &MVHD => {
                 let body = read_payload(r, child)?;
                 *mvhd = Some(parse_mvhd(&body)?);
