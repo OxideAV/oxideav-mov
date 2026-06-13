@@ -1666,6 +1666,22 @@ impl MovDemuxer {
         self.tracks.get(track_index)?.track_selection()
     }
 
+    /// Sub Track boxes (ISO/IEC 14496-12 §8.14.3) for `track_index`,
+    /// when the track's `udta` carries one or more `strk` children. The
+    /// box is `Quantity: Zero or more` (§8.14.3.1) — the returned slice
+    /// is in file order, and is empty when the track declares no sub
+    /// tracks (the common case; sub tracks are used by layered codecs
+    /// such as SVC / MVC). Each entry carries its mandatory `stri` Sub
+    /// Track Information plus the `stsg` Sub Track Sample Group entries
+    /// from its `strd`. QTFF does not define this box; for `.mov` inputs
+    /// it is always empty.
+    pub fn sub_tracks(&self, track_index: usize) -> &[crate::sub_track::SubTrack] {
+        self.tracks
+            .get(track_index)
+            .map(|t| t.sub_tracks())
+            .unwrap_or(&[])
+    }
+
     /// Track Kind entries (ISO/IEC 14496-12 §8.10.4) for `track_index`,
     /// when the track's `udta` carries one or more `kind` children. The
     /// box is `Quantity: Zero or more` (§8.10.4.1) — the returned slice
@@ -3151,6 +3167,12 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
                 // rather than leaving the raw bytes inside the flat
                 // user_data list.
                 track.track_selection = crate::track_selection::find_tsel_in_udta(&body)?;
+                // ISO/IEC 14496-12 §8.14.3 — `strk` (Sub Track box)
+                // lives inside track-level udta, `Quantity: Zero or
+                // more`. Collect every sub track (its mandatory `stri`
+                // plus `stsg` entries from its `strd`) as a typed
+                // surface.
+                track.sub_tracks = crate::sub_track::find_sub_tracks_in_udta(&body)?;
                 // ISO/IEC 14496-12 §8.10.4 — `kind` (Track Kind) lives
                 // inside the same track-level udta, `Quantity: Zero or
                 // more`. Collect every entry as a typed surface.

@@ -234,6 +234,15 @@ pub struct Track {
     /// present — equivalent to "no switching information declared"
     /// per §8.10.3.4. Round 95.
     pub track_selection: Option<TrackSelection>,
+    /// Parsed `strk` Sub Track boxes (ISO/IEC 14496-12 §8.14.3) found
+    /// inside the track-level `udta`. §8.14.3.1 declares the box
+    /// `Quantity: Zero or more`, so a track may declare several sub
+    /// tracks (one per coded layer for SVC / MVC-style media). Each
+    /// entry carries its mandatory `stri` Sub Track Information plus the
+    /// `stsg` Sub Track Sample Group entries from its `strd`. Empty when
+    /// the track carries no `strk`. ISO BMFF-only — QTFF does not define
+    /// this box. Round 293.
+    pub sub_tracks: Vec<crate::sub_track::SubTrack>,
     /// Parsed `kind` Track Kind entries (ISO/IEC 14496-12 §8.10.4) from
     /// the track-level `udta`. Empty when no `kind` child is present.
     /// §8.10.4.1 declares the box `Quantity: Zero or more`, so a track
@@ -509,6 +518,17 @@ impl Track {
     /// peer tracks at session start and during runtime switching.
     pub fn track_selection(&self) -> Option<&TrackSelection> {
         self.track_selection.as_ref()
+    }
+
+    /// Parsed `strk` Sub Track boxes (ISO/IEC 14496-12 §8.14.3) from the
+    /// track-level `udta`. Empty slice when the track declares no sub
+    /// tracks; the box is `Quantity: Zero or more` (§8.14.3.1), so a
+    /// layered-codec track may surface several entries in file order.
+    /// Each [`crate::sub_track::SubTrack`] carries its mandatory `stri`
+    /// Sub Track Information plus any `stsg` Sub Track Sample Group
+    /// entries from its `strd`.
+    pub fn sub_tracks(&self) -> &[crate::sub_track::SubTrack] {
+        &self.sub_tracks
     }
 
     /// Parsed `kind` Track Kind entries (ISO/IEC 14496-12 §8.10.4) from

@@ -105,6 +105,24 @@ preserved verbatim and exposed via `split_csgp_index` /
 `CSGP_FRAGMENT_LOCAL_BIT` for callers resolving `traf`-scope
 descriptions.
 
+Round 293 adds the **Sub Track box family** (`strk` > `stri` + `strd`
+> `stsg`) — ISO/IEC 14496-12 §8.14 (pp. 97–100). Sub tracks assign
+*parts* of a track to alternate / switch groups in the same numbering
+space as track-level grouping (`tkhd.alternate_group` + `tsel`), the
+mechanism layered codecs (SVC / MVC) use to express media alternatives
+that don't map onto whole-track boundaries. `strk` lives in the
+track-level `udta` (`Quantity: Zero or more`, §8.14.3.1); each one
+carries a mandatory `stri` Sub Track Information box (signed
+`switch_group` / `alternate_group`, `sub_track_ID`, and an attribute
+list reusing the §8.10.3.5 descriptive / differentiating taxonomy via
+`ts_attribute_role`) plus a mandatory `strd` Sub Track Definition whose
+`stsg` Sub Track Sample Group children name a `grouping_type` and a
+list of `sgpd` description indices (§8.14.6). `parse_strk` /
+`find_sub_tracks_in_udta` re-walk the same track-level `udta` buffer
+already parsed for `tsel` and `kind`, surfacing the typed list via
+`Track::sub_tracks()` / `MovDemuxer::sub_tracks(track_index)`. ISO
+BMFF-only — empty for `.mov` inputs.
+
 Round 98 parses the **Independent and Disposable Samples Box**
 (`sdtp`) — ISO/IEC 14496-12 §8.6.4 — into the per-track sample table.
 The box carries one packed byte per sample (no on-disk count field;

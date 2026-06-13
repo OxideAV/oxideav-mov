@@ -40,6 +40,7 @@ pub mod sample_table;
 pub mod sidx;
 pub mod ssix;
 pub mod styp;
+pub mod sub_track;
 pub mod timecode;
 pub mod track;
 pub mod track_group;
@@ -136,6 +137,10 @@ pub use sample_table::{
 pub use sidx::{parse_sidx, ReferenceType, Sidx, SidxReference};
 pub use ssix::{parse_ssix, Ssix, SsixRange, SsixSubsegment};
 pub use styp::{parse_styp, Styp};
+pub use sub_track::{
+    find_sub_tracks_in_udta, parse_stri, parse_strk, parse_stsg, SubTrack, SubTrackInformation,
+    SubTrackSampleGroup,
+};
 pub use timecode::{
     parse_tmcd_sample_description, Tmcd, TMCD_FLAG_24_HOUR, TMCD_FLAG_COUNTER,
     TMCD_FLAG_DROP_FRAME, TMCD_FLAG_NEGATIVES_OK,
