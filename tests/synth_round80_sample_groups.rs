@@ -326,6 +326,98 @@ fn v2_sgpd_default_index_falls_back_when_sbgp_says_zero() {
     }
 }
 
+/// Build a 4-sample audio QT file carrying a `csgp` (Compact Sample
+/// to Group) atom plus its paired `sgpd`. Mirrors
+/// [`build_audio_qt_with_sample_groups`] but pushes a `csgp` fourcc.
+fn build_audio_qt_with_csgp(csgp_payload: &[u8], sgpd_payload: &[u8]) -> Vec<u8> {
+    let mdat_payload = b"\x01\x02\x03\x04\x05\x06\x07\x08";
+
+    let build_file = |chunk_offset: u32| -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut ftyp = Vec::new();
+        ftyp.extend_from_slice(b"qt  ");
+        ftyp.extend_from_slice(&0u32.to_be_bytes());
+        ftyp.extend_from_slice(b"qt  ");
+        push_atom(&mut out, *b"ftyp", &ftyp);
+
+        let mut moov = Vec::new();
+        push_atom(&mut moov, *b"mvhd", &build_mvhd(600, 120));
+        let mut trak = Vec::new();
+        push_atom(&mut trak, *b"tkhd", &build_tkhd(1, 120, 0, 0));
+        let mut mdia = Vec::new();
+        push_atom(&mut mdia, *b"mdhd", &build_mdhd(600, 120));
+        push_atom(&mut mdia, *b"hdlr", &build_hdlr(b"mhlr", b"soun"));
+        let mut minf = Vec::new();
+        push_atom(&mut minf, *b"smhd", &[0u8; 8]);
+        let mut stbl = Vec::new();
+        push_atom(
+            &mut stbl,
+            *b"stsd",
+            &build_stsd_audio(b"mp4a", 2, 16, 48000, &[]),
+        );
+        push_atom(&mut stbl, *b"stts", &build_stts_single(4, 30));
+        push_atom(&mut stbl, *b"stsc", &build_stsc_single(4));
+        push_atom(&mut stbl, *b"stsz", &build_stsz_constant(2, 4));
+        push_atom(&mut stbl, *b"stco", &build_stco_single(chunk_offset));
+        push_atom(&mut stbl, *b"csgp", csgp_payload);
+        push_atom(&mut stbl, *b"sgpd", sgpd_payload);
+        push_atom(&mut minf, *b"stbl", &stbl);
+        push_atom(&mut mdia, *b"minf", &minf);
+        push_atom(&mut trak, *b"mdia", &mdia);
+        push_atom(&mut moov, *b"trak", &trak);
+        push_atom(&mut out, *b"moov", &moov);
+        push_atom(&mut out, *b"mdat", mdat_payload);
+        out
+    };
+
+    let pass1 = build_file(0);
+    let mdat_fourcc_pos = pass1.windows(4).position(|w| w == b"mdat").unwrap() as u32;
+    build_file(mdat_fourcc_pos + 4)
+}
+
+#[test]
+fn csgp_compact_group_resolves_per_sample_through_demuxer() {
+    // 4-sample audio. csgp: one pattern of length 2 (indices 1,2)
+    // replayed across all 4 samples → 1,2,1,2. sgpd/'prol' v1: two
+    // entries, roll_distance -100 (entry 1) and -200 (entry 2).
+    // index_size_code=1 (8-bit), count_size_code=1, pattern_size_code=1.
+    let mut csgp = Vec::new();
+    csgp.push(0u8); // version
+                    // flags: index_code=1 (bits0..1), count_code=1 (bits2..3),
+                    // pattern_code=1 (bits4..5), gtp_present=0.
+    let flags: u32 = 1 | (1 << 2) | (1 << 4);
+    csgp.extend_from_slice(&flags.to_be_bytes()[1..4]);
+    csgp.extend_from_slice(b"prol"); // grouping_type
+    csgp.extend_from_slice(&1u32.to_be_bytes()); // pattern_count
+                                                 // pattern table (all 8-bit): pattern_length=2, sample_count=4.
+    csgp.push(2); // pattern_length[0]
+    csgp.push(4); // sample_count[0]
+                  // index table (8-bit each): 1, 2.
+    csgp.push(1);
+    csgp.push(2);
+
+    let sgpd = build_sgpd_v1_fixed(
+        b"prol",
+        2,
+        &[
+            (-100i16).to_be_bytes().to_vec(),
+            (-200i16).to_be_bytes().to_vec(),
+        ],
+    );
+
+    let bytes = build_audio_qt_with_csgp(&csgp, &sgpd);
+    let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+    let d = MovDemuxer::open(cur).expect("open csgp fixture");
+
+    // Pattern 1,2,1,2 → samples 0,2 → entry 1 (-100); 1,3 → entry 2 (-200).
+    assert_eq!(d.audio_preroll_for(0, 0), Some(-100));
+    assert_eq!(d.audio_preroll_for(0, 1), Some(-200));
+    assert_eq!(d.audio_preroll_for(0, 2), Some(-100));
+    assert_eq!(d.audio_preroll_for(0, 3), Some(-200));
+    // Sample beyond the covered 4 → no group.
+    assert_eq!(d.audio_preroll_for(0, 4), None);
+}
+
 #[test]
 fn opus_negative_preroll_round_trips_signed() {
     // Opus codec-priming convention: 80 ms @ 48 kHz = 3840 samples.

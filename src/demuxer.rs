@@ -12,12 +12,12 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::atom::{
-    read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CMOV, CO64, CSLG, CTAB,
-    CTTS, DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, IMAP, KEYS, LOAD, MATT,
-    MAX_INMEMORY_ATOM_BODY, MDAT, MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PADB, PDIN,
-    PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD,
-    SIDX, SKIP, SMHD, SSIX, STBL, STCO, STDP, STSC, STSD, STSH, STSS, STSZ, STTS, STYP, STZ2, SUBS,
-    TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID, VMHD, WIDE,
+    read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CMOV, CO64, CSGP, CSLG,
+    CTAB, CTTS, DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, IMAP, KEYS, LOAD,
+    MATT, MAX_INMEMORY_ATOM_BODY, MDAT, MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PADB,
+    PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP,
+    SGPD, SIDX, SKIP, SMHD, SSIX, STBL, STCO, STDP, STSC, STSD, STSH, STSS, STSZ, STTS, STYP, STZ2,
+    SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -36,7 +36,7 @@ use crate::pnot::{parse_pnot, Pnot};
 use crate::prft::{parse_prft, Prft};
 use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
 use crate::sample_aux::{parse_saio, parse_saiz};
-use crate::sample_groups::{parse_sbgp, parse_sgpd};
+use crate::sample_groups::{parse_csgp, parse_sbgp, parse_sgpd};
 use crate::sample_table::{
     parse_co64, parse_ctts, parse_padb, parse_sdtp, parse_stco, parse_stdp, parse_stsc, parse_stsh,
     parse_stss, parse_stsz, parse_stts, parse_stz2, parse_subs, SampleEntry, SampleSizeSource,
@@ -3566,6 +3566,25 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
                         && s.grouping_type_parameter == sbgp.grouping_type_parameter
                 }) {
                     table.sbgp.push(sbgp);
+                }
+            }
+            t if t == &CSGP => {
+                // Compact Sample to Group Box (post-2015,
+                // docs/container/isobmff/post-2015-additions.md). It
+                // is expanded to a plain `SampleToGroup` so the rest
+                // of the crate treats it identically to `sbgp`. The
+                // same "at most one per (grouping_type,
+                // grouping_type_parameter)" rule applies; a `csgp`
+                // and `sbgp` for the same pair would be a malformed
+                // file, so first-wins (whichever atom appears first)
+                // matches the duplicate policy used for `sbgp` above.
+                let body = read_payload(r, child)?;
+                let csgp = parse_csgp(&body)?;
+                if !table.sbgp.iter().any(|s| {
+                    s.grouping_type == csgp.grouping_type
+                        && s.grouping_type_parameter == csgp.grouping_type_parameter
+                }) {
+                    table.sbgp.push(csgp);
                 }
             }
             t if t == &SGPD => {

@@ -505,6 +505,9 @@ pub const CSLG: [u8; 4] = fourcc("cslg");
 // Round-80: Sample-group atoms (ISO/IEC 14496-12 §8.9).
 pub const SBGP: [u8; 4] = fourcc("sbgp"); // Sample-to-Group Box
 pub const SGPD: [u8; 4] = fourcc("sgpd"); // Sample-Group-Description Box
+                                          // Compact Sample to Group Box (ISO/IEC 14496-12:2020 §8.9.5 —
+                                          // post-2015 box; see docs/container/isobmff/post-2015-additions.md).
+pub const CSGP: [u8; 4] = fourcc("csgp");
 
 // Round-4: Data information sub-atoms.
 pub const URL_: [u8; 4] = fourcc("url ");

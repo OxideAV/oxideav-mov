@@ -88,6 +88,23 @@ boxes with the same `grouping_type` inside a single `stbl` are
 silently de-duped (spec §8.9.2.3 forbids them, but ffmpeg sometimes
 emits two; we keep the first).
 
+Round 290 adds the **Compact Sample to Group Box** (`csgp`) — the
+post-2015 ISO/IEC 14496-12:2020 §8.9.5 dense form of `sbgp`
+(`docs/container/isobmff/post-2015-additions.md`). `csgp` overloads
+the `FullBox.flags` field into three 2-bit width selectors
+(`index_size_code` / `count_size_code` / `pattern_size_code`, each
+mapping `code → 4 << code` bits) plus a `grouping_type_parameter`
+presence bit, then stores a small set of bit-packed *patterns* that
+are replayed across the track. `parse_csgp` expands the compact form
+into the same `SampleToGroup` model the rest of the crate already
+consumes, so every existing per-sample lookup (`roll_distance_for`,
+`audio_preroll_for`, `visual_random_access_for`,
+`random_access_points`) works against a `csgp`-authored track with no
+extra code path. The fragment-local-vs-global index msb convention is
+preserved verbatim and exposed via `split_csgp_index` /
+`CSGP_FRAGMENT_LOCAL_BIT` for callers resolving `traf`-scope
+descriptions.
+
 Round 98 parses the **Independent and Disposable Samples Box**
 (`sdtp`) — ISO/IEC 14496-12 §8.6.4 — into the per-track sample table.
 The box carries one packed byte per sample (no on-disk count field;

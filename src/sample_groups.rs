@@ -240,6 +240,227 @@ pub fn parse_sbgp(payload: &[u8]) -> Result<SampleToGroup> {
     })
 }
 
+/// The `0x8000_0000` bit of a `csgp`
+/// `sample_group_description_index` (after expansion the index is
+/// stored in [`SampleToGroupEntry::group_description_index`]). When
+/// set, the index refers to a **fragment-local** `sgpd` (defined in
+/// the same `traf`); when clear, a **global** one (defined in the
+/// `moov`-level `stbl`). See
+/// `docs/container/isobmff/post-2015-additions.md` ("Fragment-local
+/// vs global indices").
+pub const CSGP_FRAGMENT_LOCAL_BIT: u32 = 0x8000_0000;
+
+/// Result of expanding one `csgp` `sample_group_description_index`.
+/// `index` is the value with the fragment-local bit *masked off* (so
+/// it lines up with the 1-based indexing used by
+/// [`SampleGroupDescription::entry`]); `fragment_local` records
+/// whether the msb was set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CsgpIndex {
+    pub index: u32,
+    pub fragment_local: bool,
+}
+
+/// Split a raw `csgp` description index into the fragment-local flag
+/// plus the masked 1-based index. Only meaningful when the `csgp`
+/// lived inside a `traf`; for a `stbl`-scope `csgp` the msb is part
+/// of the index value, so callers that know the box came from `stbl`
+/// should not apply this split.
+pub fn split_csgp_index(raw: u32) -> CsgpIndex {
+    CsgpIndex {
+        index: raw & !CSGP_FRAGMENT_LOCAL_BIT,
+        fragment_local: (raw & CSGP_FRAGMENT_LOCAL_BIT) != 0,
+    }
+}
+
+/// Map a `csgp` 2-bit size code to its on-wire field width in bits.
+/// Per `docs/container/isobmff/post-2015-additions.md`: `width = 4 <<
+/// code` → {0→4, 1→8, 2→16, 3→32}.
+#[inline]
+fn csgp_field_width(code: u32) -> u32 {
+    4 << code
+}
+
+/// MSB-first bit reader over a `csgp` body's variable-width fields.
+struct BitReader<'a> {
+    bytes: &'a [u8],
+    /// Absolute bit position from the start of `bytes`.
+    bit_pos: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(bytes: &'a [u8], byte_offset: usize) -> Self {
+        BitReader {
+            bytes,
+            bit_pos: byte_offset * 8,
+        }
+    }
+
+    /// Read `width` bits (`width` ≤ 32) MSB-first as an unsigned
+    /// value. Returns `None` if the body is exhausted.
+    fn read(&mut self, width: u32) -> Option<u32> {
+        if width == 0 {
+            return Some(0);
+        }
+        if self.bit_pos + width as usize > self.bytes.len() * 8 {
+            return None;
+        }
+        let mut value: u32 = 0;
+        for _ in 0..width {
+            let byte = self.bytes[self.bit_pos >> 3];
+            let bit = (byte >> (7 - (self.bit_pos & 7))) & 1;
+            value = (value << 1) | bit as u32;
+            self.bit_pos += 1;
+        }
+        Some(value)
+    }
+
+    /// Number of bytes consumed so far, rounded up — used only for
+    /// diagnostics / asserts in tests.
+    #[cfg(test)]
+    fn byte_cursor_ceil(&self) -> usize {
+        self.bit_pos.div_ceil(8)
+    }
+}
+
+/// Parse a `csgp` payload (Compact Sample to Group Box) and expand it
+/// into a plain [`SampleToGroup`] so the rest of the crate can treat
+/// it identically to a v0/v1 `sbgp`.
+///
+/// Layout (`docs/container/isobmff/post-2015-additions.md`,
+/// "`csgp` — Compact Sample to Group Box"):
+///
+/// ```text
+/// version : u8                       (0)
+/// flags   : u24                      (carries the four sub-fields below)
+///   index_size_code   = flags[0..1]   width selector for description indices
+///   count_size_code   = flags[2..3]   width selector for sample_count
+///   pattern_size_code = flags[4..5]   width selector for pattern_length
+///   grouping_type_parameter_present = flags[6]
+/// grouping_type : [u8; 4]
+/// if grouping_type_parameter_present { grouping_type_parameter : u32 }
+/// pattern_count : u32
+/// pattern_count × { pattern_length[i] : f(pattern_size_code)
+///                   sample_count[i]   : f(count_size_code)   }
+/// for each pattern j, pattern_length[j] × {
+///     sample_group_description_index[j][k] : f(index_size_code)
+/// }
+/// ```
+///
+/// Expansion semantics: pattern `j` defines `pattern_length[j]`
+/// per-sample description indices; that pattern is replayed across
+/// `sample_count[j]` samples (the pattern repeats, sample-by-sample,
+/// wrapping when `sample_count[j] > pattern_length[j]`). The result
+/// is a flat run-length list identical in meaning to `sbgp`.
+///
+/// The fragment-local msb (see [`split_csgp_index`]) is **preserved**
+/// verbatim in `group_description_index`; callers that need to
+/// resolve a fragment-local vs global `sgpd` apply
+/// [`split_csgp_index`] themselves. For a `stbl`-scope `csgp` the bit
+/// is simply part of the index and round-trips unchanged.
+pub fn parse_csgp(payload: &[u8]) -> Result<SampleToGroup> {
+    if payload.len() < 8 {
+        return Err(Error::invalid("MOV: csgp header < 8 bytes"));
+    }
+    // version byte is payload[0] (must be 0); the 24-bit flags carry
+    // the sub-fields.
+    let flags = u32::from_be_bytes([0, payload[1], payload[2], payload[3]]);
+    let index_size_code = flags & 0b11;
+    let count_size_code = (flags >> 2) & 0b11;
+    let pattern_size_code = (flags >> 4) & 0b11;
+    let grouping_type_parameter_present = (flags >> 6) & 1 == 1;
+
+    let index_width = csgp_field_width(index_size_code);
+    let count_width = csgp_field_width(count_size_code);
+    let pattern_width = csgp_field_width(pattern_size_code);
+
+    let mut cursor = 4usize;
+    let grouping_type = [
+        payload[cursor],
+        payload[cursor + 1],
+        payload[cursor + 2],
+        payload[cursor + 3],
+    ];
+    cursor += 4;
+
+    let grouping_type_parameter = if grouping_type_parameter_present {
+        if payload.len() < cursor + 4 {
+            return Err(Error::invalid("MOV: csgp missing grouping_type_parameter"));
+        }
+        let v = read_u32(&payload[cursor..]);
+        cursor += 4;
+        v
+    } else {
+        0
+    };
+
+    if payload.len() < cursor + 4 {
+        return Err(Error::invalid("MOV: csgp missing pattern_count"));
+    }
+    let pattern_count = read_u32(&payload[cursor..]) as usize;
+    cursor += 4;
+
+    // The pattern table and the index table are both bit-packed with
+    // no byte alignment between them — a single MSB-first stream that
+    // starts right after `pattern_count`.
+    let mut bits = BitReader::new(payload, cursor);
+
+    let mut pattern_lengths = Vec::with_capacity(pattern_count.min(payload.len()));
+    let mut sample_counts = Vec::with_capacity(pattern_count.min(payload.len()));
+    for _ in 0..pattern_count {
+        let plen = bits
+            .read(pattern_width)
+            .ok_or_else(|| Error::invalid("MOV: csgp truncated pattern_length"))?;
+        let scount = bits
+            .read(count_width)
+            .ok_or_else(|| Error::invalid("MOV: csgp truncated sample_count"))?;
+        pattern_lengths.push(plen);
+        sample_counts.push(scount);
+    }
+
+    // Expand each pattern into run-length `sbgp` rows. Reading the
+    // per-pattern indices then replaying them sample-by-sample, RLE-
+    // coalescing consecutive equal indices keeps the entry vector
+    // bounded by the on-disk index count rather than the (potentially
+    // huge) expanded sample total.
+    let mut entries: Vec<SampleToGroupEntry> = Vec::new();
+    for j in 0..pattern_count {
+        let plen = pattern_lengths[j];
+        // A zero-length pattern would make the replay modulo undefined;
+        // the spec implies pattern_length ≥ 1, so reject 0 explicitly
+        // rather than divide by zero below.
+        if plen == 0 {
+            return Err(Error::invalid("MOV: csgp pattern_length is zero"));
+        }
+        let mut pattern_indices = Vec::with_capacity(plen as usize);
+        for _ in 0..plen {
+            let idx = bits
+                .read(index_width)
+                .ok_or_else(|| Error::invalid("MOV: csgp truncated description index"))?;
+            pattern_indices.push(idx);
+        }
+        let scount = sample_counts[j];
+        for k in 0..scount {
+            let idx = pattern_indices[(k % plen) as usize];
+            match entries.last_mut() {
+                Some(last) if last.group_description_index == idx => {
+                    last.sample_count += 1;
+                }
+                _ => entries.push(SampleToGroupEntry {
+                    sample_count: 1,
+                    group_description_index: idx,
+                }),
+            }
+        }
+    }
+
+    Ok(SampleToGroup {
+        grouping_type,
+        grouping_type_parameter,
+        entries,
+    })
+}
+
 /// Parse a `sgpd` payload (FullBox `sgpd`, §8.9.3.2).
 ///
 /// Versions handled:
@@ -535,5 +756,195 @@ mod tests {
         assert!(decode_roll(&[0]).is_err());
         assert!(decode_prol(&[]).is_err());
         assert!(decode_rap(&[]).is_err());
+    }
+
+    /// Build a `csgp` body. `*_code` are the 2-bit width selectors;
+    /// patterns is a list of `(sample_count, &[indices])`.
+    fn build_csgp(
+        grouping_type: &[u8; 4],
+        grouping_type_parameter: Option<u32>,
+        index_code: u32,
+        count_code: u32,
+        pattern_code: u32,
+        patterns: &[(u32, &[u32])],
+    ) -> Vec<u8> {
+        let mut flags =
+            (index_code & 0b11) | ((count_code & 0b11) << 2) | ((pattern_code & 0b11) << 4);
+        if grouping_type_parameter.is_some() {
+            flags |= 1 << 6;
+        }
+        let mut p = Vec::new();
+        p.push(0u8); // version
+        let fb = flags.to_be_bytes();
+        p.extend_from_slice(&fb[1..4]); // 24-bit flags
+        p.extend_from_slice(grouping_type);
+        if let Some(gtp) = grouping_type_parameter {
+            p.extend_from_slice(&gtp.to_be_bytes());
+        }
+        p.extend_from_slice(&(patterns.len() as u32).to_be_bytes());
+
+        // Bit-pack the pattern table then the index table, MSB-first,
+        // mirroring the reader.
+        let pw = 4u32 << pattern_code;
+        let cw = 4u32 << count_code;
+        let iw = 4u32 << index_code;
+        let mut acc: u64 = 0;
+        let mut nbits: u32 = 0;
+        let mut out: Vec<u8> = Vec::new();
+        let push = |val: u32, width: u32, acc: &mut u64, nbits: &mut u32, out: &mut Vec<u8>| {
+            *acc = (*acc << width) | (val as u64 & ((1u64 << width) - 1));
+            *nbits += width;
+            while *nbits >= 8 {
+                *nbits -= 8;
+                out.push(((*acc >> *nbits) & 0xff) as u8);
+            }
+        };
+        for (sc, idxs) in patterns {
+            push(idxs.len() as u32, pw, &mut acc, &mut nbits, &mut out);
+            push(*sc, cw, &mut acc, &mut nbits, &mut out);
+        }
+        for (_, idxs) in patterns {
+            for &i in *idxs {
+                push(i, iw, &mut acc, &mut nbits, &mut out);
+            }
+        }
+        if nbits > 0 {
+            out.push(((acc << (8 - nbits)) & 0xff) as u8);
+        }
+        p.extend_from_slice(&out);
+        p
+    }
+
+    #[test]
+    fn csgp_field_width_codes() {
+        assert_eq!(csgp_field_width(0), 4);
+        assert_eq!(csgp_field_width(1), 8);
+        assert_eq!(csgp_field_width(2), 16);
+        assert_eq!(csgp_field_width(3), 32);
+    }
+
+    #[test]
+    fn csgp_single_pattern_expands_like_sbgp() {
+        // One pattern of length 2 (indices 1,2) replayed across 5
+        // samples → 1,2,1,2,1 → RLE rows of count 1 each.
+        // index_code=0 (4-bit), count_code=1 (8-bit), pattern_code=0.
+        let body = build_csgp(b"roll", None, 0, 1, 0, &[(5, &[1, 2])]);
+        let g = parse_csgp(&body).unwrap();
+        assert_eq!(g.grouping_type, *b"roll");
+        assert_eq!(g.grouping_type_parameter, 0);
+        assert_eq!(g.covered_samples(), 5);
+        assert_eq!(g.group_index_for_sample(0), 1);
+        assert_eq!(g.group_index_for_sample(1), 2);
+        assert_eq!(g.group_index_for_sample(2), 1);
+        assert_eq!(g.group_index_for_sample(3), 2);
+        assert_eq!(g.group_index_for_sample(4), 1);
+    }
+
+    #[test]
+    fn csgp_coalesces_consecutive_equal_indices() {
+        // Pattern length 1 (index 3) across 4 samples → all 3 → one
+        // RLE row of sample_count 4.
+        let body = build_csgp(b"abcd", None, 1, 1, 1, &[(4, &[3])]);
+        let g = parse_csgp(&body).unwrap();
+        assert_eq!(g.entries.len(), 1);
+        assert_eq!(g.entries[0].sample_count, 4);
+        assert_eq!(g.entries[0].group_description_index, 3);
+        assert_eq!(g.covered_samples(), 4);
+    }
+
+    #[test]
+    fn csgp_multiple_patterns_concatenate() {
+        // Pattern 0: (3 samples, [1]) → 1,1,1.
+        // Pattern 1: (2 samples, [2,0]) → 2,0.
+        // Flat: 1,1,1,2,0 → RLE [(3,1),(1,2),(1,0)].
+        let body = build_csgp(b"sgrp", None, 0, 0, 0, &[(3, &[1]), (2, &[2, 0])]);
+        let g = parse_csgp(&body).unwrap();
+        assert_eq!(g.entries.len(), 3);
+        assert_eq!(
+            g.entries[0],
+            SampleToGroupEntry {
+                sample_count: 3,
+                group_description_index: 1
+            }
+        );
+        assert_eq!(g.entries[1].group_description_index, 2);
+        assert_eq!(g.entries[2].group_description_index, 0);
+        assert_eq!(g.covered_samples(), 5);
+    }
+
+    #[test]
+    fn csgp_grouping_type_parameter_present() {
+        let body = build_csgp(b"roll", Some(0xcafe_f00d), 1, 1, 1, &[(2, &[1, 1])]);
+        let g = parse_csgp(&body).unwrap();
+        assert_eq!(g.grouping_type_parameter, 0xcafe_f00d);
+        assert_eq!(g.covered_samples(), 2);
+    }
+
+    #[test]
+    fn csgp_wide_index_width_32bit() {
+        // index_code=3 → 32-bit indices, large value round-trips.
+        let body = build_csgp(b"big ", None, 3, 1, 1, &[(1, &[0x1234_5678])]);
+        let g = parse_csgp(&body).unwrap();
+        assert_eq!(g.entries[0].group_description_index, 0x1234_5678);
+    }
+
+    #[test]
+    fn csgp_fragment_local_bit_split() {
+        let raw = CSGP_FRAGMENT_LOCAL_BIT | 5;
+        let s = split_csgp_index(raw);
+        assert!(s.fragment_local);
+        assert_eq!(s.index, 5);
+        let g = split_csgp_index(7);
+        assert!(!g.fragment_local);
+        assert_eq!(g.index, 7);
+    }
+
+    #[test]
+    fn csgp_fragment_local_msb_preserved_in_expansion() {
+        // A fragment-local index (msb set) is kept verbatim in the
+        // expanded SampleToGroup; callers split it on demand.
+        let local = CSGP_FRAGMENT_LOCAL_BIT | 2;
+        let body = build_csgp(b"trfm", None, 3, 1, 1, &[(1, &[local])]);
+        let g = parse_csgp(&body).unwrap();
+        assert_eq!(g.entries[0].group_description_index, local);
+        let split = split_csgp_index(g.entries[0].group_description_index);
+        assert!(split.fragment_local);
+        assert_eq!(split.index, 2);
+    }
+
+    #[test]
+    fn csgp_zero_pattern_length_rejected() {
+        let body = build_csgp(b"roll", None, 1, 1, 1, &[(3, &[])]);
+        assert!(parse_csgp(&body).is_err());
+    }
+
+    #[test]
+    fn csgp_truncated_header_errors() {
+        assert!(parse_csgp(&[0u8; 7]).is_err());
+    }
+
+    #[test]
+    fn csgp_truncated_index_table_errors() {
+        // Declare 1 pattern, length 4, but stop the body short of all
+        // four 16-bit indices.
+        let mut p = Vec::new();
+        p.push(0u8);
+        p.extend_from_slice(&[0, 0, (2u32 << 4) as u8]); // pattern_code=2 (16-bit), others 0
+        p.extend_from_slice(b"roll");
+        p.extend_from_slice(&1u32.to_be_bytes()); // pattern_count
+                                                  // pattern_length=4 (16-bit), sample_count=4 (4-bit)
+        p.extend_from_slice(&4u16.to_be_bytes());
+        p.push(0x40); // 4 in top nibble (4-bit count), low nibble starts indices
+                      // Truncate here — no room for four 4-bit indices.
+        assert!(parse_csgp(&p).is_err());
+    }
+
+    #[test]
+    fn csgp_bitreader_byte_cursor_advances() {
+        // Sanity-check the BitReader cursor accounting.
+        let bytes = [0b1010_0000u8, 0u8];
+        let mut br = BitReader::new(&bytes, 0);
+        assert_eq!(br.read(4), Some(0b1010));
+        assert_eq!(br.byte_cursor_ceil(), 1);
     }
 }
