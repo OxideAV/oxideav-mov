@@ -301,9 +301,15 @@ impl MovMuxer {
     /// [`write_to`](MovMuxer::write_to), each sample's aux blob is laid
     /// into `mdat` contiguously after the track's sample data, a `saiz`
     /// describes the per-sample sizes, and a single-entry `saio` carries
-    /// the absolute file offset of the first blob. The fragmented write
-    /// path ignores the stream (a follow-up can emit the `traf`-scope
-    /// form).
+    /// the absolute file offset of the first blob.
+    ///
+    /// On the next fragmented [`MovMuxer::encode_fragmented_to_vec`] /
+    /// [`write_to_fragmented`](MovMuxer::write_to_fragmented), each
+    /// fragment's slice of the stream is laid into that fragment's
+    /// `mdat` (after every track's sample data) and the matching `traf`
+    /// carries a `saiz` + single-entry `saio` per §8.7.8 / §8.7.9 /
+    /// §8.8.14, with the `saio` offset relative to the enclosing `moof`
+    /// (`default-base-is-moof`).
     ///
     /// Replaces any stream previously attached to the same track.
     pub fn set_sample_aux(&mut self, track_id: u32, stream: SampleAuxStream) -> Result<()> {
@@ -540,20 +546,49 @@ impl MovMuxer {
                 traf_data_offsets.push(do_val);
                 cumulative_in_mdat += run.samples.iter().map(|s| s.data.len() as u64).sum::<u64>();
             }
+            // The auxiliary-information slabs (§8.7.8 / §8.7.9, §8.8.14)
+            // sit in the same `mdat` *after* every track's sample data,
+            // contiguous per traf in track order. Each traf's single
+            // `saio` offset is moof-relative (default-base-is-moof), so
+            // it is `moof_size + 8 (mdat header) + total_sample_bytes +
+            // (cumulative aux bytes of preceding trafs)`.
+            let total_sample_bytes = cumulative_in_mdat;
+            let mut traf_saio_offsets: Vec<u64> = Vec::with_capacity(fragment.len());
+            let mut cumulative_aux: u64 = 0;
+            for run in fragment {
+                let off = moof_size + 8 + total_sample_bytes + cumulative_aux;
+                traf_saio_offsets.push(off);
+                if let Some(blobs) = run.aux {
+                    cumulative_aux += blobs.iter().map(|b| b.len() as u64).sum::<u64>();
+                }
+            }
             // Emit the moof with the real offsets.
-            let moof = build_moof(sequence_number, fragment, &traf_data_offsets);
+            let moof = build_moof(
+                sequence_number,
+                fragment,
+                &traf_data_offsets,
+                &traf_saio_offsets,
+            );
             debug_assert_eq!(
                 (moof.len() as u64) + 8,
                 moof_size,
                 "moof sizing pass mismatch"
             );
             push_atom(&mut out, *b"moof", &moof);
-            // Emit the mdat with all tracks' samples concatenated in
-            // track order (matching the offsets we just baked in).
+            // Emit the mdat: all tracks' samples concatenated in track
+            // order, then all tracks' aux slabs in track order (matching
+            // the trun.data_offset and saio offsets baked in above).
             let mut mdat_payload: Vec<u8> = Vec::new();
             for run in fragment {
                 for s in run.samples {
                     mdat_payload.extend_from_slice(&s.data);
+                }
+            }
+            for run in fragment {
+                if let Some(blobs) = run.aux {
+                    for blob in blobs {
+                        mdat_payload.extend_from_slice(blob);
+                    }
                 }
             }
             push_atom(&mut out, *b"mdat", &mdat_payload);
@@ -860,9 +895,28 @@ fn build_stbl(
 /// time (the spec's size table is `u8`-wide), so the cast here is
 /// lossless.
 fn build_saiz(aux: &SampleAuxStream) -> Vec<u8> {
-    let flags: u32 = if aux.aux_info_type.is_some() { 1 } else { 0 };
-    let sizes: Vec<u8> = aux
-        .per_sample
+    build_saiz_blobs(
+        aux.aux_info_type,
+        aux.aux_info_type_parameter,
+        &aux.per_sample,
+    )
+}
+
+/// Core `saiz` builder shared by the `stbl`-scope ([`build_saiz`]) and
+/// `traf`-scope ([`build_traf`]) write paths. `blobs` is the per-sample
+/// auxiliary-information list for the box's scope (the whole track for
+/// `stbl`, a single fragment's samples for `traf`). The
+/// `(aux_info_type, aux_info_type_parameter)` discriminator is emitted
+/// only when `aux_info_type` is `Some` (gated by the `flags & 1` bit).
+/// Per-sample blob lengths are validated to fit in a `u8` at
+/// [`MovMuxer::set_sample_aux`] time, so the cast here is lossless.
+fn build_saiz_blobs(
+    aux_info_type: Option<[u8; 4]>,
+    aux_info_type_parameter: u32,
+    blobs: &[Vec<u8>],
+) -> Vec<u8> {
+    let flags: u32 = if aux_info_type.is_some() { 1 } else { 0 };
+    let sizes: Vec<u8> = blobs
         .iter()
         .map(|b| b.len().min(u8::MAX as usize) as u8)
         .collect();
@@ -877,16 +931,16 @@ fn build_saiz(aux: &SampleAuxStream) -> Vec<u8> {
     let mut p = Vec::new();
     p.push(0); // version (spec fixes at 0)
     p.extend_from_slice(&flags.to_be_bytes()[1..4]); // 3-byte flags
-    if let Some(t) = aux.aux_info_type {
+    if let Some(t) = aux_info_type {
         p.extend_from_slice(&t);
-        p.extend_from_slice(&aux.aux_info_type_parameter.to_be_bytes());
+        p.extend_from_slice(&aux_info_type_parameter.to_be_bytes());
     }
     if use_default {
         p.push(uniform); // default_sample_info_size
-        p.extend_from_slice(&(aux.per_sample.len() as u32).to_be_bytes());
+        p.extend_from_slice(&(blobs.len() as u32).to_be_bytes());
     } else {
         p.push(0); // default_sample_info_size = 0 ⇒ table follows
-        p.extend_from_slice(&(aux.per_sample.len() as u32).to_be_bytes());
+        p.extend_from_slice(&(blobs.len() as u32).to_be_bytes());
         p.extend_from_slice(&sizes);
     }
     p
@@ -903,14 +957,29 @@ fn build_saiz(aux: &SampleAuxStream) -> Vec<u8> {
 /// defined as in the SampleAuxiliaryInformationSizesBox, which §8.7.8.3
 /// requires to match for a `(saiz, saio)` pair).
 fn build_saio(aux: &SampleAuxStream, aux_offset: u64) -> Vec<u8> {
+    build_saio_offset(aux.aux_info_type, aux.aux_info_type_parameter, aux_offset)
+}
+
+/// Core single-entry `saio` builder shared by the `stbl`-scope
+/// ([`build_saio`]) and `traf`-scope ([`build_traf`]) write paths.
+/// `aux_offset` is the offset the box should carry — *absolute* in the
+/// `stbl` scope (§8.7.9.3) and *relative to the track-fragment base
+/// offset* in the `traf` scope (§8.8.14; with `default-base-is-moof`
+/// set, that base is the enclosing `moof`'s first byte). Selects v1
+/// (64-bit) automatically when the offset exceeds the 32-bit range.
+fn build_saio_offset(
+    aux_info_type: Option<[u8; 4]>,
+    aux_info_type_parameter: u32,
+    aux_offset: u64,
+) -> Vec<u8> {
     let need_v1 = aux_offset > u32::MAX as u64;
-    let flags: u32 = if aux.aux_info_type.is_some() { 1 } else { 0 };
+    let flags: u32 = if aux_info_type.is_some() { 1 } else { 0 };
     let mut p = Vec::new();
     p.push(if need_v1 { 1 } else { 0 }); // version
     p.extend_from_slice(&flags.to_be_bytes()[1..4]); // 3-byte flags
-    if let Some(t) = aux.aux_info_type {
+    if let Some(t) = aux_info_type {
         p.extend_from_slice(&t);
-        p.extend_from_slice(&aux.aux_info_type_parameter.to_be_bytes());
+        p.extend_from_slice(&aux_info_type_parameter.to_be_bytes());
     }
     p.extend_from_slice(&1u32.to_be_bytes()); // entry_count = 1
     if need_v1 {
@@ -1113,6 +1182,18 @@ struct FragmentRun<'a> {
     /// (1-based: `track_idx + 1`) and media-timescale.
     track_idx: usize,
     samples: &'a [MuxSample],
+    /// Per-sample auxiliary-information blobs for exactly the samples in
+    /// [`Self::samples`] (ISO/IEC 14496-12 §8.7.8 / §8.7.9, §8.8.14).
+    /// `None` when the owning track carries no `sample_aux` stream; when
+    /// `Some`, the slice length equals `samples.len()` and indexes the
+    /// same fragment-local samples. Drives the `traf`-scope `saiz` /
+    /// `saio` pair and the trailing aux slab in the fragment's `mdat`.
+    aux: Option<&'a [Vec<u8>]>,
+    /// `(aux_info_type, aux_info_type_parameter)` discriminator copied
+    /// from the track's [`SampleAuxStream`]. Only meaningful when
+    /// [`Self::aux`] is `Some`.
+    aux_info_type: Option<[u8; 4]>,
+    aux_info_type_parameter: u32,
 }
 
 /// Slice every track's flat sample list into per-fragment runs per
@@ -1187,8 +1268,11 @@ fn slice_fragments(tracks: &[TrackWrite], mode: FragmentationMode) -> Vec<Vec<Fr
         };
         let mut runs: Vec<FragmentRun<'_>> = Vec::with_capacity(tracks.len());
         for (ti, t) in tracks.iter().enumerate() {
-            let run_slice = if ti == 0 {
-                &primary.samples[*p_start..*p_end]
+            // Resolve the [lo, hi) fragment-local sample range for this
+            // track, then slice both the sample list and (when present)
+            // the parallel auxiliary-information blob list with it.
+            let (lo, hi) = if ti == 0 {
+                (*p_start, *p_end)
             } else {
                 // Walk the secondary track's flat sample list,
                 // selecting samples whose DTS-start (computed in
@@ -1213,14 +1297,26 @@ fn slice_fragments(tracks: &[TrackWrite], mode: FragmentationMode) -> Vec<Vec<Fr
                 let lo = s_start.unwrap_or(t.samples.len());
                 let hi = s_end.unwrap_or(t.samples.len());
                 if lo <= hi {
-                    &t.samples[lo..hi]
+                    (lo, hi)
                 } else {
-                    &t.samples[..0]
+                    (0, 0)
                 }
+            };
+            let run_slice = &t.samples[lo..hi];
+            let (aux, aux_info_type, aux_info_type_parameter) = match &t.sample_aux {
+                Some(stream) => (
+                    Some(&stream.per_sample[lo..hi]),
+                    stream.aux_info_type,
+                    stream.aux_info_type_parameter,
+                ),
+                None => (None, None, 0),
             };
             runs.push(FragmentRun {
                 track_idx: ti,
                 samples: run_slice,
+                aux,
+                aux_info_type,
+                aux_info_type_parameter,
             });
         }
         fragments.push(runs);
@@ -1466,24 +1562,55 @@ fn build_trun(samples: &[MuxSample], data_offset: i32) -> Vec<u8> {
     p
 }
 
-/// Build a `traf` payload (per §8.8.6.2): `tfhd` + `trun`.
-fn build_traf(run: &FragmentRun<'_>, data_offset: i32) -> Vec<u8> {
+/// Build a `traf` payload (per §8.8.6.2): `tfhd` + `trun`, plus the
+/// optional `saiz` + `saio` pair (§8.7.8 / §8.7.9 at `traf` scope,
+/// §8.8.14). `saio_offset` is the moof-relative offset of this traf's
+/// auxiliary-information slab in the fragment's `mdat`; it is consulted
+/// only when the run carries an aux stream.
+fn build_traf(run: &FragmentRun<'_>, data_offset: i32, saio_offset: u64) -> Vec<u8> {
     let track_id = (run.track_idx as u32) + 1;
     let mut traf = Vec::new();
     push_atom(&mut traf, *b"tfhd", &build_tfhd(track_id));
     push_atom(&mut traf, *b"trun", &build_trun(run.samples, data_offset));
+    // §8.8.14: when sample-auxiliary information rides in the fragment,
+    // the `saio` offsets are relative to the track-fragment base offset;
+    // `build_tfhd` always sets `default-base-is-moof`, so that base is
+    // the enclosing `moof`'s first byte.
+    if let Some(blobs) = run.aux {
+        push_atom(
+            &mut traf,
+            *b"saiz",
+            &build_saiz_blobs(run.aux_info_type, run.aux_info_type_parameter, blobs),
+        );
+        push_atom(
+            &mut traf,
+            *b"saio",
+            &build_saio_offset(run.aux_info_type, run.aux_info_type_parameter, saio_offset),
+        );
+    }
     traf
 }
 
 /// Build the full `moof` payload for a fragment. The `data_offsets`
-/// slice is parallel to `fragment` and carries the precomputed
-/// `trun.data_offset` for each track's run.
-fn build_moof(sequence_number: u32, fragment: &[FragmentRun<'_>], data_offsets: &[i32]) -> Vec<u8> {
+/// and `saio_offsets` slices are parallel to `fragment` and carry,
+/// respectively, the precomputed `trun.data_offset` and the
+/// moof-relative `saio` slab offset for each track's run.
+fn build_moof(
+    sequence_number: u32,
+    fragment: &[FragmentRun<'_>],
+    data_offsets: &[i32],
+    saio_offsets: &[u64],
+) -> Vec<u8> {
     debug_assert_eq!(fragment.len(), data_offsets.len());
+    debug_assert_eq!(fragment.len(), saio_offsets.len());
     let mut moof = Vec::new();
     push_atom(&mut moof, *b"mfhd", &build_mfhd(sequence_number));
-    for (run, &data_offset) in fragment.iter().zip(data_offsets) {
-        push_atom(&mut moof, *b"traf", &build_traf(run, data_offset));
+    for ((run, &data_offset), &saio_offset) in fragment.iter().zip(data_offsets).zip(saio_offsets) {
+        push_atom(
+            &mut moof,
+            *b"traf",
+            &build_traf(run, data_offset, saio_offset),
+        );
     }
     moof
 }
@@ -1500,11 +1627,21 @@ fn build_mfhd(sequence_number: u32) -> Vec<u8> {
 /// each track's `trun.data_offset` (which depends on the moof's
 /// total byte length).
 fn measure_moof(sequence_number: u32, fragment: &[FragmentRun<'_>]) -> u64 {
-    // Sizing pass uses a placeholder data_offset of 0 — the moof's
-    // byte length doesn't depend on the value of the offset, only
-    // on its presence (a fixed 4-byte slot).
-    let placeholder: Vec<i32> = (0..fragment.len()).map(|_| 0).collect();
-    let moof = build_moof(sequence_number, fragment, &placeholder);
+    // Sizing pass uses placeholder data/saio offsets of 0. `trun`'s
+    // data_offset is a fixed 4-byte slot, so its value never affects
+    // the size. `saio`'s width is v0 (4-byte) for any offset ≤ u32::MAX;
+    // the real moof-relative slab offsets the muxer produces stay well
+    // under 4 GiB, so both the placeholder and the real value select v0
+    // and the sizing pass matches the emit pass (pinned by the
+    // `debug_assert_eq!` on `moof_size` in `encode_fragmented_to_vec`).
+    let placeholder_data: Vec<i32> = vec![0; fragment.len()];
+    let placeholder_saio: Vec<u64> = vec![0; fragment.len()];
+    let moof = build_moof(
+        sequence_number,
+        fragment,
+        &placeholder_data,
+        &placeholder_saio,
+    );
     8 + moof.len() as u64
 }
 

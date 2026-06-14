@@ -522,11 +522,33 @@ read; an absent discriminator emits `flags & 1 == 0` and matches the
 rejects a blob count that disagrees with the track's sample count, a
 blob longer than 255 bytes (the §8.7.8.2 size table is u8-wide —
 reject rather than silently truncate), and an unknown track id. The
-fragmented write path ignores the stream (a future round can emit the
-`traf`-scope form). The output round-trips through this crate's own
+output round-trips through this crate's own
 `MovDemuxer::sample_aux_info`, with the demuxed `saiz` sizes, the
 `saio` offset, and the bytes at that offset all matching what was
 written. QTFF does not define either box; both are ISO BMFF-only.
+
+Round 307 extends the same write side to the **`traf` (fragmented)
+scope** — ISO/IEC 14496-12 §8.7.8 / §8.7.9 / §8.8.14 — so a
+`SampleAuxStream` attached via `set_sample_aux` now flows through the
+fragmented path (`encode_fragmented_to_vec` / `write_to_fragmented`)
+as well as the round-300 non-fragmented path. ISO/IEC 23001-7 Common
+Encryption per-sample records now round-trip through a fragmented /
+CMAF / DASH-live output. For each fragment, the blobs for that
+fragment's samples are laid into the fragment's `mdat` after every
+track's sample data (contiguous per `traf` in track order); the
+matching `traf` carries a `saiz` (same uniform-vs-table selection as
+the `stbl` form, now factored into the shared `build_saiz_blobs` /
+`build_saio_offset` core both scopes consume) plus a single-entry
+`saio`. The key §8.8.14 distinction from the `stbl` form: the
+`traf`-scope `saio` offset is **relative to the track-fragment base
+offset**, not absolute. The muxer always sets `default-base-is-moof`
+on the `tfhd`, so that base is the enclosing `moof`'s first byte and
+the emitted offset is `moof_size + 8 (mdat header) + total_sample_bytes
++ (cumulative aux bytes of preceding trafs)`. The output round-trips
+through `MovDemuxer::fragment_sample_aux_info` (round 150 read path),
+with per-fragment `saiz` sizes, the moof-relative `saio` offset, and
+the slab bytes at that offset all matching what was written. No new
+public surface — `set_sample_aux` now feeds both write paths.
 
 Round 157 parses the **Preview atom** (`pnot`) — Apple QuickTime File
 Format Specification (QTFF, 2001-03-01) pp. 26 – 27 / Figure 1-7 — at
@@ -1386,13 +1408,6 @@ decompression path automatically through `MovDemuxer::open`.
 
 ## Follow-ups
 
-- `MovMuxer` write-side `saiz` / `saio` emission at `traf` scope: round
-  300 lands the `stbl`-scope (non-fragmented) write path via
-  `MovMuxer::set_sample_aux`, but the fragmented write path still
-  ignores the attached stream. The `traf`-scope form (ISO/IEC 14496-12
-  §8.7.8.1 / §8.7.9.1, with offsets relative to the `tfhd` base) would
-  let CENC sample-aux records round-trip through a fragmented/CMAF
-  output too.
 - A `next_packet`-side opt-in (`MovDemuxer::with_edit_list_pts()`?)
   that swaps the emitted `Packet::pts` from media-time to movie-time
   end-to-end, so consumers that don't want the explicit
