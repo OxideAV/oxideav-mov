@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-mov/compare/v0.0.3...v0.0.4) - 2026-06-14
+
+### Other
+
+- mov r300: MovMuxer write-side saiz/saio at stbl scope (§8.7.8/§8.7.9)
+- Round 293 — Sub Track box family (strk > stri + strd > stsg)
+- csgp (Compact Sample to Group Box) — ISO/IEC 14496-12:2020 §8.9.5
+- Round 283 — compressed movie resources decompressed and re-parsed end-to-end
+- round 279: fix fuzz OOM — bound count-driven pre-allocations reachable from open
+- round 279: parse mjht default Motion-JPEG Huffman table extension (QTFF p. 94 Table 3-2)
+- Round 267 — default Motion-JPEG quantization table (mjqt) extension
+- Round 264 — Field Handling (fiel) extension + typed gamma accessor
+- Round 259 — Compressed Movie atom (cmov / dcom / cmvd) parsers
+- Round 256 — typed chunk-walking primitive over stsc / stco / stsz
+- drop release-plz.toml — use release-plz defaults across the workspace
+- Round 246 — inverse edit-list mapper movie_pts → media_pts
+- Round 243 — typed tref accessors for QTFF Table 2-2 reference kinds
+- Round 240 — typed Gmin GraphicsMode / Balance accessors (QTFF Ch. 4)
+- Round 234 — Padding Bits Box (padb) parser at stbl scope (ISO/IEC 14496-12 §8.7.6)
+- Round 226 — Level Assignment Box (leva) parser at moov/mvex scope (ISO/IEC 14496-12 §8.8.13)
+- Round 219 — Subsegment Index Box (ssix) parser, ISO/IEC 14496-12 §8.16.4
+- Round 216 — Track Input Map atom (imap) parser (QTFF pp. 51-53)
+- Round 210 — Degradation Priority Box (stdp) parser at stbl scope
+- round 204: parse Compact Sample Size Box (stz2)
+
 ### Other
 
 - Round 300 — `MovMuxer` write-side `saiz` / `saio` emission at `stbl` scope (ISO/IEC 14496-12 §8.7.8 / §8.7.9), closing the first README follow-up. The round-147 read path consumed Sample Auxiliary Information boxes but the encoder never wrote them; producers that wanted to round-trip e.g. ISO/IEC 23001-7 Common Encryption per-sample records had to hand-author the boxes. New public `SampleAuxStream` struct (`aux_info_type: Option<[u8; 4]>`, `aux_info_type_parameter: u32`, `per_sample: Vec<Vec<u8>>`) plus `MovMuxer::set_sample_aux(track_id, stream) -> Result<()>` attaches an opaque per-sample auxiliary-information stream to a previously-added track. On the next non-fragmented `encode_to_vec` / `write_to`, each sample's blob is laid into `mdat` contiguously immediately after the track's sample data, a `saiz` describes the per-sample sizes (the §8.7.8.2 uniform `default_sample_info_size` form when every blob is the same non-zero length, the per-sample table otherwise; an all-empty stream emits an explicit zero table rather than the `default==0` "table follows" sentinel), and a single-entry `saio` (§8.7.9.3 — one offset for a contiguous slab) carries the *absolute* file offset of the first blob, auto-selecting v1 (64-bit) when the offset exceeds the u32 range. The matching `(aux_info_type, aux_info_type_parameter)` discriminator (gated by `flags & 1`) rides on both boxes so the pair resolves together on read; an absent discriminator emits `flags & 1 == 0` and matches the §8.7.8.1 implicit fallback (the all-zero pair). `set_sample_aux` rejects a blob count that disagrees with the track's sample count, a blob longer than 255 bytes (the §8.7.8.2 size table is u8-wide — reject rather than silently truncate), and an unknown track id. The fragmented write path ignores the stream (a future round can emit the `traf`-scope form). Pinned by 9 new unit tests in `src/muxer.rs` (default-size vs per-sample-table selection, all-empty-blobs zeros, v0/v1 `saio` selection with discriminator round-trip, and the three `set_sample_aux` rejections) plus 5 end-to-end integration tests in `tests/synth_round300_muxer_sample_aux.rs` (uniform + varying blobs round-trip through `MovDemuxer::sample_aux_info` with byte-exact slab verification at the `saio` offset, implicit-discriminator zero-pair match, no-stream-emits-no-boxes, and confirmation the aux slab does not corrupt the track's sample-data reads). New public surface: `SampleAuxStream`, `MovMuxer::set_sample_aux`.
