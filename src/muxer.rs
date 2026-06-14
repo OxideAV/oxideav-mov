@@ -76,6 +76,48 @@ pub struct MuxSample {
     pub keyframe: bool,
 }
 
+/// Per-track sample-auxiliary-information stream destined for a
+/// `stbl`-scope `saiz` + `saio` pair (ISO/IEC 14496-12 §8.7.8 /
+/// §8.7.9).
+///
+/// A *sample-aux* stream carries one opaque byte blob per sample,
+/// stored *outside* the sample data itself — the canonical use is the
+/// ISO/IEC 23001-7 Common Encryption per-sample initialisation-vector
+/// / sub-sample-encryption records, but the spec leaves the format and
+/// meaning to a separate specification named by the `(aux_info_type,
+/// aux_info_type_parameter)` discriminator (§8.7.8.1). The muxer
+/// treats the bytes as opaque: it lays each sample's blob into `mdat`
+/// (contiguously, right after the track's sample data), emits a
+/// `saiz` describing the per-sample sizes, and a single-entry `saio`
+/// whose absolute file offset points at the first blob (§8.7.9.3 —
+/// "When in the Sample Table Box, the offsets are absolute … If
+/// entry_count is one, then the Sample Auxiliary Information for all
+/// Chunks … is contiguous in the file in chunk … order").
+///
+/// The read-side counterpart is
+/// [`crate::sample_table::SampleTable::sample_aux_for`]; a file written
+/// with this stream round-trips back through `MovDemuxer` with the same
+/// per-sample sizes and the same discriminator pair.
+#[derive(Clone, Debug)]
+pub struct SampleAuxStream {
+    /// `aux_info_type` discriminator (§8.7.8.3). When `None`, the
+    /// muxer emits the box with the `flags & 1` bit clear, so the
+    /// §8.7.8.1 implicit-fallback rules apply on read (scheme type for
+    /// transformed content, sample-entry type otherwise). When `Some`,
+    /// the box carries the explicit pair.
+    pub aux_info_type: Option<[u8; 4]>,
+    /// `aux_info_type_parameter` — the §8.7.8.3 "stream" sub-selector.
+    /// Only emitted when `aux_info_type` is `Some` (the on-disk pair
+    /// is gated by a single `flags & 1` bit covering both fields).
+    pub aux_info_type_parameter: u32,
+    /// One opaque byte blob per sample, in sample (decode) order. The
+    /// length must equal the track's sample count; a zero-length blob
+    /// is legal (§8.7.8.3 — "may be zero to indicate samples with no
+    /// associated auxiliary information") and a sample with no blob is
+    /// represented by an empty `Vec`.
+    pub per_sample: Vec<Vec<u8>>,
+}
+
 /// Per-track media kind dispatch — drives `hdlr.component_subtype`,
 /// the `vmhd`/`smhd` choice, and the `stsd` body shape.
 #[derive(Clone, Debug)]
@@ -115,6 +157,11 @@ struct TrackWrite {
     /// matching `stsd` entry. Already framed as one or more
     /// `[size:u32 BE][type:[u8;4]][body...]` records.
     extra_stsd_atoms: Vec<u8>,
+    /// Optional `stbl`-scope sample-auxiliary-information stream
+    /// (ISO/IEC 14496-12 §8.7.8 / §8.7.9). When present, the muxer
+    /// lays the per-sample blobs into `mdat` after the track's sample
+    /// data and emits a matching `saiz` + single-entry `saio` pair.
+    sample_aux: Option<SampleAuxStream>,
 }
 
 /// Fragmentation policy for [`MovMuxer::write_to_fragmented`].
@@ -237,8 +284,62 @@ impl MovMuxer {
             media_timescale: media_timescale.max(1),
             samples,
             extra_stsd_atoms: extra_stsd_atoms.to_vec(),
+            sample_aux: None,
         });
         self.tracks.len() as u32
+    }
+
+    /// Attach a `stbl`-scope sample-auxiliary-information stream to a
+    /// previously-added track (ISO/IEC 14496-12 §8.7.8 / §8.7.9).
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// The stream's `per_sample` length must equal the track's sample
+    /// count; otherwise this returns an error and the track is left
+    /// unchanged.
+    ///
+    /// On the next non-fragmented [`MovMuxer::encode_to_vec`] /
+    /// [`write_to`](MovMuxer::write_to), each sample's aux blob is laid
+    /// into `mdat` contiguously after the track's sample data, a `saiz`
+    /// describes the per-sample sizes, and a single-entry `saio` carries
+    /// the absolute file offset of the first blob. The fragmented write
+    /// path ignores the stream (a follow-up can emit the `traf`-scope
+    /// form).
+    ///
+    /// Replaces any stream previously attached to the same track.
+    pub fn set_sample_aux(&mut self, track_id: u32, stream: SampleAuxStream) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_sample_aux unknown track id {track_id}"
+                ))
+            })?;
+        let want = self.tracks[idx].samples.len();
+        if stream.per_sample.len() != want {
+            return Err(Error::invalid(format!(
+                "MOV muxer: sample-aux stream has {} blobs but track {track_id} has {want} samples",
+                stream.per_sample.len()
+            )));
+        }
+        // The §8.7.8.2 `saiz` size table is u8-wide, so a single
+        // sample's auxiliary-information record cannot exceed 255 bytes
+        // through this stbl-scope writer. Reject rather than silently
+        // truncate; callers with larger records split them or use a
+        // derived mechanism.
+        if let Some((i, b)) = stream
+            .per_sample
+            .iter()
+            .enumerate()
+            .find(|(_, b)| b.len() > u8::MAX as usize)
+        {
+            return Err(Error::invalid(format!(
+                "MOV muxer: sample-aux blob {i} is {} bytes; saiz size table is u8-wide (max 255)",
+                b.len()
+            )));
+        }
+        self.tracks[idx].sample_aux = Some(stream);
+        Ok(())
     }
 
     /// Emit the file to a writer.
@@ -274,11 +375,24 @@ impl MovMuxer {
         //    4-byte compat brands). The `mdat` header is 8 bytes when
         //    the body fits in u32, 16 bytes otherwise (size==1 +
         //    extended u64).
+        //
+        //    Per-track mdat layout when a sample-aux stream is attached:
+        //    `[sample data…][aux slab…]`, the aux blobs contiguous in
+        //    sample order immediately after the track's sample data so a
+        //    single-entry `saio` (§8.7.9.3) addresses the whole slab.
         let ftyp_size: u64 = 28;
+        let track_sample_bytes =
+            |t: &TrackWrite| -> u64 { t.samples.iter().map(|s| s.data.len() as u64).sum::<u64>() };
+        let track_aux_bytes = |t: &TrackWrite| -> u64 {
+            t.sample_aux
+                .as_ref()
+                .map(|a| a.per_sample.iter().map(|b| b.len() as u64).sum::<u64>())
+                .unwrap_or(0)
+        };
         let mdat_body_len: u64 = self
             .tracks
             .iter()
-            .map(|t| t.samples.iter().map(|s| s.data.len() as u64).sum::<u64>())
+            .map(|t| track_sample_bytes(t) + track_aux_bytes(t))
             .sum();
         let mdat_header_len: u64 = if mdat_body_len + 8 > u32::MAX as u64 {
             16
@@ -287,13 +401,23 @@ impl MovMuxer {
         };
         let mdat_payload_offset = ftyp_size + mdat_header_len;
 
-        // Per-track chunk offset = mdat payload offset + cumulative
-        // bytes of preceding tracks' samples.
+        // Per-track chunk offset = where the track's sample data
+        // begins; the aux slab (if any) starts at
+        // `chunk_offset + track_sample_bytes`. Both are absolute file
+        // offsets — exactly what `stco`/`co64` and the §8.7.9.3
+        // Sample-Table-scope `saio` require.
         let mut chunk_offsets = Vec::with_capacity(self.tracks.len());
+        let mut aux_offsets: Vec<Option<u64>> = Vec::with_capacity(self.tracks.len());
         let mut cursor = mdat_payload_offset;
         for t in &self.tracks {
             chunk_offsets.push(cursor);
-            cursor += t.samples.iter().map(|s| s.data.len() as u64).sum::<u64>();
+            cursor += track_sample_bytes(t);
+            if t.sample_aux.is_some() {
+                aux_offsets.push(Some(cursor));
+            } else {
+                aux_offsets.push(None);
+            }
+            cursor += track_aux_bytes(t);
         }
         let need_co64 = chunk_offsets.iter().any(|&o| o > u32::MAX as u64);
 
@@ -305,8 +429,13 @@ impl MovMuxer {
             for s in &t.samples {
                 out.extend_from_slice(&s.data);
             }
+            if let Some(aux) = &t.sample_aux {
+                for blob in &aux.per_sample {
+                    out.extend_from_slice(blob);
+                }
+            }
         }
-        let moov = build_moov(self, &chunk_offsets, need_co64);
+        let moov = build_moov(self, &chunk_offsets, need_co64, &aux_offsets);
         push_atom(&mut out, *b"moov", &moov);
         Ok(out)
     }
@@ -468,7 +597,12 @@ fn emit_mdat_header(out: &mut Vec<u8>, body_len: u64) {
     }
 }
 
-fn build_moov(m: &MovMuxer, chunk_offsets: &[u64], need_co64: bool) -> Vec<u8> {
+fn build_moov(
+    m: &MovMuxer,
+    chunk_offsets: &[u64],
+    need_co64: bool,
+    aux_offsets: &[Option<u64>],
+) -> Vec<u8> {
     let mut moov = Vec::new();
     push_atom(&mut moov, *b"mvhd", &build_mvhd(m));
     for (idx, t) in m.tracks.iter().enumerate() {
@@ -478,6 +612,7 @@ fn build_moov(m: &MovMuxer, chunk_offsets: &[u64], need_co64: bool) -> Vec<u8> {
             m.movie_timescale,
             chunk_offsets[idx],
             need_co64,
+            aux_offsets[idx],
         );
         push_atom(&mut moov, *b"trak", &trak);
     }
@@ -541,10 +676,15 @@ fn build_trak(
     movie_ts: u32,
     chunk_offset: u64,
     need_co64: bool,
+    aux_offset: Option<u64>,
 ) -> Vec<u8> {
     let mut trak = Vec::new();
     push_atom(&mut trak, *b"tkhd", &build_tkhd(t, track_id, movie_ts));
-    push_atom(&mut trak, *b"mdia", &build_mdia(t, chunk_offset, need_co64));
+    push_atom(
+        &mut trak,
+        *b"mdia",
+        &build_mdia(t, chunk_offset, need_co64, aux_offset),
+    );
     trak
 }
 
@@ -583,11 +723,20 @@ fn build_tkhd(t: &TrackWrite, track_id: u32, movie_ts: u32) -> Vec<u8> {
     p
 }
 
-fn build_mdia(t: &TrackWrite, chunk_offset: u64, need_co64: bool) -> Vec<u8> {
+fn build_mdia(
+    t: &TrackWrite,
+    chunk_offset: u64,
+    need_co64: bool,
+    aux_offset: Option<u64>,
+) -> Vec<u8> {
     let mut mdia = Vec::new();
     push_atom(&mut mdia, *b"mdhd", &build_mdhd(t));
     push_atom(&mut mdia, *b"hdlr", &build_hdlr(t));
-    push_atom(&mut mdia, *b"minf", &build_minf(t, chunk_offset, need_co64));
+    push_atom(
+        &mut mdia,
+        *b"minf",
+        &build_minf(t, chunk_offset, need_co64, aux_offset),
+    );
     mdia
 }
 
@@ -625,14 +774,23 @@ fn build_hdlr(t: &TrackWrite) -> Vec<u8> {
     p
 }
 
-fn build_minf(t: &TrackWrite, chunk_offset: u64, need_co64: bool) -> Vec<u8> {
+fn build_minf(
+    t: &TrackWrite,
+    chunk_offset: u64,
+    need_co64: bool,
+    aux_offset: Option<u64>,
+) -> Vec<u8> {
     let mut minf = Vec::new();
     match &t.kind {
         MuxTrackKind::Video { .. } => push_atom(&mut minf, *b"vmhd", &build_vmhd()),
         MuxTrackKind::Audio { .. } => push_atom(&mut minf, *b"smhd", &build_smhd()),
     }
     push_atom(&mut minf, *b"dinf", &build_dinf());
-    push_atom(&mut minf, *b"stbl", &build_stbl(t, chunk_offset, need_co64));
+    push_atom(
+        &mut minf,
+        *b"stbl",
+        &build_stbl(t, chunk_offset, need_co64, aux_offset),
+    );
     minf
 }
 
@@ -665,7 +823,12 @@ fn build_dinf() -> Vec<u8> {
     dinf
 }
 
-fn build_stbl(t: &TrackWrite, chunk_offset: u64, need_co64: bool) -> Vec<u8> {
+fn build_stbl(
+    t: &TrackWrite,
+    chunk_offset: u64,
+    need_co64: bool,
+    aux_offset: Option<u64>,
+) -> Vec<u8> {
     let mut stbl = Vec::new();
     push_atom(&mut stbl, *b"stsd", &build_stsd(t));
     push_atom(&mut stbl, *b"stts", &build_stts(t));
@@ -679,7 +842,83 @@ fn build_stbl(t: &TrackWrite, chunk_offset: u64, need_co64: bool) -> Vec<u8> {
     } else {
         push_atom(&mut stbl, *b"stco", &build_stco(chunk_offset as u32));
     }
+    // Sample-auxiliary-information pair (ISO/IEC 14496-12 §8.7.8 /
+    // §8.7.9). Emitted only when the track carries an aux stream; the
+    // slab was laid into mdat starting at `aux_offset`.
+    if let (Some(aux), Some(off)) = (&t.sample_aux, aux_offset) {
+        push_atom(&mut stbl, *b"saiz", &build_saiz(aux));
+        push_atom(&mut stbl, *b"saio", &build_saio(aux, off));
+    }
     stbl
+}
+
+/// Build a `saiz` (Sample Auxiliary Information Sizes Box) payload —
+/// ISO/IEC 14496-12 §8.7.8.2. Uses the uniform
+/// `default_sample_info_size` form when every blob is the same non-zero
+/// length; otherwise emits the per-sample size table. Per-sample blob
+/// lengths are validated to fit in a `u8` at [`MovMuxer::set_sample_aux`]
+/// time (the spec's size table is `u8`-wide), so the cast here is
+/// lossless.
+fn build_saiz(aux: &SampleAuxStream) -> Vec<u8> {
+    let flags: u32 = if aux.aux_info_type.is_some() { 1 } else { 0 };
+    let sizes: Vec<u8> = aux
+        .per_sample
+        .iter()
+        .map(|b| b.len().min(u8::MAX as usize) as u8)
+        .collect();
+    let uniform = sizes.first().copied().unwrap_or(0);
+    let all_same = !sizes.is_empty() && sizes.iter().all(|&s| s == uniform);
+    // Use the default-size form only when uniform AND non-zero (a
+    // zero default with a non-empty count is the "per-sample table
+    // follows" sentinel; an all-empty-blob stream is encoded as the
+    // per-sample table of zeros so the reader sees explicit sizes).
+    let use_default = all_same && uniform != 0;
+
+    let mut p = Vec::new();
+    p.push(0); // version (spec fixes at 0)
+    p.extend_from_slice(&flags.to_be_bytes()[1..4]); // 3-byte flags
+    if let Some(t) = aux.aux_info_type {
+        p.extend_from_slice(&t);
+        p.extend_from_slice(&aux.aux_info_type_parameter.to_be_bytes());
+    }
+    if use_default {
+        p.push(uniform); // default_sample_info_size
+        p.extend_from_slice(&(aux.per_sample.len() as u32).to_be_bytes());
+    } else {
+        p.push(0); // default_sample_info_size = 0 ⇒ table follows
+        p.extend_from_slice(&(aux.per_sample.len() as u32).to_be_bytes());
+        p.extend_from_slice(&sizes);
+    }
+    p
+}
+
+/// Build a `saio` (Sample Auxiliary Information Offsets Box) payload —
+/// ISO/IEC 14496-12 §8.7.9.2. The muxer always emits a single-entry
+/// table (§8.7.9.3 — one offset for a contiguous slab) carrying the
+/// absolute file offset of the first aux blob. Selects v1 (64-bit
+/// offsets) automatically when the offset exceeds the 32-bit range, v0
+/// otherwise. Carries the same `(aux_info_type, aux_info_type_parameter)`
+/// discriminator (gated by `flags & 1`) as the matching `saiz` so the
+/// pair resolves together on read (§8.7.9.3 — the pair semantics are
+/// defined as in the SampleAuxiliaryInformationSizesBox, which §8.7.8.3
+/// requires to match for a `(saiz, saio)` pair).
+fn build_saio(aux: &SampleAuxStream, aux_offset: u64) -> Vec<u8> {
+    let need_v1 = aux_offset > u32::MAX as u64;
+    let flags: u32 = if aux.aux_info_type.is_some() { 1 } else { 0 };
+    let mut p = Vec::new();
+    p.push(if need_v1 { 1 } else { 0 }); // version
+    p.extend_from_slice(&flags.to_be_bytes()[1..4]); // 3-byte flags
+    if let Some(t) = aux.aux_info_type {
+        p.extend_from_slice(&t);
+        p.extend_from_slice(&aux.aux_info_type_parameter.to_be_bytes());
+    }
+    p.extend_from_slice(&1u32.to_be_bytes()); // entry_count = 1
+    if need_v1 {
+        p.extend_from_slice(&aux_offset.to_be_bytes());
+    } else {
+        p.extend_from_slice(&(aux_offset as u32).to_be_bytes());
+    }
+    p
 }
 
 fn build_stsd(t: &TrackWrite) -> Vec<u8> {
@@ -1340,6 +1579,7 @@ mod tests {
                 },
             ],
             extra_stsd_atoms: Vec::new(),
+            sample_aux: None,
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -1375,6 +1615,7 @@ mod tests {
                 },
             ],
             extra_stsd_atoms: Vec::new(),
+            sample_aux: None,
         };
         assert!(build_stss(&t).is_none());
     }
@@ -1390,6 +1631,7 @@ mod tests {
             media_timescale: 1000,
             samples: synth_video_samples(11),
             extra_stsd_atoms: Vec::new(),
+            sample_aux: None,
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -1430,6 +1672,7 @@ mod tests {
                 },
             ],
             extra_stsd_atoms: Vec::new(),
+            sample_aux: None,
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -1462,6 +1705,7 @@ mod tests {
                 },
             ],
             extra_stsd_atoms: Vec::new(),
+            sample_aux: None,
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows
@@ -1471,5 +1715,161 @@ mod tests {
             2
         );
         assert_eq!(stsz.len(), 12 + 2 * 4);
+    }
+
+    #[test]
+    fn saiz_default_size_form_for_uniform_blobs() {
+        let aux = SampleAuxStream {
+            aux_info_type: Some(*b"cenc"),
+            aux_info_type_parameter: 0,
+            per_sample: vec![vec![0u8; 16]; 4],
+        };
+        let body = build_saiz(&aux);
+        assert_eq!(body[0], 0); // version 0
+        let parsed = crate::sample_aux::parse_saiz(&body).unwrap();
+        assert_eq!(parsed.default_sample_info_size, 16);
+        assert_eq!(parsed.sample_count, 4);
+        assert!(parsed.sample_info_sizes.is_empty());
+        let a = parsed.aux_info_type.unwrap();
+        assert_eq!(&a.aux_info_type, b"cenc");
+        assert_eq!(a.aux_info_type_parameter, 0);
+    }
+
+    #[test]
+    fn saiz_per_sample_table_for_varying_blobs() {
+        let aux = SampleAuxStream {
+            aux_info_type: None,
+            aux_info_type_parameter: 0,
+            per_sample: vec![vec![0u8; 8], vec![], vec![0u8; 24]],
+        };
+        let body = build_saiz(&aux);
+        let parsed = crate::sample_aux::parse_saiz(&body).unwrap();
+        assert!(parsed.aux_info_type.is_none()); // flags & 1 unset
+        assert_eq!(parsed.default_sample_info_size, 0);
+        assert_eq!(parsed.sample_count, 3);
+        assert_eq!(parsed.sample_info_sizes, vec![8u8, 0, 24]);
+    }
+
+    #[test]
+    fn saiz_all_empty_blobs_use_per_sample_zeros() {
+        // A uniform-but-zero stream must NOT use the default-size form
+        // (default_sample_info_size == 0 is the "table follows"
+        // sentinel); it emits an explicit table of zeros.
+        let aux = SampleAuxStream {
+            aux_info_type: None,
+            aux_info_type_parameter: 0,
+            per_sample: vec![vec![]; 3],
+        };
+        let body = build_saiz(&aux);
+        let parsed = crate::sample_aux::parse_saiz(&body).unwrap();
+        assert_eq!(parsed.default_sample_info_size, 0);
+        assert_eq!(parsed.sample_count, 3);
+        assert_eq!(parsed.sample_info_sizes, vec![0u8, 0, 0]);
+    }
+
+    #[test]
+    fn saio_v0_single_entry_for_small_offset() {
+        let aux = SampleAuxStream {
+            aux_info_type: None,
+            aux_info_type_parameter: 0,
+            per_sample: vec![],
+        };
+        let body = build_saio(&aux, 0x1234);
+        let parsed = crate::sample_aux::parse_saio(&body).unwrap();
+        assert_eq!(parsed.version, 0);
+        assert!(parsed.is_single_chunk());
+        assert_eq!(parsed.offset_for(0), Some(0x1234));
+        assert!(parsed.aux_info_type.is_none());
+    }
+
+    #[test]
+    fn saio_v1_single_entry_for_large_offset() {
+        let big = 0x1_0000_0000u64; // > u32::MAX
+        let aux = SampleAuxStream {
+            aux_info_type: Some(*b"cenc"),
+            aux_info_type_parameter: 3,
+            per_sample: vec![],
+        };
+        let body = build_saio(&aux, big);
+        let parsed = crate::sample_aux::parse_saio(&body).unwrap();
+        assert_eq!(parsed.version, 1);
+        assert!(parsed.is_single_chunk());
+        assert_eq!(parsed.offset_for(0), Some(big));
+        // The discriminator pair rides along (flags & 1 set).
+        let a = parsed.aux_info_type.expect("aux pair");
+        assert_eq!(&a.aux_info_type, b"cenc");
+        assert_eq!(a.aux_info_type_parameter, 3);
+    }
+
+    #[test]
+    fn set_sample_aux_rejects_wrong_blob_count() {
+        let mut m = MovMuxer::new();
+        let id = m.add_track(
+            MuxTrackKind::Audio {
+                format: *b"sowt",
+                channels: 2,
+                bits_per_sample: 16,
+                sample_rate: 44100,
+            },
+            44100,
+            vec![MuxSample {
+                data: vec![1, 2, 3],
+                duration: 1024,
+                keyframe: true,
+            }],
+            &[],
+        );
+        let err = m.set_sample_aux(
+            id,
+            SampleAuxStream {
+                aux_info_type: None,
+                aux_info_type_parameter: 0,
+                per_sample: vec![vec![0u8; 4], vec![0u8; 4]], // 2 blobs, 1 sample
+            },
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn set_sample_aux_rejects_oversize_blob() {
+        let mut m = MovMuxer::new();
+        let id = m.add_track(
+            MuxTrackKind::Audio {
+                format: *b"sowt",
+                channels: 1,
+                bits_per_sample: 16,
+                sample_rate: 8000,
+            },
+            8000,
+            vec![MuxSample {
+                data: vec![1],
+                duration: 1,
+                keyframe: true,
+            }],
+            &[],
+        );
+        let err = m.set_sample_aux(
+            id,
+            SampleAuxStream {
+                aux_info_type: None,
+                aux_info_type_parameter: 0,
+                per_sample: vec![vec![0u8; 256]], // > 255 ⇒ u8 size table overflow
+            },
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn set_sample_aux_rejects_unknown_track() {
+        let mut m = MovMuxer::new();
+        let err = m.set_sample_aux(
+            99,
+            SampleAuxStream {
+                aux_info_type: None,
+                aux_info_type_parameter: 0,
+                per_sample: vec![],
+            },
+        );
+        assert!(err.is_err());
     }
 }

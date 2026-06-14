@@ -117,7 +117,7 @@ pub use media_meta::{
     ColorParameters, ColorParametersKind, Cslg, Fiel, FieldOrdering, MetaKeyValue, Mjht, Mjqt,
     Pasp, Tapt, FIEL_BODY_LEN,
 };
-pub use muxer::{FragmentationMode, MovMuxer, MuxSample, MuxTrackKind};
+pub use muxer::{FragmentationMode, MovMuxer, MuxSample, MuxTrackKind, SampleAuxStream};
 pub use pdin::{parse_pdin, Pdin, PdinEntry};
 pub use pnot::{parse_pnot, Pnot, MAC_TO_UNIX_EPOCH_SECONDS, PNOT_BODY_LEN};
 pub use prft::{parse_prft, Prft, NTP_TO_UNIX_EPOCH_SECONDS};
