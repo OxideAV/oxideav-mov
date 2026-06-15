@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-mov/compare/v0.0.3...v0.0.4) - 2026-06-15
+
+### Other
+
+- Round 310 — MovMuxer write-side compressed-movie-resource (cmov) emission
+- round 307 — MovMuxer write-side saiz/saio at traf (fragmented) scope
+- mov r300: MovMuxer write-side saiz/saio at stbl scope (§8.7.8/§8.7.9)
+- Round 293 — Sub Track box family (strk > stri + strd > stsg)
+- csgp (Compact Sample to Group Box) — ISO/IEC 14496-12:2020 §8.9.5
+- Round 283 — compressed movie resources decompressed and re-parsed end-to-end
+- round 279: fix fuzz OOM — bound count-driven pre-allocations reachable from open
+- round 279: parse mjht default Motion-JPEG Huffman table extension (QTFF p. 94 Table 3-2)
+- Round 267 — default Motion-JPEG quantization table (mjqt) extension
+- Round 264 — Field Handling (fiel) extension + typed gamma accessor
+- Round 259 — Compressed Movie atom (cmov / dcom / cmvd) parsers
+- Round 256 — typed chunk-walking primitive over stsc / stco / stsz
+- drop release-plz.toml — use release-plz defaults across the workspace
+- Round 246 — inverse edit-list mapper movie_pts → media_pts
+- Round 243 — typed tref accessors for QTFF Table 2-2 reference kinds
+- Round 240 — typed Gmin GraphicsMode / Balance accessors (QTFF Ch. 4)
+- Round 234 — Padding Bits Box (padb) parser at stbl scope (ISO/IEC 14496-12 §8.7.6)
+- Round 226 — Level Assignment Box (leva) parser at moov/mvex scope (ISO/IEC 14496-12 §8.8.13)
+- Round 219 — Subsegment Index Box (ssix) parser, ISO/IEC 14496-12 §8.16.4
+- Round 216 — Track Input Map atom (imap) parser (QTFF pp. 51-53)
+- Round 210 — Degradation Priority Box (stdp) parser at stbl scope
+- round 204: parse Compact Sample Size Box (stz2)
+
 ### Other
 
 - Round 310 — `MovMuxer` write-side compressed-movie-resource emission (QTFF, 2001-03-01, pp. 80 – 81, "Allowing QuickTime to Compress the Movie Resource" / Table 2-5), closing the third README follow-up. Round 283 landed the full `cmov` read path plus the `compress_movie_resource` / `Cmov::to_body_bytes` building blocks, but the muxer never elected to compress the movie resource it wrote. New opt-in builder `MovMuxer::with_compressed_movie_resource(bool)` (default off) plus the `MovMuxer::compresses_movie_resource()` accessor: when enabled, the non-fragmented write path (`encode_to_vec` / `write_to`) still lays `ftyp` + `mdat` down first — so the `stco` / `co64` chunk offsets stay file-absolute and `mdat`-anchored exactly as in the uncompressed layout — but the trailing plain `moov` is replaced by a `moov` whose single child is a `cmov` carrying the zlib-deflated (`dcom = 'zlib'`, RFC 1950 via the `compcol` crate) movie resource plus its 32-bit uncompressed size in `cmvd`. Per QTFF p. 30 the complete movie resource is the full `moov` atom (its 8-byte header included), so the muxer compresses exactly that serialized atom; the output decompresses back to a byte-identical plain-`moov` file and round-trips through this crate's own `cmov` read path (the demuxer transparently decompresses on open, surfacing `MovDemuxer::compressed_movie_algorithm = Some(*b\"zlib\")`). Has no effect on the fragmented path (`encode_fragmented_to_vec`) — QTFF p. 81 describes movie-resource compression for the flatten-time movie atom, not per-fragment `moof` boxes. Pinned by 4 new unit tests in `src/muxer.rs` (flag default-off + builder set; the emitted `moov > cmov > dcom + cmvd` tree parses through `parse_cmov` with the `'zlib'` algorithm and a decompressed resource that is itself a complete `moov` atom whose length equals the `cmvd` size word; the decompressed resource is byte-identical to the plain-path `moov` atom; the plain path emits no `cmov`) plus 5 end-to-end integration tests in `tests/synth_round310_muxer_cmov.rs` (plain and compressed builds of the same movie open to identical mvhd / track / packet state through `MovDemuxer`, with the algorithm FourCC surfaced on one and `None` on the other; the compressed output is smaller than the plain output; the compressed output carries the `cmov` / `dcom` / `cmvd` tree; the plain output carries no `cmov`; the flag defaults off). No new public type — `with_compressed_movie_resource` / `compresses_movie_resource` extend the existing `MovMuxer` builder surface. Both the `registry` and `--no-default-features` standalone configurations build, fmt-check, and clippy clean. Test count 1038 → 1047.
