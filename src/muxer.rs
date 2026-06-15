@@ -62,8 +62,9 @@ use std::io::Write;
 
 /// One sample destined for a track. The muxer copies `data` into the
 /// `mdat` body and emits the matching `stsz` size + `stts` duration +
-/// `stss` keyframe-flag entries.
-#[derive(Clone, Debug)]
+/// `stss` keyframe-flag entries, plus a `ctts` composition-offset entry
+/// when [`composition_offset`](Self::composition_offset) is non-zero.
+#[derive(Clone, Debug, Default)]
 pub struct MuxSample {
     /// Raw sample bytes — one access unit (NAL, AAC frame, PCM run).
     pub data: Vec<u8>,
@@ -74,6 +75,16 @@ pub struct MuxSample {
     /// video it should be true on every IDR / keyframe and false on
     /// every B/P frame.
     pub keyframe: bool,
+    /// Composition-time offset (PTS − DTS) in media-timescale ticks, the
+    /// per-sample `sample_offset` of the `ctts` Composition Time to
+    /// Sample Box (ISO/IEC 14496-12 §8.6.1.3). Zero for every sample in
+    /// a stream whose decode order equals presentation order (no
+    /// B-frames); the muxer then omits the `ctts` box entirely. A
+    /// non-zero value on any sample triggers a `ctts` covering the whole
+    /// track. Signed: a negative offset is legal and forces the v1 form
+    /// of the box (§8.6.1.3.1 — version 1 stores `sample_offset` as a
+    /// signed `int(32)`); an all-non-negative track uses v0.
+    pub composition_offset: i32,
 }
 
 /// Per-track sample-auxiliary-information stream destined for a
@@ -927,6 +938,13 @@ fn build_stbl(
     let mut stbl = Vec::new();
     push_atom(&mut stbl, *b"stsd", &build_stsd(t));
     push_atom(&mut stbl, *b"stts", &build_stts(t));
+    // Composition Time to Sample Box (ISO/IEC 14496-12 §8.6.1.3) —
+    // emitted only when the track carries a non-zero composition offset
+    // on at least one sample (PTS ≠ DTS, i.e. B-frame reordering). §8.6
+    // orders it immediately after `stts` within `stbl`.
+    if let Some(ctts_atom) = build_ctts(t) {
+        push_atom(&mut stbl, *b"ctts", &ctts_atom);
+    }
     if let Some(stss_atom) = build_stss(t) {
         push_atom(&mut stbl, *b"stss", &stss_atom);
     }
@@ -1142,6 +1160,54 @@ fn build_stts(t: &TrackWrite) -> Vec<u8> {
         p.extend_from_slice(&dur.to_be_bytes());
     }
     p
+}
+
+/// Build the `ctts` Composition Time to Sample Box payload
+/// (ISO/IEC 14496-12 §8.6.1.3.2).
+///
+/// Returns `None` when every sample's `composition_offset` is zero — the
+/// box is then omitted and a reader applies the implicit `PTS == DTS`
+/// rule (§8.6.1.3.1: "the composition times … are identical to the
+/// decoding times … if this box is not present"). When at least one
+/// offset is non-zero the box covers the whole track, run-length-encoding
+/// consecutive samples that share an offset into `(sample_count,
+/// sample_offset)` rows exactly as `stts` does for durations.
+///
+/// Version selection follows §8.6.1.3.1: version 0 stores
+/// `sample_offset` as `unsigned int(32)` and therefore cannot represent
+/// a negative offset, so the emitter promotes to version 1 (signed
+/// `int(32)`) the moment any offset is negative; an all-non-negative
+/// track stays on version 0 for maximum reader compatibility. Both
+/// versions round-trip through [`crate::sample_table::parse_ctts`], which
+/// normalises either form to the signed `i32` carried back on
+/// [`crate::sample_table::SampleInfo::composition_offset`].
+fn build_ctts(t: &TrackWrite) -> Option<Vec<u8>> {
+    if t.samples.iter().all(|s| s.composition_offset == 0) {
+        return None;
+    }
+    let need_v1 = t.samples.iter().any(|s| s.composition_offset < 0);
+    // Run-length-encode consecutive samples sharing one offset.
+    let mut runs: Vec<(u32, i32)> = Vec::new();
+    for s in &t.samples {
+        match runs.last_mut() {
+            Some(last) if last.1 == s.composition_offset => last.0 += 1,
+            _ => runs.push((1, s.composition_offset)),
+        }
+    }
+    let version: u8 = if need_v1 { 1 } else { 0 };
+    let mut p = Vec::with_capacity(8 + runs.len() * 8);
+    p.push(version);
+    p.extend_from_slice(&[0, 0, 0]); // flags (always 0)
+    p.extend_from_slice(&(runs.len() as u32).to_be_bytes());
+    for (count, offset) in runs {
+        p.extend_from_slice(&count.to_be_bytes());
+        // v0 stores the offset as unsigned int(32); for an
+        // all-non-negative track the two's-complement big-endian bytes
+        // of a non-negative `i32` equal its unsigned encoding, so the
+        // same write is correct for both versions.
+        p.extend_from_slice(&offset.to_be_bytes());
+    }
+    Some(p)
 }
 
 /// Returns `Some(payload)` when at least one sample is *not* a
@@ -1708,6 +1774,12 @@ fn measure_moof(sequence_number: u32, fragment: &[FragmentRun<'_>]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "registry")]
+    use crate::demuxer::MovDemuxer;
+    #[cfg(feature = "registry")]
+    use oxideav_core::ReadSeek;
+    #[cfg(feature = "registry")]
+    use std::io::Cursor;
 
     fn synth_video_samples(n: usize) -> Vec<MuxSample> {
         (0..n)
@@ -1715,6 +1787,7 @@ mod tests {
                 data: vec![(i & 0xFF) as u8; 16 + (i % 8)],
                 duration: 1000,
                 keyframe: i % 5 == 0,
+                composition_offset: 0,
             })
             .collect()
     }
@@ -1763,16 +1836,19 @@ mod tests {
                     data: vec![0; 4],
                     duration: 33,
                     keyframe: true,
+                    composition_offset: 0,
                 },
                 MuxSample {
                     data: vec![0; 4],
                     duration: 33,
                     keyframe: false,
+                    composition_offset: 0,
                 },
                 MuxSample {
                     data: vec![0; 4],
                     duration: 33,
                     keyframe: false,
+                    composition_offset: 0,
                 },
             ],
             extra_stsd_atoms: Vec::new(),
@@ -1787,6 +1863,123 @@ mod tests {
         assert_eq!(count, 3);
         assert_eq!(dur, 33);
         assert_eq!(stts.len(), 8 + 8);
+    }
+
+    /// Helper: build a single-video-track `TrackWrite` whose samples
+    /// carry the given per-sample composition offsets (all 1000-tick
+    /// duration, sample 0 a keyframe). Used by the `ctts` unit tests.
+    fn track_with_offsets(offsets: &[i32]) -> TrackWrite {
+        TrackWrite {
+            kind: MuxTrackKind::Video {
+                format: *b"avc1",
+                width: 8,
+                height: 8,
+            },
+            media_timescale: 30000,
+            samples: offsets
+                .iter()
+                .enumerate()
+                .map(|(i, &off)| MuxSample {
+                    data: vec![(i & 0xFF) as u8; 8],
+                    duration: 1000,
+                    keyframe: i == 0,
+                    composition_offset: off,
+                })
+                .collect(),
+            extra_stsd_atoms: Vec::new(),
+            sample_aux: None,
+        }
+    }
+
+    #[test]
+    fn ctts_omitted_when_all_offsets_zero() {
+        let t = track_with_offsets(&[0, 0, 0, 0]);
+        assert!(
+            build_ctts(&t).is_none(),
+            "ctts must be omitted when PTS == DTS for every sample"
+        );
+    }
+
+    #[test]
+    fn ctts_v0_when_all_offsets_non_negative() {
+        // Classic IBBP-style reorder: positive offsets only ⇒ version 0.
+        let t = track_with_offsets(&[0, 2000, 1000, 1000, 0]);
+        let body = build_ctts(&t).expect("ctts emitted");
+        assert_eq!(body[0], 0, "version 0 expected for non-negative offsets");
+        let n = u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
+        // Runs: (1,0) (1,2000) (2,1000) (1,0) ⇒ 4 runs.
+        assert_eq!(n, 4);
+        // First run.
+        assert_eq!(
+            u32::from_be_bytes([body[8], body[9], body[10], body[11]]),
+            1
+        );
+        assert_eq!(
+            u32::from_be_bytes([body[12], body[13], body[14], body[15]]),
+            0
+        );
+        // Third run is the merged pair of 1000-offset samples.
+        let r3_count = u32::from_be_bytes([body[24], body[25], body[26], body[27]]);
+        let r3_off = u32::from_be_bytes([body[28], body[29], body[30], body[31]]);
+        assert_eq!(r3_count, 2);
+        assert_eq!(r3_off, 1000);
+        assert_eq!(body.len(), 8 + 4 * 8);
+    }
+
+    #[test]
+    fn ctts_promotes_to_v1_when_any_offset_negative() {
+        let t = track_with_offsets(&[0, -1000, 1000]);
+        let body = build_ctts(&t).expect("ctts emitted");
+        assert_eq!(body[0], 1, "version 1 forced by a negative offset");
+        // The negative offset round-trips as a signed int(32).
+        let n = u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
+        assert_eq!(n, 3);
+        // Run 1 (the second run): sample_count at body[16..20], signed
+        // sample_offset at body[20..24].
+        let r2_count = u32::from_be_bytes([body[16], body[17], body[18], body[19]]);
+        let r2_off = i32::from_be_bytes([body[20], body[21], body[22], body[23]]);
+        assert_eq!(r2_count, 1);
+        assert_eq!(r2_off, -1000);
+    }
+
+    #[cfg(feature = "registry")]
+    #[test]
+    fn ctts_roundtrips_through_demuxer() {
+        // Encode a reordered stream and confirm the demuxer reconstructs
+        // each sample's PTS = DTS + composition_offset. Mixed signs force
+        // the v1 form; the demuxer's parse_ctts normalises both.
+        let offsets = [0i32, 3000, -1000, 2000, 0];
+        let mut m = MovMuxer::new().with_movie_timescale(600);
+        m.add_track(
+            MuxTrackKind::Video {
+                format: *b"mp4v",
+                width: 64,
+                height: 48,
+            },
+            30000,
+            track_with_offsets(&offsets).samples,
+            &[],
+        );
+        let bytes = m.encode_to_vec().expect("encode reordered MOV");
+
+        let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+        let d = MovDemuxer::open(cur).expect("open reordered MOV");
+        let st = &d.tracks[0].sample_table;
+        assert!(!st.ctts.is_empty(), "ctts table parsed back");
+        let entries: Vec<_> = st
+            .iter_samples()
+            .collect::<oxideav_core::Result<_>>()
+            .unwrap();
+        assert_eq!(entries.len(), offsets.len());
+        let mut dts = 0i64;
+        for (i, (entry, &off)) in entries.iter().zip(offsets.iter()).enumerate() {
+            assert_eq!(
+                entry.composition_offset, off,
+                "composition offset at sample {i}"
+            );
+            assert_eq!(entry.pts(), dts + off as i64, "PTS at sample {i}");
+            dts += entry.duration as i64;
+        }
     }
 
     #[test]
@@ -1804,11 +1997,13 @@ mod tests {
                     data: vec![0; 1024],
                     duration: 256,
                     keyframe: true,
+                    composition_offset: 0,
                 },
                 MuxSample {
                     data: vec![0; 1024],
                     duration: 256,
                     keyframe: true,
+                    composition_offset: 0,
                 },
             ],
             extra_stsd_atoms: Vec::new(),
@@ -1856,16 +2051,19 @@ mod tests {
                     data: vec![0; 64],
                     duration: 32,
                     keyframe: true,
+                    composition_offset: 0,
                 },
                 MuxSample {
                     data: vec![0; 64],
                     duration: 32,
                     keyframe: true,
+                    composition_offset: 0,
                 },
                 MuxSample {
                     data: vec![0; 64],
                     duration: 32,
                     keyframe: true,
+                    composition_offset: 0,
                 },
             ],
             extra_stsd_atoms: Vec::new(),
@@ -1894,11 +2092,13 @@ mod tests {
                     data: vec![0; 16],
                     duration: 33,
                     keyframe: true,
+                    composition_offset: 0,
                 },
                 MuxSample {
                     data: vec![0; 17],
                     duration: 33,
                     keyframe: false,
+                    composition_offset: 0,
                 },
             ],
             extra_stsd_atoms: Vec::new(),
@@ -2013,6 +2213,7 @@ mod tests {
                 data: vec![1, 2, 3],
                 duration: 1024,
                 keyframe: true,
+                composition_offset: 0,
             }],
             &[],
         );
@@ -2042,6 +2243,7 @@ mod tests {
                 data: vec![1],
                 duration: 1,
                 keyframe: true,
+                composition_offset: 0,
             }],
             &[],
         );

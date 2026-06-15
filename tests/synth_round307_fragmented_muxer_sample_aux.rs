@@ -65,6 +65,7 @@ fn build_fragmented_with_aux(
             data: vec![(0x10 + i) as u8; 8 + (i % 4)],
             duration: 100,
             keyframe: i % frames_per_fragment as usize == 0,
+            composition_offset: 0,
         })
         .collect();
     let mut m = MovMuxer::new()
@@ -204,6 +205,7 @@ fn no_sample_aux_track_emits_no_traf_boxes() {
             data: vec![i as u8; 8],
             duration: 100,
             keyframe: i == 0,
+            composition_offset: 0,
         })
         .collect();
     let mut m = MovMuxer::new().with_fragmentation(FragmentationMode::ByFrameCount(2));

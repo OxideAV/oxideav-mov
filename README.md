@@ -73,7 +73,11 @@ Fragmented files use `tfra` when present.
 carrying one or more video/audio tracks, round-tripping through
 `MovDemuxer` with sample count, sizes, payloads, and keyframe flags
 preserved. `stco` auto-promotes to `co64` when chunk offsets cross
-4 GiB.
+4 GiB. Per-sample composition offsets (`MuxSample.composition_offset`,
+PTS − DTS) emit a `ctts` Composition Time to Sample Box (§8.6.1.3):
+omitted when every offset is zero, version 0 for an all-non-negative
+track, auto-promoted to version 1 (signed `int(32)`) the moment any
+offset is negative — so B-frame reorder round-trips PTS exactly.
 
 - `with_fragmentation(ByDuration | ByFrameCount)` +
   `encode_fragmented_to_vec()` emit a fragmented MP4 / fMP4 / DASH

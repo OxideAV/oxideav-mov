@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- Round 315 — MovMuxer write-side `ctts` composition-offset emission (ISO/IEC 14496-12 §8.6.1.3): `MuxSample.composition_offset` (PTS − DTS) round-trips B-frame reorder through MovDemuxer; box omitted when all-zero, v0 when all-non-negative, v1 (signed) when any offset is negative
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-mov/compare/v0.0.3...v0.0.4) - 2026-06-15
 
 ### Other

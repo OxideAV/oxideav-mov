@@ -36,6 +36,7 @@ fn build_5_frame_video_mov() -> (Vec<u8>, Vec<MuxSample>) {
             },
             duration: 1000, // 1000 ticks @ 30000/s = 33.33 ms ⇒ ~30 fps
             keyframe: i == 0,
+            composition_offset: 0,
         })
         .collect();
     let mut m = MovMuxer::new().with_movie_timescale(600);
@@ -138,6 +139,7 @@ fn roundtrip_audio_only_mov_preserves_sample_table() {
             data: vec![(i * 2) as u8; 256],
             duration: 128,
             keyframe: true,
+            composition_offset: 0,
         })
         .collect();
     let mut m = MovMuxer::new().with_movie_timescale(600);
@@ -186,6 +188,7 @@ fn roundtrip_two_track_video_plus_audio_preserves_both_streams() {
             data: vec![(0xA0 | i) as u8; 24 + i],
             duration: 1500,
             keyframe: i == 0,
+            composition_offset: 0,
         })
         .collect();
     // Track 2: 2 audio samples, uniform size.
@@ -194,6 +197,7 @@ fn roundtrip_two_track_video_plus_audio_preserves_both_streams() {
             data: vec![(0xB0 | i) as u8; 100],
             duration: 1024,
             keyframe: true,
+            composition_offset: 0,
         })
         .collect();
 
@@ -354,6 +358,7 @@ fn ffprobe_accepts_synth_video_plus_audio_mov() {
             data: vec![(0xA0 | i) as u8; 24 + i],
             duration: 1500,
             keyframe: i == 0,
+            composition_offset: 0,
         })
         .collect();
     let audio_samples: Vec<MuxSample> = (0..2)
@@ -361,6 +366,7 @@ fn ffprobe_accepts_synth_video_plus_audio_mov() {
             data: vec![(0xB0 | i) as u8; 100],
             duration: 1024,
             keyframe: true,
+            composition_offset: 0,
         })
         .collect();
     let mut m = MovMuxer::new().with_movie_timescale(600);

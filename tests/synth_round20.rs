@@ -40,6 +40,7 @@ fn synth_5_video_samples() -> Vec<MuxSample> {
             },
             duration: 1000, // 1000 ticks @ 30000/s ≈ 30 fps
             keyframe: i == 0,
+            composition_offset: 0,
         })
         .collect()
 }
@@ -108,6 +109,7 @@ fn fragmented_by_duration_slices_along_primary_timebase() {
             data: vec![(0x70 + i) as u8; 32],
             duration: 1000,
             keyframe: i == 0,
+            composition_offset: 0,
         })
         .collect();
     let mut m = MovMuxer::new()
@@ -209,6 +211,7 @@ fn fragmented_requires_fragmentation_mode() {
             data: vec![0u8; 16],
             duration: 1000,
             keyframe: true,
+            composition_offset: 0,
         }],
         &[],
     );
@@ -232,6 +235,7 @@ fn fragmented_by_frame_count_zero_rejected() {
             data: vec![0u8; 16],
             duration: 1000,
             keyframe: true,
+            composition_offset: 0,
         }],
         &[],
     );
@@ -252,6 +256,7 @@ fn fragmented_by_duration_zero_rejected() {
             data: vec![0u8; 16],
             duration: 1000,
             keyframe: true,
+            composition_offset: 0,
         }],
         &[],
     );
@@ -289,6 +294,7 @@ fn fragmented_audio_only_track_works() {
             data: vec![(0x40 + i) as u8; 64],
             duration: 128,
             keyframe: true,
+            composition_offset: 0,
         })
         .collect();
     let mut m = MovMuxer::new().with_fragmentation(FragmentationMode::ByFrameCount(3));

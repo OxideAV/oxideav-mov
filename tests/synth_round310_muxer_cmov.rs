@@ -38,6 +38,7 @@ fn build_video_mov(compress: bool) -> (Vec<u8>, Vec<MuxSample>) {
             data: vec![0xAB; 64],
             duration: 1000,
             keyframe: i == 0,
+            composition_offset: 0,
         })
         .collect();
 

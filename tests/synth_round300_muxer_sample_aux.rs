@@ -35,6 +35,7 @@ fn build_audio_mov_with_aux(
             data: vec![(0xA0 | i) as u8; 8],
             duration: 1024,
             keyframe: true,
+            composition_offset: 0,
         })
         .collect();
     let mut m = MovMuxer::new().with_movie_timescale(600);
@@ -158,6 +159,7 @@ fn no_sample_aux_track_emits_no_boxes() {
         data: vec![0u8; 8],
         duration: 1024,
         keyframe: true,
+        composition_offset: 0,
     }];
     let mut m = MovMuxer::new();
     m.add_track(
