@@ -217,6 +217,12 @@ pub struct MovMuxer {
     /// a fragmented layout (`ftyp` + init-`moov` + N × `moof`+`mdat`)
     /// rather than the default non-fragmented `ftyp` + `mdat` + `moov`.
     fragmentation: Option<FragmentationMode>,
+    /// When `true`, the non-fragmented write path losslessly compresses
+    /// the serialized movie resource and emits it as a
+    /// `moov > cmov > dcom + cmvd` tree (QTFF p. 81, "Allowing QuickTime
+    /// to Compress the Movie Resource") instead of a plain `moov`.
+    /// Defaults to `false`. Has no effect on the fragmented path.
+    compress_movie_resource: bool,
 }
 
 impl Default for MovMuxer {
@@ -232,6 +238,7 @@ impl MovMuxer {
             movie_timescale: 600,
             tracks: Vec::new(),
             fragmentation: None,
+            compress_movie_resource: false,
         }
     }
 
@@ -264,6 +271,41 @@ impl MovMuxer {
     /// Return the configured fragmentation policy (if any).
     pub fn fragmentation_mode(&self) -> Option<FragmentationMode> {
         self.fragmentation
+    }
+
+    /// Opt-in lossless compression of the movie resource on the
+    /// non-fragmented write path (QTFF p. 81, "Allowing QuickTime to
+    /// Compress the Movie Resource").
+    ///
+    /// When enabled, [`MovMuxer::write_to`] / [`encode_to_vec`] still
+    /// lay out `ftyp` + `mdat` first (so the `stco` / `co64` chunk
+    /// offsets stay file-absolute and `mdat`-anchored exactly as in the
+    /// uncompressed layout), but the trailing `moov` is replaced by a
+    /// `moov` whose single child is a `cmov` carrying the zlib-deflated
+    /// (`dcom = 'zlib'`, RFC 1950) movie resource plus its 32-bit
+    /// uncompressed size in `cmvd` (QTFF p. 81 Table 2-5). The complete
+    /// uncompressed movie resource per QTFF p. 30 — the full `moov`
+    /// atom, header included — is what gets compressed, so the output
+    /// decompresses back to a byte-identical plain-`moov` file and
+    /// round-trips through this crate's own [`crate::cmov`] read path
+    /// (the demuxer transparently decompresses on open).
+    ///
+    /// Has no effect on the fragmented path
+    /// ([`encode_fragmented_to_vec`]) — QTFF p. 81 describes
+    /// movie-resource compression for the flatten-time movie atom, not
+    /// per-fragment `moof` boxes.
+    ///
+    /// [`encode_to_vec`]: MovMuxer::encode_to_vec
+    /// [`encode_fragmented_to_vec`]: MovMuxer::encode_fragmented_to_vec
+    pub fn with_compressed_movie_resource(mut self, compress: bool) -> Self {
+        self.compress_movie_resource = compress;
+        self
+    }
+
+    /// Return whether movie-resource compression is enabled for the
+    /// non-fragmented write path.
+    pub fn compresses_movie_resource(&self) -> bool {
+        self.compress_movie_resource
     }
 
     /// Append a track. Returns the resulting 1-based track id.
@@ -442,7 +484,25 @@ impl MovMuxer {
             }
         }
         let moov = build_moov(self, &chunk_offsets, need_co64, &aux_offsets);
-        push_atom(&mut out, *b"moov", &moov);
+        if self.compress_movie_resource {
+            // QTFF p. 30: the complete movie resource is the full `moov`
+            // atom (its 8-byte header included). p. 81: compress that
+            // resource losslessly and wrap the result in `moov > cmov >
+            // dcom + cmvd`. The chunk offsets above are file-absolute
+            // and anchored to `mdat` (laid down before `moov`), so they
+            // remain valid regardless of the compressed `moov`'s size.
+            let mut movie_resource = Vec::with_capacity(8 + moov.len());
+            push_atom(&mut movie_resource, *b"moov", &moov);
+            let cmov = crate::cmov::compress(&movie_resource)?;
+            // moov > cmov > dcom + cmvd (QTFF p. 81 Table 2-5): wrap the
+            // dcom/cmvd pair in a `cmov` atom, then that in the outer
+            // `moov`.
+            let mut compressed_moov = Vec::new();
+            push_atom(&mut compressed_moov, *b"cmov", &cmov.to_body_bytes());
+            push_atom(&mut out, *b"moov", &compressed_moov);
+        } else {
+            push_atom(&mut out, *b"moov", &moov);
+        }
         Ok(out)
     }
 
@@ -2008,5 +2068,106 @@ mod tests {
             },
         );
         assert!(err.is_err());
+    }
+
+    /// Encode a 1-track video movie, optionally compressing the movie
+    /// resource. Helper for the `cmov` write-side unit tests.
+    fn encode_video(compress: bool) -> Vec<u8> {
+        let mut m = MovMuxer::new()
+            .with_movie_timescale(600)
+            .with_compressed_movie_resource(compress);
+        m.add_track(
+            MuxTrackKind::Video {
+                format: *b"mp4v",
+                width: 320,
+                height: 240,
+            },
+            30000,
+            synth_video_samples(6),
+            &[],
+        );
+        m.encode_to_vec().expect("encode video MOV")
+    }
+
+    #[test]
+    fn compress_movie_resource_flag_defaults_off() {
+        assert!(!MovMuxer::new().compresses_movie_resource());
+        assert!(MovMuxer::new()
+            .with_compressed_movie_resource(true)
+            .compresses_movie_resource());
+    }
+
+    #[test]
+    fn compressed_write_emits_moov_cmov_dcom_cmvd_tree() {
+        let bytes = encode_video(true);
+        // The trailing moov wraps a single cmov child carrying dcom +
+        // cmvd (QTFF p. 81 Table 2-5). Locate the moov atom and parse
+        // its cmov via the crate's own reader.
+        let moov_pos = bytes
+            .windows(4)
+            .position(|w| w == b"moov")
+            .expect("moov FourCC present");
+        // moov size word precedes the FourCC.
+        let size_off = moov_pos - 4;
+        let moov_size =
+            u32::from_be_bytes(bytes[size_off..size_off + 4].try_into().unwrap()) as usize;
+        let moov_body = &bytes[moov_pos + 4..size_off + moov_size];
+        // First (only) child of moov is the cmov atom.
+        let cmov_size = u32::from_be_bytes(moov_body[0..4].try_into().unwrap()) as usize;
+        assert_eq!(&moov_body[4..8], b"cmov");
+        let cmov_body = &moov_body[8..cmov_size];
+        let cmov = crate::cmov::parse_cmov(cmov_body).expect("parse cmov body");
+        assert_eq!(cmov.dcom.algorithm, crate::cmov::DCOM_ALG_ZLIB);
+        // The decompressed resource is itself a complete moov atom.
+        let resource = cmov.decompress().expect("decompress movie resource");
+        assert_eq!(
+            &resource[4..8],
+            b"moov",
+            "decompressed resource is a moov atom"
+        );
+        assert_eq!(
+            resource.len() as u32,
+            cmov.cmvd.uncompressed_size,
+            "decompressed length equals the cmvd size word"
+        );
+    }
+
+    #[test]
+    fn compressed_resource_decompresses_to_the_plain_moov() {
+        let plain = encode_video(false);
+        let compressed = encode_video(true);
+
+        // The plain output's trailing moov atom (header + body).
+        let plain_moov_pos = plain
+            .windows(4)
+            .position(|w| w == b"moov")
+            .expect("plain moov present");
+        let plain_moov = &plain[plain_moov_pos - 4..];
+
+        // Decompress the compressed output's movie resource.
+        let cmov_moov_pos = compressed
+            .windows(4)
+            .position(|w| w == b"moov")
+            .expect("compressed moov present");
+        let cmov_pos = cmov_moov_pos + 4; // start of cmov atom (size word)
+        let cmov_size =
+            u32::from_be_bytes(compressed[cmov_pos..cmov_pos + 4].try_into().unwrap()) as usize;
+        let cmov_body = &compressed[cmov_pos + 8..cmov_pos + cmov_size];
+        let cmov = crate::cmov::parse_cmov(cmov_body).expect("parse cmov");
+        let resource = cmov.decompress().expect("decompress");
+
+        assert_eq!(
+            resource, plain_moov,
+            "decompressed resource is byte-identical to the plain moov atom"
+        );
+    }
+
+    #[test]
+    fn plain_write_emits_no_cmov() {
+        let plain = encode_video(false);
+        assert!(
+            !plain.windows(4).any(|w| w == b"cmov"),
+            "plain output must carry no cmov atom"
+        );
     }
 }

@@ -1406,6 +1406,39 @@ non-moov-resource / oversize-declaration / truncated-stream
 rejections) pin the behaviour. The daily fuzz harness reaches the
 decompression path automatically through `MovDemuxer::open`.
 
+Round 310 closes the loop on the **`MovMuxer` write side** for
+compressed movie resources (QTFF pp. 80 – 81, "Allowing QuickTime to
+Compress the Movie Resource" / Table 2-5). Round 283 landed the read
+path plus the `compress_movie_resource` / [`Cmov::to_body_bytes`]
+building blocks but the muxer never elected to compress the movie
+resource it wrote. The new opt-in builder
+[`MovMuxer::with_compressed_movie_resource`] (default off; queryable via
+`MovMuxer::compresses_movie_resource`) makes the non-fragmented write
+path (`encode_to_vec` / `write_to`) emit a `moov > cmov > dcom + cmvd`
+tree instead of a plain `moov`. The `ftyp` + `mdat` are still laid down
+first, so the `stco` / `co64` chunk offsets stay file-absolute and
+`mdat`-anchored exactly as in the uncompressed layout — compressing the
+trailing `moov` never moves the sample data. Per QTFF p. 30 the
+complete movie resource is the full `moov` atom (its 8-byte header
+included), so the muxer compresses exactly that serialized atom; the
+output decompresses back to a byte-identical plain-`moov` file and
+round-trips through this crate's own `cmov` read path (the demuxer
+transparently decompresses on open, surfacing
+`compressed_movie_algorithm = Some(*b"zlib")`). The fragmented path
+(`encode_fragmented_to_vec`) is unaffected — QTFF p. 81 describes
+movie-resource compression for the flatten-time movie atom, not
+per-fragment `moof` boxes. Pinned by 4 unit tests in `src/muxer.rs`
+(flag default-off + builder set; the emitted tree parses through
+`parse_cmov` with the `'zlib'` algorithm and a decompressed resource
+that is itself a complete `moov` atom whose length equals the `cmvd`
+size word; the decompressed resource is byte-identical to the
+plain-path `moov`; the plain path emits no `cmov`) plus 5 end-to-end
+tests in `tests/synth_round310_muxer_cmov.rs` (plain and compressed
+builds open to identical mvhd / track / packet state with the algorithm
+FourCC surfaced on one and `None` on the other; the compressed output
+is smaller; the compressed output carries the `cmov` / `dcom` / `cmvd`
+tree; the plain output carries no `cmov`; the flag defaults off).
+
 ## Follow-ups
 
 - A `next_packet`-side opt-in (`MovDemuxer::with_edit_list_pts()`?)
@@ -1418,13 +1451,6 @@ decompression path automatically through `MovDemuxer::open`.
   the math against the QTFF worked example via synth fixtures, but a
   real `ffmpeg -filter:v setpts=PTS*2` reference would harden against
   rounding-convention drift.
-- `MovMuxer` write-side `cmov` emission: round 283 lands the full
-  read path plus the `compress_movie_resource` / `Cmov::to_body_bytes`
-  building blocks, but the muxer never elects to compress the movie
-  resource it writes (the QTFF p. 81 "Allowing QuickTime to Compress
-  the Movie Resource" flatten-time option). An opt-in muxer flag
-  could wrap the serialized `moov` body in `moov > cmov > dcom+cmvd`
-  at finalize time.
 - The Motion-JPEG sample-data surface itself (QTFF pp. 94 – 97):
   with both default tables (`mjqt` round 267, `mjht` round 279) now
   typed, the remaining grounded Motion-JPEG work is the format A
