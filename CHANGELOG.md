@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Round 319 — MovMuxer write-side `csgp` (CompactSampleToGroupBox) emission at `stbl` scope (ISO/IEC 14496-12:2020 §8.9.5): `add_sample_to_group(track_id, SampleToGroupWrite { grouping_type, grouping_type_parameter, indices })` attaches a per-sample group-description-index mapping; the muxer run-length-encodes it into the compact pattern form (one `pattern_length == 1` pattern per run) with minimum width selectors, and the existing `parse_csgp` read path expands it back to the exact per-sample assignment
 - Round 315 — MovMuxer write-side `ctts` composition-offset emission (ISO/IEC 14496-12 §8.6.1.3): `MuxSample.composition_offset` (PTS − DTS) round-trips B-frame reorder through MovDemuxer; box omitted when all-zero, v0 when all-non-negative, v1 (signed) when any offset is negative
 
 ## [0.0.4](https://github.com/OxideAV/oxideav-mov/compare/v0.0.3...v0.0.4) - 2026-06-15

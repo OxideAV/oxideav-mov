@@ -86,6 +86,13 @@ offset is negative — so B-frame reorder round-trips PTS exactly.
   on both the non-fragmented (`stbl`-scope, absolute offset) and
   fragmented (`traf`-scope, moof-relative offset) paths — e.g. for
   Common Encryption per-sample records.
+- `add_sample_to_group(track_id, SampleToGroupWrite)` writes a `csgp`
+  (CompactSampleToGroupBox, ISO/IEC 14496-12:2020 §8.9.5) per
+  `grouping_type` at `stbl` scope. The per-sample group-description
+  indices are run-length-encoded into the compact pattern form (one
+  `pattern_length == 1` pattern per run) with minimum-width field
+  selectors; the `parse_csgp` read path expands them back to the exact
+  per-sample assignment.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.

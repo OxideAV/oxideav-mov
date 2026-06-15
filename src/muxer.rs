@@ -129,6 +129,49 @@ pub struct SampleAuxStream {
     pub per_sample: Vec<Vec<u8>>,
 }
 
+/// Per-track sample-to-group assignment destined for a `stbl`-scope
+/// `csgp` (CompactSampleToGroupBox, ISO/IEC 14496-12:2020 §8.9.5).
+///
+/// A sample-to-group mapping assigns each sample a 1-based
+/// `group_description_index` into a sibling `sgpd` (Sample Group
+/// Description Box) selected by `grouping_type`; index `0` means the
+/// sample belongs to no group of that type. The classic carrier is
+/// the run-length `sbgp` box, but ISO/IEC 14496-12:2020 added the
+/// **compact** `csgp` form which replicates a small set of
+/// per-sample-index *patterns* across the track. The muxer emits
+/// `csgp` because it is the strictly more compact encoding of the same
+/// information and its read path
+/// ([`crate::sample_groups::parse_csgp`]) already expands it back to
+/// the identical run-length list a `sbgp` would have produced.
+///
+/// The read-side counterpart is
+/// [`crate::sample_table::SampleTable`]'s sample-group accessors; a
+/// file written with this assignment round-trips back through
+/// `MovDemuxer` with the same per-sample group-description indices.
+///
+/// Layout / flag-derived width selectors are documented in
+/// `docs/container/isobmff/post-2015-additions.md`
+/// ("`csgp` — Compact Sample to Group Box").
+#[derive(Clone, Debug)]
+pub struct SampleToGroupWrite {
+    /// `grouping_type` FourCC (`roll`, `rap `, `prol`, …) naming the
+    /// sibling `sgpd` whose descriptions these indices reference.
+    pub grouping_type: [u8; 4],
+    /// Optional `grouping_type_parameter` (§8.9.3). When `Some`, the
+    /// emitted `csgp` sets the `grouping_type_parameter_present` flag
+    /// bit and carries the 32-bit value; when `None`, the bit is clear
+    /// and the field is omitted.
+    pub grouping_type_parameter: Option<u32>,
+    /// One 1-based `group_description_index` per sample, in sample
+    /// (decode) order. The length must equal the track's sample count.
+    /// A value of `0` assigns the sample to no group of this type
+    /// (§8.9.3 — "the value 0 is reserved … means the sample is a
+    /// member of no group"). Indices round-trip verbatim, including the
+    /// `0x8000_0000` fragment-local msb if a caller chooses to set it
+    /// (see [`crate::sample_groups::split_csgp_index`]).
+    pub indices: Vec<u32>,
+}
+
 /// Per-track media kind dispatch — drives `hdlr.component_subtype`,
 /// the `vmhd`/`smhd` choice, and the `stsd` body shape.
 #[derive(Clone, Debug)]
@@ -173,6 +216,11 @@ struct TrackWrite {
     /// lays the per-sample blobs into `mdat` after the track's sample
     /// data and emits a matching `saiz` + single-entry `saio` pair.
     sample_aux: Option<SampleAuxStream>,
+    /// Optional `stbl`-scope sample-to-group assignments (ISO/IEC
+    /// 14496-12:2020 §8.9.5). Each entry emits one `csgp`
+    /// (CompactSampleToGroupBox); multiple entries (distinct
+    /// `grouping_type`s) emit one `csgp` each, in insertion order.
+    sample_to_groups: Vec<SampleToGroupWrite>,
 }
 
 /// Fragmentation policy for [`MovMuxer::write_to_fragmented`].
@@ -338,6 +386,7 @@ impl MovMuxer {
             samples,
             extra_stsd_atoms: extra_stsd_atoms.to_vec(),
             sample_aux: None,
+            sample_to_groups: Vec::new(),
         });
         self.tracks.len() as u32
     }
@@ -398,6 +447,64 @@ impl MovMuxer {
             )));
         }
         self.tracks[idx].sample_aux = Some(stream);
+        Ok(())
+    }
+
+    /// Attach a `stbl`-scope sample-to-group assignment to a
+    /// previously-added track, emitted as a `csgp`
+    /// (CompactSampleToGroupBox, ISO/IEC 14496-12:2020 §8.9.5).
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// The assignment's `indices` length must equal the track's sample
+    /// count; otherwise this returns an error and the track is left
+    /// unchanged.
+    ///
+    /// On the next non-fragmented [`MovMuxer::encode_to_vec`] /
+    /// [`write_to`](MovMuxer::write_to), a `csgp` is emitted inside the
+    /// track's `stbl` after the chunk-offset table. The muxer encodes
+    /// the per-sample indices in the compact pattern form (one
+    /// `pattern_length == 1` pattern per run of consecutive equal
+    /// indices), which the read path
+    /// ([`crate::sample_groups::parse_csgp`]) expands back to the exact
+    /// per-sample assignment.
+    ///
+    /// Multiple calls with distinct `grouping_type`s accumulate (one
+    /// `csgp` per call); a second call with a `grouping_type` already
+    /// present **replaces** the prior assignment for that type. The
+    /// muxer does not emit the sibling `sgpd` — the caller supplies the
+    /// group descriptions through `extra` `stbl` content or a follow-up
+    /// API; `csgp` only carries the index mapping.
+    pub fn add_sample_to_group(
+        &mut self,
+        track_id: u32,
+        assignment: SampleToGroupWrite,
+    ) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: add_sample_to_group unknown track id {track_id}"
+                ))
+            })?;
+        let want = self.tracks[idx].samples.len();
+        if assignment.indices.len() != want {
+            return Err(Error::invalid(format!(
+                "MOV muxer: sample-to-group has {} indices but track {track_id} has {want} samples",
+                assignment.indices.len()
+            )));
+        }
+        // Replace-by-grouping_type so a caller correcting an assignment
+        // does not leave two `csgp` boxes naming the same `sgpd`.
+        if let Some(slot) = self.tracks[idx]
+            .sample_to_groups
+            .iter_mut()
+            .find(|g| g.grouping_type == assignment.grouping_type)
+        {
+            *slot = assignment;
+        } else {
+            self.tracks[idx].sample_to_groups.push(assignment);
+        }
         Ok(())
     }
 
@@ -962,7 +1069,115 @@ fn build_stbl(
         push_atom(&mut stbl, *b"saiz", &build_saiz(aux));
         push_atom(&mut stbl, *b"saio", &build_saio(aux, off));
     }
+    // Compact Sample to Group Box(es) (ISO/IEC 14496-12:2020 §8.9.5) —
+    // one `csgp` per attached grouping_type, after the sample-aux pair.
+    for g in &t.sample_to_groups {
+        push_atom(&mut stbl, *b"csgp", &build_csgp(g));
+    }
     stbl
+}
+
+/// Minimal 2-bit size code (per `docs/container/isobmff/
+/// post-2015-additions.md`, `f(code) = 4 << code` → {0→4,1→8,2→16,
+/// 3→32}) that can represent every value in `vals`. Returns the code
+/// `0..=3` and its bit width. An empty input or all-zero values still
+/// needs at least the 4-bit minimum (code 0).
+fn csgp_min_size_code(max_val: u32) -> (u32, u32) {
+    for code in 0u32..=2 {
+        let width = 4u32 << code; // 4, 8, 16
+                                  // The widest representable value at `width` bits.
+        let cap: u64 = (1u64 << width) - 1;
+        if (max_val as u64) <= cap {
+            return (code, width);
+        }
+    }
+    (3, 32)
+}
+
+/// Append `value` to `bits` as a big-endian (MSB-first) field of
+/// `width` bits, packed contiguously after the bits already present.
+/// `bit_len` tracks the current bit cursor; the byte buffer grows as
+/// needed and trailing bits in the final partial byte are left zero.
+fn csgp_push_bits(bytes: &mut Vec<u8>, bit_len: &mut usize, value: u32, width: u32) {
+    for i in (0..width).rev() {
+        let bit = ((value >> i) & 1) as u8;
+        let byte_idx = *bit_len >> 3;
+        if byte_idx == bytes.len() {
+            bytes.push(0);
+        }
+        if bit != 0 {
+            bytes[byte_idx] |= 1 << (7 - (*bit_len & 7));
+        }
+        *bit_len += 1;
+    }
+}
+
+/// Build a `csgp` (CompactSampleToGroupBox) payload from a per-sample
+/// index assignment. ISO/IEC 14496-12:2020 §8.9.5, layout per
+/// `docs/container/isobmff/post-2015-additions.md`.
+///
+/// Encoding strategy: run-length the per-sample indices, then emit one
+/// pattern of `pattern_length == 1` per run — pattern `[idx]` replayed
+/// `sample_count` times reproduces a run of `sample_count` equal
+/// indices. This is the compact analogue of the run-length `sbgp`
+/// rows and round-trips losslessly through [`parse_csgp`]: that reader
+/// expands each pattern sample-by-sample and RLE-coalesces, recovering
+/// the original runs. The three width selectors are chosen as the
+/// minimum that fits (`pattern_length` is always 1 → 4-bit code 0;
+/// `sample_count` sized to the longest run; index sized to the largest
+/// description index).
+///
+/// [`parse_csgp`]: crate::sample_groups::parse_csgp
+fn build_csgp(g: &SampleToGroupWrite) -> Vec<u8> {
+    // Run-length the per-sample indices.
+    let mut runs: Vec<(u32, u32)> = Vec::new(); // (sample_count, index)
+    for &idx in &g.indices {
+        match runs.last_mut() {
+            Some(last) if last.1 == idx => last.0 += 1,
+            _ => runs.push((1, idx)),
+        }
+    }
+
+    let max_count = runs.iter().map(|r| r.0).max().unwrap_or(0);
+    let max_index = runs.iter().map(|r| r.1).max().unwrap_or(0);
+    // pattern_length is always 1 here → code 0 (4 bits) always suffices.
+    let pattern_size_code = 0u32;
+    let pattern_width = 4u32;
+    let (count_size_code, count_width) = csgp_min_size_code(max_count);
+    let (index_size_code, index_width) = csgp_min_size_code(max_index);
+    let gtp_present = g.grouping_type_parameter.is_some();
+
+    // flags (24-bit, LSB numbering): index[0..1] | count[2..3] |
+    // pattern[4..5] | gtp_present[6].
+    let flags: u32 = index_size_code
+        | (count_size_code << 2)
+        | (pattern_size_code << 4)
+        | (u32::from(gtp_present) << 6);
+
+    let mut p = Vec::new();
+    p.push(0); // version 0
+    p.extend_from_slice(&flags.to_be_bytes()[1..]); // 24-bit flags
+    p.extend_from_slice(&g.grouping_type);
+    if let Some(gtp) = g.grouping_type_parameter {
+        p.extend_from_slice(&gtp.to_be_bytes());
+    }
+    p.extend_from_slice(&(runs.len() as u32).to_be_bytes()); // pattern_count
+
+    // The pattern table and the index table form one contiguous
+    // MSB-first bitstream beginning right after `pattern_count`.
+    let mut bits: Vec<u8> = Vec::new();
+    let mut bit_len = 0usize;
+    // Pattern table: pattern_length[i] (always 1), sample_count[i].
+    for &(count, _idx) in &runs {
+        csgp_push_bits(&mut bits, &mut bit_len, 1, pattern_width);
+        csgp_push_bits(&mut bits, &mut bit_len, count, count_width);
+    }
+    // Index table: one index per pattern (pattern_length == 1).
+    for &(_count, idx) in &runs {
+        csgp_push_bits(&mut bits, &mut bit_len, idx, index_width);
+    }
+    p.extend_from_slice(&bits);
+    p
 }
 
 /// Build a `saiz` (Sample Auxiliary Information Sizes Box) payload —
@@ -1853,6 +2068,7 @@ mod tests {
             ],
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
+            sample_to_groups: Vec::new(),
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -1888,6 +2104,7 @@ mod tests {
                 .collect(),
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
+            sample_to_groups: Vec::new(),
         }
     }
 
@@ -2008,6 +2225,7 @@ mod tests {
             ],
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
+            sample_to_groups: Vec::new(),
         };
         assert!(build_stss(&t).is_none());
     }
@@ -2024,6 +2242,7 @@ mod tests {
             samples: synth_video_samples(11),
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
+            sample_to_groups: Vec::new(),
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -2068,6 +2287,7 @@ mod tests {
             ],
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
+            sample_to_groups: Vec::new(),
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -2103,6 +2323,7 @@ mod tests {
             ],
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
+            sample_to_groups: Vec::new(),
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows
@@ -2370,6 +2591,121 @@ mod tests {
         assert!(
             !plain.windows(4).any(|w| w == b"cmov"),
             "plain output must carry no cmov atom"
+        );
+    }
+
+    // ───────────────────────── csgp builder ─────────────────────────
+
+    /// Expand a built `csgp` back through the read path and assert the
+    /// per-sample index assignment is recovered exactly.
+    fn assert_csgp_roundtrip(grouping_type: [u8; 4], gtp: Option<u32>, indices: &[u32]) {
+        let g = SampleToGroupWrite {
+            grouping_type,
+            grouping_type_parameter: gtp,
+            indices: indices.to_vec(),
+        };
+        let body = build_csgp(&g);
+        let parsed = crate::sample_groups::parse_csgp(&body).expect("parse_csgp(built csgp)");
+        assert_eq!(parsed.grouping_type, grouping_type);
+        assert_eq!(parsed.grouping_type_parameter, gtp.unwrap_or(0));
+        // covered_samples must equal the sample count we encoded.
+        assert_eq!(parsed.covered_samples(), indices.len() as u64);
+        for (i, &want) in indices.iter().enumerate() {
+            assert_eq!(
+                parsed.group_index_for_sample(i as u32),
+                want,
+                "sample {i} index mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn csgp_min_size_code_boundaries() {
+        assert_eq!(csgp_min_size_code(0), (0, 4));
+        assert_eq!(csgp_min_size_code(15), (0, 4)); // 4-bit max
+        assert_eq!(csgp_min_size_code(16), (1, 8));
+        assert_eq!(csgp_min_size_code(255), (1, 8)); // 8-bit max
+        assert_eq!(csgp_min_size_code(256), (2, 16));
+        assert_eq!(csgp_min_size_code(65535), (2, 16)); // 16-bit max
+        assert_eq!(csgp_min_size_code(65536), (3, 32));
+        assert_eq!(csgp_min_size_code(u32::MAX), (3, 32));
+    }
+
+    #[test]
+    fn csgp_roundtrips_simple_runs() {
+        // Two groups of two samples each: indices [1,1,2,2].
+        assert_csgp_roundtrip(*b"roll", None, &[1, 1, 2, 2]);
+    }
+
+    #[test]
+    fn csgp_roundtrips_alternating_indices() {
+        // No coalescible runs — each sample differs from its neighbour.
+        assert_csgp_roundtrip(*b"rap ", None, &[1, 0, 2, 0, 3]);
+    }
+
+    #[test]
+    fn csgp_roundtrips_zero_index_no_group() {
+        // Every sample assigned to "no group" (index 0).
+        assert_csgp_roundtrip(*b"prol", None, &[0, 0, 0]);
+    }
+
+    #[test]
+    fn csgp_roundtrips_with_grouping_type_parameter() {
+        assert_csgp_roundtrip(*b"seig", Some(0xDEAD_BEEF), &[1, 2, 3, 1, 2, 3]);
+    }
+
+    #[test]
+    fn csgp_widths_grow_with_value_magnitude() {
+        // A long run forces a wider count field; a large index forces a
+        // wider index field. Round-trip must still be exact.
+        let mut idx = vec![5u32; 300]; // run length 300 > 255 ⇒ 16-bit count
+        idx.push(70_000); // index > 65535 ⇒ 32-bit index field
+        assert_csgp_roundtrip(*b"roll", None, &idx);
+
+        // Confirm the flags actually encode the wider codes.
+        let g = SampleToGroupWrite {
+            grouping_type: *b"roll",
+            grouping_type_parameter: None,
+            indices: idx,
+        };
+        let body = build_csgp(&g);
+        let flags = u32::from_be_bytes([0, body[1], body[2], body[3]]);
+        assert_eq!(flags & 0b11, 3, "index_size_code → 32-bit");
+        assert_eq!((flags >> 2) & 0b11, 2, "count_size_code → 16-bit");
+        assert_eq!((flags >> 4) & 0b11, 0, "pattern_size_code → 4-bit");
+        assert_eq!((flags >> 6) & 1, 0, "gtp present bit clear");
+    }
+
+    #[test]
+    fn csgp_preserves_fragment_local_msb() {
+        // The 0x8000_0000 msb round-trips verbatim (a stbl-scope csgp
+        // treats it as part of the index value).
+        let raw = crate::sample_groups::CSGP_FRAGMENT_LOCAL_BIT | 7;
+        assert_csgp_roundtrip(*b"roll", None, &[raw, raw, 7]);
+    }
+
+    #[test]
+    fn build_stbl_emits_csgp_when_attached() {
+        let mut t = track_with_offsets(&[0, 0, 0, 0]);
+        t.sample_to_groups.push(SampleToGroupWrite {
+            grouping_type: *b"roll",
+            grouping_type_parameter: None,
+            indices: vec![1, 1, 2, 2],
+        });
+        let stbl = build_stbl(&t, 0x40, false, None);
+        assert!(
+            stbl.windows(4).any(|w| w == b"csgp"),
+            "stbl must carry a csgp when an assignment is attached"
+        );
+    }
+
+    #[test]
+    fn build_stbl_omits_csgp_when_none() {
+        let t = track_with_offsets(&[0, 0, 0, 0]);
+        let stbl = build_stbl(&t, 0x40, false, None);
+        assert!(
+            !stbl.windows(4).any(|w| w == b"csgp"),
+            "stbl must carry no csgp when no assignment is attached"
         );
     }
 }
