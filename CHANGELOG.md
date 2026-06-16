@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Round 325 — Sound Sample Description version-1 read path (QTFF p. 101 `SoundDescriptionV1`): `SampleDescription` now surfaces `audio_version`, `audio_compression_id`, and the typed `SoundV1` fixed-ratio fields (`samples_per_packet` / `bytes_per_packet` / `bytes_per_frame` / `bytes_per_sample`); `is_vbr()` decodes the variable-bit-rate "third variant" (version 1, Compression ID `-2`, QTFF p. 102). Short / truncated v1 bodies fall back to the version-0 extra-scan start without over-reading
 - Round 319 — MovMuxer write-side `csgp` (CompactSampleToGroupBox) emission at `stbl` scope (ISO/IEC 14496-12:2020 §8.9.5): `add_sample_to_group(track_id, SampleToGroupWrite { grouping_type, grouping_type_parameter, indices })` attaches a per-sample group-description-index mapping; the muxer run-length-encodes it into the compact pattern form (one `pattern_length == 1` pattern per run) with minimum width selectors, and the existing `parse_csgp` read path expands it back to the exact per-sample assignment
 - Round 315 — MovMuxer write-side `ctts` composition-offset emission (ISO/IEC 14496-12 §8.6.1.3): `MuxSample.composition_offset` (PTS − DTS) round-trips B-frame reorder through MovDemuxer; box omitted when all-zero, v0 when all-non-negative, v1 (signed) when any offset is negative
 

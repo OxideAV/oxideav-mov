@@ -48,6 +48,15 @@ Decoding stays in codec crates: this crate calls
 - Video sample-description extensions: `gama`, `pasp`, `clap`, `colr`,
   `fiel` (field handling), and the default Motion-JPEG `mjqt` / `mjht`
   tables (surfaced verbatim).
+- Sound sample-description versioning: version-0 (uncompressed-sample)
+  and version-1 (QTFF p. 101 `SoundDescriptionV1`) layouts. The four
+  fixed-ratio fields (`samples_per_packet`, `bytes_per_packet`,
+  `bytes_per_frame`, `bytes_per_sample`) surface typed via
+  [`SoundV1`]; `audio_version` + `audio_compression_id` are exposed,
+  and `is_vbr()` decodes the variable-bit-rate "third variant"
+  (version 1, Compression ID `-2`, QTFF p. 102). The Apple `chan`
+  channel layout is parsed; codec-private blobs (`wave` /
+  `esds` / `frma`) stay opaque for the codec crates.
 - Fragmented MP4 / fMP4 / DASH: `mvex/trex` defaults +
   `moof/traf/tfhd/trun` cascade, `tfdt` baseline DTS, `leva` level
   assignment, and per-fragment sample-aux. `mfra/tfra/mfro`-driven

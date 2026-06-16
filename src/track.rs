@@ -84,6 +84,37 @@ impl TrackRefKind {
     }
 }
 
+/// The four fixed-compression-ratio fields a Sound Sample Description
+/// **version 1** appends after the version-0 fixed fields (QTFF p. 101,
+/// `SoundDescriptionV1`). All four are 32-bit big-endian unsigned
+/// integers; each is `0` when "not used" (a reader detects the
+/// not-used case by `samples_per_packet == 0`, per QTFF p. 101).
+///
+/// The fields are taken directly from the Sound Manager
+/// `CompressionInfo` structure and describe the fixed compression ratio
+/// of constant-bit-rate audio codecs:
+///
+/// * `samples_per_packet` — uncompressed samples in one packet.
+/// * `bytes_per_packet` — resulting compressed bytes for **one** channel.
+/// * `bytes_per_frame` — compressed bytes for **all** channels
+///   (`channels * bytes_per_packet`).
+/// * `bytes_per_sample` — size of one uncompressed sample.
+///
+/// For the VBR third variant (QTFF p. 102, `compression_id == -2`) only
+/// `samples_per_packet` and `bytes_per_sample` are meaningful; the other
+/// two are reserved and set to `0`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SoundV1 {
+    /// Number of uncompressed samples in a packet.
+    pub samples_per_packet: u32,
+    /// Compressed bytes for one channel.
+    pub bytes_per_packet: u32,
+    /// Compressed bytes for all channels (`channels * bytes_per_packet`).
+    pub bytes_per_frame: u32,
+    /// Size of one uncompressed sample.
+    pub bytes_per_sample: u32,
+}
+
 /// One sample-description-table entry. QTFF p. 70 ("Sample
 /// Description Atoms") — the first 16 bytes are universal:
 /// `[size:4][format:4][reserved:6][data_reference_index:2]`. Per-
@@ -150,6 +181,28 @@ pub struct SampleDescription {
     /// `chan` — Apple Core Audio channel layout (raw fields surfaced).
     pub chan: Option<Chan>,
 
+    // ─────── Round-325 sound sample description version ───────
+    /// Sound Sample Description format version (QTFF p. 100). `0` for
+    /// the classic uncompressed-sample layout, `1` for the QuickTime-3
+    /// extension carrying the fixed-ratio [`SoundV1`] fields. Populated
+    /// only for audio sample descriptions; left at the `0` default for
+    /// video / timecode / other handlers.
+    pub audio_version: u16,
+    /// Sound Sample Description Compression ID (QTFF p. 100). Normally
+    /// `0`; a value of `-2` (surfaced here as the signed reinterpretation
+    /// of the on-wire `0xFFFE`) flags the VBR "third variant" (QTFF
+    /// p. 102): the sample table then documents *compressed frames*, not
+    /// uncompressed samples. [`SampleDescription::is_vbr`] decodes this.
+    pub audio_compression_id: i16,
+    /// `samples_per_packet` / `bytes_per_packet` / `bytes_per_frame` /
+    /// `bytes_per_sample` from a Sound Sample Description **version 1**
+    /// (QTFF p. 101, `SoundDescriptionV1`). `None` for version-0
+    /// descriptions and for non-audio handlers. These let a reader work
+    /// out the fixed compression ratio (or, for VBR, the constant
+    /// samples-per-packet / bytes-per-sample) without instantiating the
+    /// decompressor.
+    pub sound_v1: Option<SoundV1>,
+
     // ─────── Round-6 timecode extension ───────
     /// Parsed `tmcd` sample-description body — populated only when the
     /// track's handler is a time-code track (`hdlr.is_timecode()`) and
@@ -178,6 +231,20 @@ impl SampleDescription {
     /// [`SampleDescription::gamma`] directly.
     pub fn gamma_value(&self) -> Option<f64> {
         self.gamma.map(|g| g as f64 / 65536.0)
+    }
+
+    /// Whether this audio sample description flags the variable-bit-rate
+    /// "third variant" (QTFF p. 102): a version-1 sound description whose
+    /// Compression ID is `-2`. When true, each sample in the track is a
+    /// *compressed frame* of audio and the sample-size table documents
+    /// the per-frame compressed sizes (which vary for VBR) rather than a
+    /// fixed uncompressed-sample size.
+    ///
+    /// Returns `false` for version-0 descriptions, for video / timecode
+    /// handlers, and for any audio description whose Compression ID is
+    /// not `-2`.
+    pub fn is_vbr(&self) -> bool {
+        self.audio_version == 1 && self.audio_compression_id == -2
     }
 }
 
@@ -720,13 +787,37 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
             // → 20 bytes; v1 adds 16 bytes more (samples_per_packet,
             //   bytes_per_packet, bytes_per_frame, bytes_per_sample).
             let version = u16::from_be_bytes([body[0], body[1]]);
+            entry.audio_version = version;
             entry.channels = u16::from_be_bytes([body[8], body[9]]);
             entry.bits_per_sample = u16::from_be_bytes([body[10], body[11]]);
+            // Compression ID (QTFF p. 100): a signed 16-bit field. `0`
+            // for the common case; `-2` (on-wire `0xFFFE`) flags the VBR
+            // third variant on a version-1 description.
+            entry.audio_compression_id = i16::from_be_bytes([body[12], body[13]]);
             entry.sample_rate = u32::from_be_bytes([body[16], body[17], body[18], body[19]]) >> 16;
             // Sample rate is 16.16; integer portion lives in the high 16 bits.
+            // Version 1 (QTFF p. 101) appends four 32-bit fixed-ratio
+            // fields after the 20-byte version-0 fixed body; surface them
+            // typed and start the codec `extra` scan past them.
             let extra_start = match version {
                 0 => 20usize,
-                1 if body.len() >= 36 => 36,
+                1 if body.len() >= 36 => {
+                    entry.sound_v1 = Some(SoundV1 {
+                        samples_per_packet: u32::from_be_bytes([
+                            body[20], body[21], body[22], body[23],
+                        ]),
+                        bytes_per_packet: u32::from_be_bytes([
+                            body[24], body[25], body[26], body[27],
+                        ]),
+                        bytes_per_frame: u32::from_be_bytes([
+                            body[28], body[29], body[30], body[31],
+                        ]),
+                        bytes_per_sample: u32::from_be_bytes([
+                            body[32], body[33], body[34], body[35],
+                        ]),
+                    });
+                    36
+                }
                 _ => 20,
             };
             if body.len() > extra_start {
@@ -915,5 +1006,91 @@ mod tests {
         assert_eq!(v[0].channels, 2);
         assert_eq!(v[0].bits_per_sample, 16);
         assert_eq!(v[0].sample_rate, 44100);
+        // Version-0 description: no v1 fields, not VBR.
+        assert_eq!(v[0].audio_version, 0);
+        assert_eq!(v[0].sound_v1, None);
+        assert!(!v[0].is_vbr());
+    }
+
+    /// Build an stsd payload carrying a single audio entry whose
+    /// version-0 fixed body has `version`, `compression_id`, and the
+    /// optional version-1 fixed-ratio fields set. `v1` supplies the four
+    /// version-1 longs (and forces a 36-byte body); when `None` the body
+    /// is the 20-byte version-0 form.
+    fn audio_stsd(version: u16, compression_id: i16, v1: Option<[u32; 4]>) -> Vec<u8> {
+        let body_len = if v1.is_some() { 36 } else { 20 };
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+        p.extend_from_slice(&1u32.to_be_bytes()); // n_entries
+        let entry_size = (16 + body_len) as u32;
+        p.extend_from_slice(&entry_size.to_be_bytes());
+        p.extend_from_slice(b"ms\x00\x11"); // arbitrary compressed format
+        p.extend_from_slice(&[0u8; 6]); // reserved
+        p.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index
+        let mut body = vec![0u8; body_len];
+        body[0..2].copy_from_slice(&version.to_be_bytes());
+        body[8..10].copy_from_slice(&1u16.to_be_bytes()); // channels=1
+        body[10..12].copy_from_slice(&16u16.to_be_bytes()); // bits=16
+        body[12..14].copy_from_slice(&compression_id.to_be_bytes());
+        body[16..20].copy_from_slice(&((22050u32) << 16).to_be_bytes());
+        if let Some([spp, bpp, bpf, bps]) = v1 {
+            body[20..24].copy_from_slice(&spp.to_be_bytes());
+            body[24..28].copy_from_slice(&bpp.to_be_bytes());
+            body[28..32].copy_from_slice(&bpf.to_be_bytes());
+            body[32..36].copy_from_slice(&bps.to_be_bytes());
+        }
+        p.extend_from_slice(&body);
+        p
+    }
+
+    #[test]
+    fn stsd_audio_v1_surfaces_fixed_ratio_fields() {
+        // QTFF p. 101 version-1 sound description: the four 32-bit
+        // fixed-ratio longs follow the 20-byte version-0 body.
+        let p = audio_stsd(1, 0, Some([1024, 384, 384, 2]));
+        let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+        assert_eq!(v[0].audio_version, 1);
+        assert_eq!(v[0].audio_compression_id, 0);
+        assert_eq!(
+            v[0].sound_v1,
+            Some(SoundV1 {
+                samples_per_packet: 1024,
+                bytes_per_packet: 384,
+                bytes_per_frame: 384,
+                bytes_per_sample: 2,
+            })
+        );
+        assert!(!v[0].is_vbr());
+    }
+
+    #[test]
+    fn stsd_audio_vbr_third_variant_flagged() {
+        // QTFF p. 102: a version-1 description with Compression ID == -2
+        // marks the VBR third variant. On-wire that is `0xFFFE`.
+        let p = audio_stsd(1, -2, Some([1152, 0, 0, 2]));
+        let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+        assert_eq!(v[0].audio_version, 1);
+        assert_eq!(v[0].audio_compression_id, -2);
+        assert!(v[0].is_vbr());
+        // Per QTFF p. 102 only samples_per_packet + bytes_per_sample are
+        // meaningful for VBR; the other two are reserved zero.
+        let sv1 = v[0].sound_v1.unwrap();
+        assert_eq!(sv1.samples_per_packet, 1152);
+        assert_eq!(sv1.bytes_per_sample, 2);
+        assert_eq!(sv1.bytes_per_packet, 0);
+        assert_eq!(sv1.bytes_per_frame, 0);
+    }
+
+    #[test]
+    fn stsd_audio_v1_short_body_does_not_over_read() {
+        // A description declaring version 1 but whose body is only the
+        // 20-byte version-0 size (the four v1 longs are absent / truncated)
+        // must not over-read past the body: no SoundV1 is surfaced and the
+        // extra scan starts at 20, not 36.
+        let p = audio_stsd(1, 0, None); // 20-byte body, version=1
+        let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+        assert_eq!(v[0].audio_version, 1);
+        assert_eq!(v[0].sound_v1, None);
+        assert!(!v[0].is_vbr());
     }
 }
