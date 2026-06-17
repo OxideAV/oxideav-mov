@@ -172,6 +172,66 @@ pub struct SampleToGroupWrite {
     pub indices: Vec<u32>,
 }
 
+/// One entry of a track's edit list, destined for an `edts > elst`
+/// (Edit List Box, QTFF p. 47 / ISO/IEC 14496-12 §8.6.6).
+///
+/// An edit list maps movie-timescale presentation time to
+/// media-timescale sample time, one segment at a time. The classic
+/// uses are: an **empty edit** at the head of an audio track to skip
+/// encoder priming/delay samples (`media_time = -1`), a **start
+/// offset** that presents the track from a non-zero media time
+/// (`media_time > 0`), and a **dwell** that holds one media frame for a
+/// span of movie time (`media_rate = 0`).
+///
+/// The read-side counterpart is [`crate::edit::Edit`] /
+/// [`crate::edit::parse_elst`]; a file written with these entries
+/// round-trips back through `MovDemuxer` with the same per-segment
+/// `track_duration` / `media_time` / `media_rate`.
+#[derive(Clone, Copy, Debug)]
+pub struct MuxEdit {
+    /// Duration of this segment in **movie-timescale** units (the
+    /// [`MovMuxer::with_movie_timescale`] scale, not the track's media
+    /// timescale). QTFF p. 47: "the duration of this edit segment in
+    /// units of the movie's time scale."
+    pub track_duration: u64,
+    /// Starting time within the media of this segment, in
+    /// **media-timescale** units. `-1` marks an *empty edit* (QTFF
+    /// p. 47): movie time advances with no media presented. Any other
+    /// negative value is rejected by [`MovMuxer::set_edit_list`].
+    pub media_time: i64,
+    /// Relative playback rate as a 16.16 signed fixed-point number
+    /// (`0x0001_0000` = unity 1.0×). `0` marks a *dwell* (hold the
+    /// frame at `media_time`); QTFF p. 48 otherwise requires a
+    /// strictly-positive rate. The muxer writes the value verbatim so a
+    /// caller may emit a dwell (`0`) or a non-unity rate.
+    pub media_rate: i32,
+}
+
+impl MuxEdit {
+    /// A normal unity-rate segment presenting media from `media_time`
+    /// (media-timescale ticks) for `track_duration` (movie-timescale
+    /// ticks).
+    pub fn segment(track_duration: u64, media_time: i64) -> Self {
+        Self {
+            track_duration,
+            media_time,
+            media_rate: 0x0001_0000,
+        }
+    }
+
+    /// An empty edit: advance movie time by `track_duration`
+    /// (movie-timescale ticks) presenting no media. Used at the head of
+    /// a track to delay its start relative to the movie, or to skip
+    /// audio encoder-priming samples.
+    pub fn empty(track_duration: u64) -> Self {
+        Self {
+            track_duration,
+            media_time: -1,
+            media_rate: 0x0001_0000,
+        }
+    }
+}
+
 /// Per-track media kind dispatch — drives `hdlr.component_subtype`,
 /// the `vmhd`/`smhd` choice, and the `stsd` body shape.
 #[derive(Clone, Debug)]
@@ -221,6 +281,11 @@ struct TrackWrite {
     /// (CompactSampleToGroupBox); multiple entries (distinct
     /// `grouping_type`s) emit one `csgp` each, in insertion order.
     sample_to_groups: Vec<SampleToGroupWrite>,
+    /// Optional edit list (QTFF p. 47 / ISO/IEC 14496-12 §8.6.6). When
+    /// non-empty, the muxer emits an `edts > elst` between `tkhd` and
+    /// `mdia` inside the track's `trak`. Empty ⇒ no `edts` box (the
+    /// implicit "entire media is used" default per QTFF p. 46).
+    edits: Vec<MuxEdit>,
 }
 
 /// Fragmentation policy for [`MovMuxer::write_to_fragmented`].
@@ -387,6 +452,7 @@ impl MovMuxer {
             extra_stsd_atoms: extra_stsd_atoms.to_vec(),
             sample_aux: None,
             sample_to_groups: Vec::new(),
+            edits: Vec::new(),
         });
         self.tracks.len() as u32
     }
@@ -505,6 +571,62 @@ impl MovMuxer {
         } else {
             self.tracks[idx].sample_to_groups.push(assignment);
         }
+        Ok(())
+    }
+
+    /// Attach an edit list to a previously-added track, emitted as an
+    /// `edts > elst` (Edit List Box, QTFF p. 47 / ISO/IEC 14496-12
+    /// §8.6.6) between the track's `tkhd` and `mdia`.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// Each [`MuxEdit`] is one segment; see [`MuxEdit::segment`] /
+    /// [`MuxEdit::empty`] for the common shapes. Passing an empty slice
+    /// removes any previously-attached edit list (the track reverts to
+    /// the implicit "entire media is used" default, no `edts` emitted).
+    ///
+    /// On the next non-fragmented [`MovMuxer::encode_to_vec`] /
+    /// [`write_to`](MovMuxer::write_to), the `elst` is auto-versioned:
+    /// version 0 (32-bit `track_duration` + signed 32-bit `media_time`)
+    /// when every entry fits, version 1 (64-bit + signed 64-bit, the
+    /// ISO/IEC 14496-12 §8.6.6 extension) the moment any
+    /// `track_duration` exceeds `u32::MAX` or any `media_time` falls
+    /// outside `i32`. Either form round-trips through the read-side
+    /// [`crate::edit::parse_elst`].
+    ///
+    /// Validation (entries are otherwise written verbatim):
+    /// * `media_time` may be `-1` (the empty-edit sentinel) or any
+    ///   non-negative value; any other negative value is rejected.
+    /// * `track_duration` must be representable; the only hard limit is
+    ///   the version-1 64-bit field, so no overflow check is needed.
+    ///
+    /// The fragmented write path ([`encode_fragmented_to_vec`]) ignores
+    /// edit lists — fMP4 segments carry presentation timing in the
+    /// init-segment `moov`; a follow-up can emit the init-`trak` `edts`.
+    ///
+    /// [`encode_fragmented_to_vec`]: MovMuxer::encode_fragmented_to_vec
+    pub fn set_edit_list(&mut self, track_id: u32, edits: &[MuxEdit]) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_edit_list unknown track id {track_id}"
+                ))
+            })?;
+        // -1 is the only legal negative media_time (the empty-edit
+        // sentinel, QTFF p. 47). Reject any other negative value rather
+        // than write a media_time the read path would mis-resolve.
+        if let Some((i, e)) = edits
+            .iter()
+            .enumerate()
+            .find(|(_, e)| e.media_time < 0 && e.media_time != -1)
+        {
+            return Err(Error::invalid(format!(
+                "MOV muxer: edit {i} has media_time {} (only -1 is a legal negative value: the empty-edit sentinel)",
+                e.media_time
+            )));
+        }
+        self.tracks[idx].edits = edits.to_vec();
         Ok(())
     }
 
@@ -893,12 +1015,57 @@ fn build_trak(
 ) -> Vec<u8> {
     let mut trak = Vec::new();
     push_atom(&mut trak, *b"tkhd", &build_tkhd(t, track_id, movie_ts));
+    // edts > elst between tkhd and mdia (QTFF p. 46, Figure 2-8: the
+    // edit atom precedes the media atom inside a track atom).
+    if !t.edits.is_empty() {
+        push_atom(&mut trak, *b"edts", &build_edts(&t.edits));
+    }
     push_atom(
         &mut trak,
         *b"mdia",
         &build_mdia(t, chunk_offset, need_co64, aux_offset),
     );
     trak
+}
+
+/// Build the `edts` (Edit Box) payload — a single child `elst`.
+fn build_edts(edits: &[MuxEdit]) -> Vec<u8> {
+    let mut edts = Vec::new();
+    push_atom(&mut edts, *b"elst", &build_elst(edits));
+    edts
+}
+
+/// Build the `elst` (Edit List Box) payload (QTFF p. 47 / ISO/IEC
+/// 14496-12 §8.6.6).
+///
+/// Layout: `[version:1][flags:3][entry_count:4]` then `entry_count`
+/// triples. Version 0 packs `track_duration` (u32) + `media_time`
+/// (signed i32) + `media_rate` (i32); version 1 widens the first two to
+/// 64-bit. The version is auto-promoted to 1 the moment any
+/// `track_duration` exceeds `u32::MAX` or any `media_time` falls outside
+/// the signed-32-bit range, so the value is never truncated. Mirrors
+/// the read path [`crate::edit::parse_elst`], which accepts both forms.
+fn build_elst(edits: &[MuxEdit]) -> Vec<u8> {
+    let need_v1 = edits.iter().any(|e| {
+        e.track_duration > u32::MAX as u64
+            || e.media_time > i32::MAX as i64
+            || e.media_time < i32::MIN as i64
+    });
+    let mut p = Vec::with_capacity(8 + edits.len() * if need_v1 { 20 } else { 12 });
+    p.push(if need_v1 { 1 } else { 0 }); // version
+    p.extend_from_slice(&[0u8; 3]); // flags = 0 (QTFF p. 47)
+    p.extend_from_slice(&(edits.len() as u32).to_be_bytes());
+    for e in edits {
+        if need_v1 {
+            p.extend_from_slice(&e.track_duration.to_be_bytes());
+            p.extend_from_slice(&e.media_time.to_be_bytes());
+        } else {
+            p.extend_from_slice(&(e.track_duration as u32).to_be_bytes());
+            p.extend_from_slice(&(e.media_time as i32).to_be_bytes());
+        }
+        p.extend_from_slice(&e.media_rate.to_be_bytes());
+    }
+    p
 }
 
 fn build_tkhd(t: &TrackWrite, track_id: u32, movie_ts: u32) -> Vec<u8> {
@@ -2069,6 +2236,7 @@ mod tests {
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
             sample_to_groups: Vec::new(),
+            edits: Vec::new(),
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -2105,6 +2273,7 @@ mod tests {
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
             sample_to_groups: Vec::new(),
+            edits: Vec::new(),
         }
     }
 
@@ -2200,6 +2369,164 @@ mod tests {
     }
 
     #[test]
+    fn elst_v0_layout_unity_segment() {
+        // A single unity-rate segment, all fields inside 32-bit ⇒ v0.
+        let body = build_elst(&[MuxEdit::segment(6000, 0)]);
+        assert_eq!(body[0], 0, "version 0 for 32-bit-fitting fields");
+        assert_eq!(&body[1..4], &[0, 0, 0], "flags = 0");
+        let n = u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
+        assert_eq!(n, 1);
+        // 12-byte v0 entry: track_duration(u32) media_time(i32) rate(i32).
+        assert_eq!(body.len(), 8 + 12);
+        assert_eq!(
+            u32::from_be_bytes([body[8], body[9], body[10], body[11]]),
+            6000
+        );
+        assert_eq!(
+            i32::from_be_bytes([body[12], body[13], body[14], body[15]]),
+            0
+        );
+        assert_eq!(
+            i32::from_be_bytes([body[16], body[17], body[18], body[19]]),
+            0x0001_0000
+        );
+    }
+
+    #[test]
+    fn elst_empty_edit_writes_minus_one_media_time() {
+        // An empty edit (media_time = -1) followed by a unity segment.
+        let body = build_elst(&[MuxEdit::empty(1000), MuxEdit::segment(5000, 0)]);
+        assert_eq!(body[0], 0);
+        let n = u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
+        assert_eq!(n, 2);
+        // First entry's media_time is the -1 sentinel.
+        assert_eq!(
+            i32::from_be_bytes([body[12], body[13], body[14], body[15]]),
+            -1
+        );
+    }
+
+    #[test]
+    fn elst_promotes_to_v1_on_wide_duration() {
+        // track_duration beyond u32::MAX forces the 64-bit v1 form.
+        let body = build_elst(&[MuxEdit::segment(u32::MAX as u64 + 1, 0)]);
+        assert_eq!(body[0], 1, "version 1 for >32-bit track_duration");
+        // 20-byte v1 entry: track_duration(u64) media_time(i64) rate(i32).
+        assert_eq!(body.len(), 8 + 20);
+        assert_eq!(
+            u64::from_be_bytes([
+                body[8], body[9], body[10], body[11], body[12], body[13], body[14], body[15]
+            ]),
+            u32::MAX as u64 + 1
+        );
+    }
+
+    #[test]
+    fn set_edit_list_rejects_bad_negative_media_time() {
+        let mut m = MovMuxer::new();
+        m.add_track(
+            MuxTrackKind::Video {
+                format: *b"avc1",
+                width: 8,
+                height: 8,
+            },
+            30000,
+            synth_video_samples(2),
+            &[],
+        );
+        // -2 is not the empty-edit sentinel ⇒ rejected.
+        assert!(m
+            .set_edit_list(
+                1,
+                &[MuxEdit {
+                    track_duration: 100,
+                    media_time: -2,
+                    media_rate: 0x0001_0000,
+                }]
+            )
+            .is_err());
+        // -1 (empty edit) is accepted.
+        assert!(m.set_edit_list(1, &[MuxEdit::empty(100)]).is_ok());
+        // Empty slice clears the list.
+        assert!(m.set_edit_list(1, &[]).is_ok());
+    }
+
+    #[test]
+    fn set_edit_list_unknown_track_id_errors() {
+        let mut m = MovMuxer::new();
+        m.add_track(
+            MuxTrackKind::Video {
+                format: *b"avc1",
+                width: 8,
+                height: 8,
+            },
+            30000,
+            synth_video_samples(2),
+            &[],
+        );
+        assert!(m.set_edit_list(2, &[MuxEdit::segment(100, 0)]).is_err());
+        assert!(m.set_edit_list(0, &[MuxEdit::segment(100, 0)]).is_err());
+    }
+
+    #[cfg(feature = "registry")]
+    #[test]
+    fn edit_list_roundtrips_through_demuxer() {
+        // Encode a track carrying a head empty-edit + a media-time
+        // offset segment, then confirm the demuxer reads back the exact
+        // per-segment track_duration / media_time / media_rate.
+        let mut m = MovMuxer::new().with_movie_timescale(600);
+        let tid = m.add_track(
+            MuxTrackKind::Video {
+                format: *b"mp4v",
+                width: 64,
+                height: 48,
+            },
+            30000,
+            synth_video_samples(6),
+            &[],
+        );
+        // Movie timescale is 600: a 1.0s empty edit = 600 ticks, then a
+        // segment presenting media from media-time 1500 for 2.0s.
+        let edits = [MuxEdit::empty(600), MuxEdit::segment(1200, 1500)];
+        m.set_edit_list(tid, &edits).expect("attach edit list");
+        let bytes = m.encode_to_vec().expect("encode MOV with edit list");
+
+        let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+        let d = MovDemuxer::open(cur).expect("open MOV with edit list");
+        let got = &d.tracks[0].edits;
+        assert_eq!(got.len(), 2, "two edit segments parsed back");
+        assert_eq!(got[0].track_duration, 600);
+        assert_eq!(got[0].media_time, -1, "head is an empty edit");
+        assert_eq!(got[1].track_duration, 1200);
+        assert_eq!(got[1].media_time, 1500);
+        assert_eq!(got[1].media_rate, 0x0001_0000);
+    }
+
+    #[cfg(feature = "registry")]
+    #[test]
+    fn no_edit_list_emits_no_edts() {
+        // A track with no edit list must not carry an edts box (the
+        // implicit "entire media is used" default, QTFF p. 46).
+        let mut m = MovMuxer::new();
+        m.add_track(
+            MuxTrackKind::Video {
+                format: *b"avc1",
+                width: 16,
+                height: 16,
+            },
+            30000,
+            synth_video_samples(3),
+            &[],
+        );
+        let bytes = m.encode_to_vec().expect("encode MOV");
+        // edts FourCC must not appear anywhere in the file.
+        assert!(
+            !bytes.windows(4).any(|w| w == b"edts"),
+            "no edts box when no edit list is set"
+        );
+    }
+
+    #[test]
     fn stss_omitted_when_all_keyframes() {
         let t = TrackWrite {
             kind: MuxTrackKind::Audio {
@@ -2226,6 +2553,7 @@ mod tests {
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
             sample_to_groups: Vec::new(),
+            edits: Vec::new(),
         };
         assert!(build_stss(&t).is_none());
     }
@@ -2243,6 +2571,7 @@ mod tests {
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
             sample_to_groups: Vec::new(),
+            edits: Vec::new(),
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -2288,6 +2617,7 @@ mod tests {
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
             sample_to_groups: Vec::new(),
+            edits: Vec::new(),
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -2324,6 +2654,7 @@ mod tests {
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
             sample_to_groups: Vec::new(),
+            edits: Vec::new(),
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

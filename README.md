@@ -88,6 +88,14 @@ omitted when every offset is zero, version 0 for an all-non-negative
 track, auto-promoted to version 1 (signed `int(32)`) the moment any
 offset is negative — so B-frame reorder round-trips PTS exactly.
 
+- `set_edit_list(track_id, &[MuxEdit])` emits an `edts/elst` (QTFF
+  p. 47 / §8.6.6) between `tkhd` and `mdia`. `MuxEdit::segment` is a
+  unity-rate presentation segment; `MuxEdit::empty` is a head empty
+  edit (`media_time == -1`) for encoder-priming-skip or start-delay.
+  The `elst` auto-promotes from v0 (32-bit) to v1 (64-bit) the moment a
+  `track_duration` exceeds 4 GiB-ticks or a `media_time` leaves the
+  signed-32-bit range; entries round-trip through the read-side
+  `parse_elst`. No `edts` is written when a track has no edit list.
 - `with_fragmentation(ByDuration | ByFrameCount)` +
   `encode_fragmented_to_vec()` emit a fragmented MP4 / fMP4 / DASH
   segment stream (init segment + one media segment per fragment).
