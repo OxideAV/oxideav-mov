@@ -118,8 +118,8 @@ pub use media_meta::{
     Pasp, Tapt, FIEL_BODY_LEN,
 };
 pub use muxer::{
-    FragmentationMode, MovMuxer, MuxEdit, MuxSample, MuxTrackKind, SampleAuxStream,
-    SampleToGroupWrite,
+    FragmentationMode, MovMetadata, MovMuxer, MuxEdit, MuxSample, MuxTrackKind, SampleAuxStream,
+    SampleToGroupWrite, UTF8_INTL_TEXT_FLAG,
 };
 pub use pdin::{parse_pdin, Pdin, PdinEntry};
 pub use pnot::{parse_pnot, Pnot, MAC_TO_UNIX_EPOCH_SECONDS, PNOT_BODY_LEN};

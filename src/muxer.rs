@@ -232,6 +232,118 @@ impl MuxEdit {
     }
 }
 
+/// One write-side user-data metadata item, emitted into a `udta`
+/// (User Data Box, QTFF pp. 36–38 / ISO/IEC 14496-12 §8.10.1).
+///
+/// Three shapes match the read-side [`crate::user_data::UserDataKind`]
+/// so a file written with these items round-trips through
+/// [`crate::user_data::parse_udta`] (and surfaces on
+/// [`crate::demuxer::MovDemuxer::user_data`] for movie-level items or
+/// [`crate::demuxer::Track::user_data`] for track-level items):
+///
+/// * [`MovMetadata::intl_text`] — an Apple international-text record
+///   (`©XXX`). The on-disk layout is one or more
+///   `[text_size: u16][language: u16][text: text_size bytes]` records
+///   inside a single `©XXX` atom (QTFF p. 38). Multiple `intl_text`
+///   items sharing the same FourCC are coalesced into **one** atom
+///   carrying one record per language, preserving insertion order.
+///   `language` is written verbatim: a Macintosh language code
+///   (`< 0x8000`, QTFF p. 197) selects Mac-Roman decoding on read,
+///   while a 5-bit-packed ISO 639-2/T tag OR'd with `0x8000` selects
+///   UTF-8 (see [`MovMetadata::iso_language`]).
+/// * [`MovMetadata::plain_utf8`] — a QuickTime-7+ UTF-8 entry
+///   (`name` / `auth` / `cprt`). Layout is a FullBox header
+///   (`[ver:1][flags:3]`), a 16-bit packed ISO 639-2/T language tag,
+///   then the UTF-8 text with no terminator.
+/// * [`MovMetadata::raw`] — an arbitrary FourCC carrying opaque bytes,
+///   surfaced on read as [`crate::user_data::UserDataKind::Unknown`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MovMetadata {
+    fourcc: [u8; 4],
+    payload: MetaPayload,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MetaPayload {
+    /// Apple international-text: one `[text_size][lang][text]` record.
+    /// Coalesced with sibling records sharing the same FourCC at build.
+    IntlText { language: u16, text: String },
+    /// QT-7+ FullBox + packed-ISO-lang + UTF-8.
+    PlainUtf8 { language: u16, text: String },
+    /// Opaque bytes under an arbitrary FourCC.
+    Raw(Vec<u8>),
+}
+
+impl MovMetadata {
+    /// An Apple international-text user-data item (`©XXX`).
+    ///
+    /// `fourcc` is the 4-byte atom type whose first byte is the
+    /// Mac-Roman `©` glyph (`0xA9`) — e.g. `[0xA9, b'n', b'a', b'm']`
+    /// for the title (`©nam`), `©cpy`, `©day`, `©ART`, … `language` is
+    /// the Macintosh language code (QTFF p. 197). For a UTF-8 text body
+    /// pass a 5-bit-packed ISO 639-2/T tag with the high bit set; see
+    /// [`MovMetadata::iso_language`] for the packing.
+    pub fn intl_text(fourcc: [u8; 4], language: u16, text: impl Into<String>) -> Self {
+        Self {
+            fourcc,
+            payload: MetaPayload::IntlText {
+                language,
+                text: text.into(),
+            },
+        }
+    }
+
+    /// A QuickTime-7+ plain-UTF-8 user-data item. `fourcc` is one of
+    /// `b"name"`, `b"auth"`, `b"cprt"` (the read path only decodes
+    /// these three as UTF-8; any other FourCC surfaces as `Unknown`).
+    /// `language` is a 5-bit-packed ISO 639-2/T tag (see
+    /// [`MovMetadata::iso_language`]).
+    pub fn plain_utf8(fourcc: [u8; 4], language: u16, text: impl Into<String>) -> Self {
+        Self {
+            fourcc,
+            payload: MetaPayload::PlainUtf8 {
+                language,
+                text: text.into(),
+            },
+        }
+    }
+
+    /// An arbitrary user-data item carrying opaque bytes under `fourcc`.
+    /// Surfaces on read as [`crate::user_data::UserDataKind::Unknown`].
+    pub fn raw(fourcc: [u8; 4], bytes: impl Into<Vec<u8>>) -> Self {
+        Self {
+            fourcc,
+            payload: MetaPayload::Raw(bytes.into()),
+        }
+    }
+
+    /// Pack a three-letter ISO 639-2/T language tag (e.g. `*b"eng"`,
+    /// `*b"fra"`) into the 5-bit-per-character form QTFF / ISO BMFF use
+    /// for `mdhd.language` and QuickTime-7 user-data entries. The result
+    /// is the **bare** packed value (no high bit), the exact inverse of
+    /// [`crate::user_data::iso_language_tag`]; each byte must be a
+    /// lowercase ASCII letter (`a..=z`).
+    ///
+    /// Use it directly as the `language` of a [`MovMetadata::plain_utf8`]
+    /// item (always UTF-8, no flag bit). For a UTF-8-bodied
+    /// [`MovMetadata::intl_text`] item, OR in the [`UTF8_INTL_TEXT_FLAG`]
+    /// (`0x8000`) so the read path decodes the body as UTF-8 rather than
+    /// Mac-Roman; a Macintosh language code (`< 0x8000`, QTFF p. 197)
+    /// selects Mac-Roman instead.
+    pub fn iso_language(tag: [u8; 3]) -> u16 {
+        let c1 = (tag[0].wrapping_sub(0x60) & 0x1F) as u16;
+        let c2 = (tag[1].wrapping_sub(0x60) & 0x1F) as u16;
+        let c3 = (tag[2].wrapping_sub(0x60) & 0x1F) as u16;
+        (c1 << 10) | (c2 << 5) | c3
+    }
+}
+
+/// High-bit flag OR'd into an international-text record's language slot
+/// to mark its body as UTF-8 (rather than Mac-Roman) — QTFF p. 38 /
+/// the read-side `parse_intl_text` heuristic (`language >= 0x8000`).
+/// Combine with [`MovMetadata::iso_language`] for a UTF-8 `©XXX` body.
+pub const UTF8_INTL_TEXT_FLAG: u16 = 0x8000;
+
 /// Per-track media kind dispatch — drives `hdlr.component_subtype`,
 /// the `vmhd`/`smhd` choice, and the `stsd` body shape.
 #[derive(Clone, Debug)]
@@ -286,6 +398,10 @@ struct TrackWrite {
     /// `mdia` inside the track's `trak`. Empty ⇒ no `edts` box (the
     /// implicit "entire media is used" default per QTFF p. 46).
     edits: Vec<MuxEdit>,
+    /// Optional track-level user-data items (QTFF pp. 36–38 / ISO/IEC
+    /// 14496-12 §8.10.1). When non-empty the muxer emits a `udta` as the
+    /// last child of this track's `trak`. Empty ⇒ no `udta` box.
+    metadata: Vec<MovMetadata>,
 }
 
 /// Fragmentation policy for [`MovMuxer::write_to_fragmented`].
@@ -347,6 +463,11 @@ pub struct MovMuxer {
     /// to Compress the Movie Resource") instead of a plain `moov`.
     /// Defaults to `false`. Has no effect on the fragmented path.
     compress_movie_resource: bool,
+    /// Optional movie-level user-data items (QTFF pp. 36–38 / ISO/IEC
+    /// 14496-12 §8.10.1). When non-empty the muxer emits a `moov/udta`
+    /// after the last `trak`. Empty ⇒ no `udta` box. Honoured on the
+    /// non-fragmented path; the fragmented init `moov` ignores it.
+    metadata: Vec<MovMetadata>,
 }
 
 impl Default for MovMuxer {
@@ -363,6 +484,7 @@ impl MovMuxer {
             tracks: Vec::new(),
             fragmentation: None,
             compress_movie_resource: false,
+            metadata: Vec::new(),
         }
     }
 
@@ -453,6 +575,7 @@ impl MovMuxer {
             sample_aux: None,
             sample_to_groups: Vec::new(),
             edits: Vec::new(),
+            metadata: Vec::new(),
         });
         self.tracks.len() as u32
     }
@@ -627,6 +750,48 @@ impl MovMuxer {
             )));
         }
         self.tracks[idx].edits = edits.to_vec();
+        Ok(())
+    }
+
+    /// Attach movie-level user-data metadata, emitted as a `moov/udta`
+    /// after the last `trak` (QTFF pp. 36–38 / ISO/IEC 14496-12
+    /// §8.10.1).
+    ///
+    /// The `items` are written in order; consecutive (and
+    /// non-consecutive) [`MovMetadata::intl_text`] items sharing a
+    /// FourCC are coalesced into a single `©XXX` atom carrying one
+    /// language record each, per QTFF p. 38. A file written this way
+    /// round-trips through the read side and surfaces on
+    /// [`crate::demuxer::MovDemuxer::user_data`].
+    ///
+    /// Replaces any movie-level metadata set by a previous call. Only
+    /// the non-fragmented [`MovMuxer::encode_to_vec`] /
+    /// [`write_to`](MovMuxer::write_to) path emits it; the fragmented
+    /// init `moov` is left metadata-free.
+    pub fn set_metadata(&mut self, items: &[MovMetadata]) {
+        self.metadata = items.to_vec();
+    }
+
+    /// Attach track-level user-data metadata to a previously-added
+    /// track, emitted as a `udta` that is the last child of the track's
+    /// `trak` (QTFF pp. 36–38 / ISO/IEC 14496-12 §8.10.1).
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// Coalescing of same-FourCC international-text records is the same
+    /// as [`MovMuxer::set_metadata`]; the result surfaces on
+    /// [`crate::demuxer::Track::user_data`]. Replaces any track-level
+    /// metadata from a previous call; returns an error (leaving the
+    /// track unchanged) for an unknown `track_id`.
+    pub fn set_track_metadata(&mut self, track_id: u32, items: &[MovMetadata]) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_track_metadata unknown track id {track_id}"
+                ))
+            })?;
+        self.tracks[idx].metadata = items.to_vec();
         Ok(())
     }
 
@@ -951,6 +1116,11 @@ fn build_moov(
         );
         push_atom(&mut moov, *b"trak", &trak);
     }
+    // Movie-level user-data box after the last `trak` (QTFF p. 32,
+    // Figure 2-1: `udta` follows the track atoms inside `moov`).
+    if !m.metadata.is_empty() {
+        push_atom(&mut moov, *b"udta", &build_udta(&m.metadata));
+    }
     moov
 }
 
@@ -1025,7 +1195,68 @@ fn build_trak(
         *b"mdia",
         &build_mdia(t, chunk_offset, need_co64, aux_offset),
     );
+    // Track-level user-data box as the last child of `trak` (QTFF
+    // p. 41, Figure 2-3: `udta` is the trailing track-atom child).
+    if !t.metadata.is_empty() {
+        push_atom(&mut trak, *b"udta", &build_udta(&t.metadata));
+    }
     trak
+}
+
+/// Build a `udta` (User Data Box) payload from a list of metadata
+/// items (QTFF pp. 36–38 / ISO/IEC 14496-12 §8.10.1).
+///
+/// International-text (`©XXX`) items sharing a FourCC are coalesced
+/// into one atom carrying one `[text_size:u16][language:u16][text]`
+/// record per item, in the order they appear in `items` (QTFF p. 38:
+/// "a list of text strings with associated language codes"). Each
+/// `text_size` is the byte length of the text only (excludes the
+/// 4-byte record header), matching the read-side `parse_intl_text`.
+/// `plain_utf8` and `raw` items each emit a single atom.
+fn build_udta(items: &[MovMetadata]) -> Vec<u8> {
+    let mut udta = Vec::new();
+    // First pass: gather, in first-seen order, the FourCC of every
+    // international-text item so all its language records land in one
+    // atom. Non-intl-text items are emitted inline in `items` order.
+    let mut emitted_intl: Vec<[u8; 4]> = Vec::new();
+    for item in items {
+        match &item.payload {
+            MetaPayload::IntlText { .. } => {
+                if emitted_intl.contains(&item.fourcc) {
+                    continue;
+                }
+                emitted_intl.push(item.fourcc);
+                // Collect every intl-text record sharing this FourCC.
+                let mut body = Vec::new();
+                for rec in items {
+                    if rec.fourcc != item.fourcc {
+                        continue;
+                    }
+                    if let MetaPayload::IntlText { language, text } = &rec.payload {
+                        let bytes = text.as_bytes();
+                        let len = bytes.len().min(u16::MAX as usize) as u16;
+                        body.extend_from_slice(&len.to_be_bytes());
+                        body.extend_from_slice(&language.to_be_bytes());
+                        body.extend_from_slice(&bytes[..len as usize]);
+                    }
+                }
+                push_atom(&mut udta, item.fourcc, &body);
+            }
+            MetaPayload::PlainUtf8 { language, text } => {
+                // FullBox header (ver=0, flags=0) + packed-ISO lang +
+                // UTF-8 text (no terminator).
+                let mut body = Vec::with_capacity(6 + text.len());
+                body.extend_from_slice(&0u32.to_be_bytes());
+                body.extend_from_slice(&language.to_be_bytes());
+                body.extend_from_slice(text.as_bytes());
+                push_atom(&mut udta, item.fourcc, &body);
+            }
+            MetaPayload::Raw(bytes) => {
+                push_atom(&mut udta, item.fourcc, bytes);
+            }
+        }
+    }
+    udta
 }
 
 /// Build the `edts` (Edit Box) payload — a single child `elst`.
@@ -2237,6 +2468,7 @@ mod tests {
             sample_aux: None,
             sample_to_groups: Vec::new(),
             edits: Vec::new(),
+            metadata: Vec::new(),
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -2274,6 +2506,7 @@ mod tests {
             sample_aux: None,
             sample_to_groups: Vec::new(),
             edits: Vec::new(),
+            metadata: Vec::new(),
         }
     }
 
@@ -2554,6 +2787,7 @@ mod tests {
             sample_aux: None,
             sample_to_groups: Vec::new(),
             edits: Vec::new(),
+            metadata: Vec::new(),
         };
         assert!(build_stss(&t).is_none());
     }
@@ -2572,6 +2806,7 @@ mod tests {
             sample_aux: None,
             sample_to_groups: Vec::new(),
             edits: Vec::new(),
+            metadata: Vec::new(),
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -2618,6 +2853,7 @@ mod tests {
             sample_aux: None,
             sample_to_groups: Vec::new(),
             edits: Vec::new(),
+            metadata: Vec::new(),
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -2655,6 +2891,7 @@ mod tests {
             sample_aux: None,
             sample_to_groups: Vec::new(),
             edits: Vec::new(),
+            metadata: Vec::new(),
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

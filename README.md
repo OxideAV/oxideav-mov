@@ -110,6 +110,16 @@ offset is negative — so B-frame reorder round-trips PTS exactly.
   `pattern_length == 1` pattern per run) with minimum-width field
   selectors; the `parse_csgp` read path expands them back to the exact
   per-sample assignment.
+- `set_metadata(&[MovMetadata])` (movie scope, `moov/udta`) and
+  `set_track_metadata(track_id, &[MovMetadata])` (track scope,
+  `trak/udta`) emit a User Data Box (QTFF pp. 36–38 / §8.10.1).
+  `MovMetadata::intl_text` writes an Apple international-text record
+  (`©XXX`); same-FourCC items coalesce into one atom carrying one
+  per-language record (set `UTF8_INTL_TEXT_FLAG | iso_language(tag)` for
+  a UTF-8 body, a Mac language code for Mac-Roman). `plain_utf8`
+  (`name` / `auth` / `cprt`) and `raw` (opaque FourCC) cover the QT-7+
+  and unknown shapes. All round-trip through `parse_udta` and surface on
+  `MovDemuxer::user_data` / `Track::user_data`.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.
