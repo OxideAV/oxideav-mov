@@ -76,6 +76,9 @@ Decoding stays in codec crates: this crate calls
   optional `uriI` URIInitBox data). The optional `btrt` BitRateBox
   (§8.5.2.2) is decoded to `BitRate { buffer_size_db, max_bitrate,
   avg_bitrate }` and surfaced via `MetadataSampleEntry::bitrate()`.
+- Hint tracks (`hdlr.is_hint()`): the Hint Media Header Box (`hmhd`,
+  ISO/IEC 14496-12 §12.4.2) is decoded into `Hmhd { max_pdu_size,
+  avg_pdu_size, max_bitrate, avg_bitrate }` on `Track::hmhd`.
 - Fragmented MP4 / fMP4 / DASH: `mvex/trex` defaults +
   `moof/traf/tfhd/trun` cascade, `tfdt` baseline DTS, `leva` level
   assignment, and per-fragment sample-aux. `mfra/tfra/mfro`-driven

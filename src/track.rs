@@ -14,7 +14,7 @@ use crate::edit::{
     media_pts_to_movie_pts, movie_pts_to_media_pts, resolve_edit_segments, EditList, EditSegment,
 };
 use crate::gmhd::Gmhd;
-use crate::header::{Hdlr, Mdhd, Tkhd};
+use crate::header::{Hdlr, Hmhd, Mdhd, Tkhd};
 use crate::kind::KindEntry;
 use crate::matte::Matte;
 use crate::media_meta::{
@@ -300,6 +300,11 @@ pub struct Track {
     /// — `gmin`, `text`, `tmcd/tcmi` (round 5). `None` when the track
     /// uses a typed media header (`vmhd`/`smhd`) instead.
     pub gmhd: Option<Gmhd>,
+    /// Parsed `hmhd` Hint Media Header Box (ISO/IEC 14496-12 §12.4.2),
+    /// found in the `minf` of a hint track (`hdlr.is_hint()`). Carries
+    /// the stream's PDU-size / bit-rate buffering metadata. `None` for
+    /// every non-hint track. Round 344.
+    pub hmhd: Option<Hmhd>,
     /// Parsed `load` atom (Track Load Settings, QTFF p. 48). `None`
     /// when the track has no `load` child; defaults to "no preload
     /// hints declared" and the player should fall back to its own

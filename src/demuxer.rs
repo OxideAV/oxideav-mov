@@ -13,11 +13,11 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CMOV, CO64, CSGP, CSLG,
-    CTAB, CTTS, DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, ILST, IMAP, KEYS, LOAD,
-    MATT, MAX_INMEMORY_ATOM_BODY, MDAT, MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, PADB,
-    PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP,
-    SGPD, SIDX, SKIP, SMHD, SSIX, STBL, STCO, STDP, STSC, STSD, STSH, STSS, STSZ, STTS, STYP, STZ2,
-    SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID, VMHD, WIDE,
+    CTAB, CTTS, DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, HMHD, ILST, IMAP, KEYS,
+    LOAD, MATT, MAX_INMEMORY_ATOM_BODY, MDAT, MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD,
+    PADB, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP,
+    SDTP, SGPD, SIDX, SKIP, SMHD, SSIX, STBL, STCO, STDP, STSC, STSD, STSH, STSS, STSZ, STTS, STYP,
+    STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -27,7 +27,9 @@ use crate::ctab::{parse_ctab, Ctab};
 use crate::edit::{parse_elst, EditList};
 use crate::fragment::{parse_mfra, parse_mvex, resolve_traf_samples, Mehd, Tfra, TrexDefaults};
 use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
-use crate::header::{parse_ftyp, parse_hdlr, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd};
+use crate::header::{
+    parse_ftyp, parse_hdlr, parse_hmhd, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd,
+};
 use crate::leva::Leva;
 use crate::matte::parse_matt;
 use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
@@ -3464,6 +3466,13 @@ fn parse_minf<R: Read + Seek + ?Sized>(
             }
             t if t == &GMHD => {
                 track.gmhd = Some(parse_gmhd(r, child)?);
+            }
+            t if t == &HMHD => {
+                // Hint Media Header Box (ISO/IEC 14496-12 §12.4.2) —
+                // PDU-size / bit-rate buffering metadata for a hint
+                // track. Surfaced on `Track::hmhd`.
+                let body = read_payload(r, child)?;
+                track.hmhd = Some(parse_hmhd(&body)?);
             }
             t if t == &DINF => {
                 parse_dinf(r, child, track)?;

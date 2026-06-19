@@ -337,6 +337,7 @@ pub const MINF: [u8; 4] = fourcc("minf");
 pub const VMHD: [u8; 4] = fourcc("vmhd");
 pub const SMHD: [u8; 4] = fourcc("smhd");
 pub const GMHD: [u8; 4] = fourcc("gmhd");
+pub const HMHD: [u8; 4] = fourcc("hmhd");
 pub const DINF: [u8; 4] = fourcc("dinf");
 pub const DREF: [u8; 4] = fourcc("dref");
 pub const STBL: [u8; 4] = fourcc("stbl");

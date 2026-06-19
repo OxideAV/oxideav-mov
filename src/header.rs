@@ -661,6 +661,37 @@ pub fn parse_hdlr(payload: &[u8]) -> Result<Hdlr> {
     })
 }
 
+/// Parsed `hmhd` Hint Media Header Box (ISO/IEC 14496-12 §12.4.2.2).
+///
+/// Present in the `minf` of a hint track (`hdlr` component subtype
+/// `hint`); carries protocol-independent buffering metadata about the
+/// stream's Protocol Data Units. All five on-wire fields follow the
+/// 4-byte FullBox version+flags header.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Hmhd {
+    /// Size, in bytes, of the largest PDU in this hint stream.
+    pub max_pdu_size: u16,
+    /// Average size of a PDU over the entire presentation.
+    pub avg_pdu_size: u16,
+    /// Maximum rate in bits/second over any one-second window.
+    pub max_bitrate: u32,
+    /// Average rate in bits/second over the entire presentation.
+    pub avg_bitrate: u32,
+}
+
+/// Parse an `hmhd` payload (ISO/IEC 14496-12 §12.4.2.2). The body after
+/// the 4-byte FullBox header is `maxPDUsize:u16 avgPDUsize:u16
+/// maxbitrate:u32 avgbitrate:u32 reserved:u32` — 16 bytes total.
+pub fn parse_hmhd(payload: &[u8]) -> Result<Hmhd> {
+    need(payload, 0, 4 + 16, "hmhd fixed fields")?;
+    Ok(Hmhd {
+        max_pdu_size: u16::from_be_bytes([payload[4], payload[5]]),
+        avg_pdu_size: u16::from_be_bytes([payload[6], payload[7]]),
+        max_bitrate: read_u32(&payload[8..12]),
+        avg_bitrate: read_u32(&payload[12..16]),
+    })
+}
+
 // ─────────────── helpers ───────────────
 
 #[inline]
@@ -685,6 +716,41 @@ fn need(buf: &[u8], offset: usize, n: usize, what: &'static str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hmhd_parses_all_fields() {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+        p.extend_from_slice(&1500u16.to_be_bytes()); // maxPDUsize
+        p.extend_from_slice(&1200u16.to_be_bytes()); // avgPDUsize
+        p.extend_from_slice(&5_000_000u32.to_be_bytes()); // maxbitrate
+        p.extend_from_slice(&3_000_000u32.to_be_bytes()); // avgbitrate
+        p.extend_from_slice(&0u32.to_be_bytes()); // reserved
+        let h = parse_hmhd(&p).unwrap();
+        assert_eq!(h.max_pdu_size, 1500);
+        assert_eq!(h.avg_pdu_size, 1200);
+        assert_eq!(h.max_bitrate, 5_000_000);
+        assert_eq!(h.avg_bitrate, 3_000_000);
+    }
+
+    #[test]
+    fn hmhd_too_short_errors() {
+        assert!(parse_hmhd(&[0u8; 8]).is_err());
+    }
+
+    #[test]
+    fn hdlr_is_hint_and_is_metadata() {
+        let mk = |sub: &[u8; 4]| Hdlr {
+            component_type: *b"mhlr",
+            component_subtype: *sub,
+            component_manufacturer: [0; 4],
+        };
+        assert!(mk(b"hint").is_hint());
+        assert!(!mk(b"hint").is_metadata());
+        assert!(mk(b"meta").is_metadata());
+        assert!(!mk(b"meta").is_hint());
+        assert!(!mk(b"vide").is_hint());
+    }
 
     #[test]
     fn ftyp_qt_brand_recognised() {
