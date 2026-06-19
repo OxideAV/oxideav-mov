@@ -21,7 +21,10 @@ use crate::media_meta::{
     parse_chan, parse_clap, parse_colr, parse_fiel, parse_mjht, parse_mjqt, parse_pasp, Chan, Clap,
     ColorParameters, Cslg, Fiel, MetaKeyValue, Mjht, Mjqt, Pasp, Tapt,
 };
-use crate::metadata_sample::{parse_metadata_sample_entry, MetadataSampleEntry};
+use crate::metadata_sample::{
+    parse_metadata_sample_entry, parse_subtitle_sample_entry, MetadataSampleEntry,
+    SubtitleSampleEntry,
+};
 use crate::reference::DataReference;
 use crate::sample_table::{SampleEntry, SampleTable};
 use crate::timecode::{parse_tmcd_sample_description, Tmcd};
@@ -217,6 +220,13 @@ pub struct SampleDescription {
     /// entry's format FourCC names one of those subclasses. `None` for
     /// every other handler / format. See [`MetadataSampleEntry`].
     pub metadata: Option<MetadataSampleEntry>,
+
+    /// Parsed ISO BMFF `SubtitleSampleEntry` (`stpp` / `sbtt`, ISO/IEC
+    /// 14496-12 §12.6.3) — populated only when the track's handler is a
+    /// subtitle track (`hdlr.is_subtitle()`, `subt` subtype) and the
+    /// entry's format FourCC names one of those subclasses. `None` for
+    /// every other handler / format. See [`SubtitleSampleEntry`].
+    pub subtitle: Option<SubtitleSampleEntry>,
 }
 
 impl SampleDescription {
@@ -804,6 +814,13 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
             entry.metadata = parse_metadata_sample_entry(&format, body)?;
             // Preserve the raw body for any caller that needs the exact
             // wire bytes (e.g. round-trip muxing) alongside the typed view.
+            entry.extra = body.to_vec();
+        } else if hdlr.is_subtitle() && matches!(&format, b"stpp" | b"sbtt") {
+            // ISO BMFF subtitle sample entry (ISO/IEC 14496-12 §12.6.3),
+            // carried on a `subt`-handler track. Like the metadata
+            // entries above, `body` starts at the subclass-specific
+            // fields after the universal 16-byte SampleEntry header.
+            entry.subtitle = parse_subtitle_sample_entry(&format, body)?;
             entry.extra = body.to_vec();
         } else if hdlr.is_audio() && body.len() >= 20 {
             // Sound sample description v0 (QTFF p. 100):

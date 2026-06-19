@@ -119,8 +119,10 @@ pub use media_meta::{
     Pasp, Tapt, FIEL_BODY_LEN,
 };
 pub use metadata_sample::{
-    parse_btrt, parse_metadata_sample_entry, parse_mett, parse_metx, parse_urim, BitRate,
-    MetadataSampleEntry, TextMetadataSampleEntry, UriMetadataSampleEntry, XmlMetadataSampleEntry,
+    parse_btrt, parse_metadata_sample_entry, parse_mett, parse_metx, parse_sbtt, parse_stpp,
+    parse_subtitle_sample_entry, parse_urim, BitRate, MetadataSampleEntry, SubtitleSampleEntry,
+    TextMetadataSampleEntry, TextSubtitleSampleEntry, UriMetadataSampleEntry,
+    XmlMetadataSampleEntry, XmlSubtitleSampleEntry,
 };
 pub use muxer::{
     FragmentationMode, MovMetadata, MovMuxer, MuxEdit, MuxSample, MuxTrackKind, SampleAuxStream,

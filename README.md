@@ -76,6 +76,12 @@ Decoding stays in codec crates: this crate calls
   optional `uriI` URIInitBox data). The optional `btrt` BitRateBox
   (§8.5.2.2) is decoded to `BitRate { buffer_size_db, max_bitrate,
   avg_bitrate }` and surfaced via `MetadataSampleEntry::bitrate()`.
+- Subtitle sample entries (ISO/IEC 14496-12 §12.6.3): a `subt`-handler
+  track's `stsd` entry (`Hdlr::is_subtitle()`) is decoded into a typed
+  `SubtitleSampleEntry` on `SampleDescription::subtitle` — `stpp`
+  (XML: `namespace` / `schema_location` / `auxiliary_mime_types`) and
+  `sbtt` (text: `content_encoding` / `mime_format` + `txtC`), sharing
+  the `btrt` BitRateBox decoding.
 - Hint tracks (`hdlr.is_hint()`): the Hint Media Header Box (`hmhd`,
   ISO/IEC 14496-12 §12.4.2) is decoded into `Hmhd { max_pdu_size,
   avg_pdu_size, max_bitrate, avg_bitrate }` on `Track::hmhd`.

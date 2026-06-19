@@ -156,6 +156,57 @@ pub struct UriMetadataSampleEntry {
     pub bitrate: Option<BitRate>,
 }
 
+/// Parsed `SubtitleSampleEntry` subclass (ISO/IEC 14496-12 §12.6.3).
+/// Carried on a subtitle track (`hdlr` subtype `subt`), structurally a
+/// close sibling of [`MetadataSampleEntry`] — both reuse the BitRateBox
+/// (`btrt`) and, for the text variant, the TextConfigBox (`txtC`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubtitleSampleEntry {
+    /// `stpp` — XML subtitle sample entry (e.g. TTML).
+    Xml(XmlSubtitleSampleEntry),
+    /// `sbtt` — text subtitle sample entry.
+    Text(TextSubtitleSampleEntry),
+}
+
+impl SubtitleSampleEntry {
+    /// The optional BitRateBox (`btrt`) common to both variants.
+    pub fn bitrate(&self) -> Option<BitRate> {
+        match self {
+            SubtitleSampleEntry::Xml(e) => e.bitrate,
+            SubtitleSampleEntry::Text(e) => e.bitrate,
+        }
+    }
+}
+
+/// `stpp` — XMLSubtitleSampleEntry (ISO/IEC 14496-12 §12.6.3.2).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct XmlSubtitleSampleEntry {
+    /// Space-separated list of XML namespaces the samples conform to.
+    pub namespace: String,
+    /// Optional space-separated list of XML-schema URLs; empty when absent.
+    pub schema_location: String,
+    /// Media type(s) of auxiliary resources (images / fonts) stored as
+    /// subtitle subsamples; empty when none are present.
+    pub auxiliary_mime_types: String,
+    /// Optional bit-rate box.
+    pub bitrate: Option<BitRate>,
+}
+
+/// `sbtt` — TextSubtitleSampleEntry (ISO/IEC 14496-12 §12.6.3.2).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TextSubtitleSampleEntry {
+    /// MIME type identifying the content encoding; empty when not encoded.
+    pub content_encoding: String,
+    /// MIME type identifying the content format of the samples
+    /// (e.g. `text/html`, `text/plain`).
+    pub mime_format: String,
+    /// `txtC` TextConfigBox initial text prepended to each sync sample;
+    /// `None` when the box is absent.
+    pub text_config: Option<String>,
+    /// Optional bit-rate box.
+    pub bitrate: Option<BitRate>,
+}
+
 /// Read a NUL-terminated UTF-8 string starting at `*pos`. Advances `*pos`
 /// past the terminating NUL. Returns the string (excluding the NUL). When
 /// no NUL is found before end-of-buffer, the remaining bytes are taken as
@@ -354,6 +405,82 @@ pub fn parse_metadata_sample_entry(
     }
 }
 
+/// Parse a `stpp` XMLSubtitleSampleEntry body (after the SampleEntry
+/// 8-byte tail). ISO/IEC 14496-12 §12.6.3.2. Leading strings:
+/// `namespace` (mandatory), `schema_location` (optional),
+/// `auxiliary_mime_types` (optional).
+pub fn parse_stpp(body: &[u8]) -> Result<XmlSubtitleSampleEntry> {
+    let mut pos = 0usize;
+    let mut strings: Vec<String> = Vec::new();
+    while pos < body.len() && !looks_like_box(body, pos) && strings.len() < 3 {
+        strings.push(read_c_string(body, &mut pos));
+    }
+    let mut entry = XmlSubtitleSampleEntry::default();
+    // Fields are positional in declaration order: namespace,
+    // schema_location, auxiliary_mime_types. Assign as many as present.
+    let mut it = strings.into_iter();
+    if let Some(s) = it.next() {
+        entry.namespace = s;
+    }
+    if let Some(s) = it.next() {
+        entry.schema_location = s;
+    }
+    if let Some(s) = it.next() {
+        entry.auxiliary_mime_types = s;
+    }
+    walk_boxes(body, pos, |fc, payload| {
+        if fc == b"btrt" {
+            entry.bitrate = Some(parse_btrt(payload)?);
+        }
+        Ok(())
+    })?;
+    Ok(entry)
+}
+
+/// Parse a `sbtt` TextSubtitleSampleEntry body (after the SampleEntry
+/// 8-byte tail). ISO/IEC 14496-12 §12.6.3.2. Same shape as `mett`:
+/// `content_encoding` (optional) then `mime_format` (mandatory), with
+/// optional `btrt` + `txtC` boxes.
+pub fn parse_sbtt(body: &[u8]) -> Result<TextSubtitleSampleEntry> {
+    let mut pos = 0usize;
+    let mut strings: Vec<String> = Vec::new();
+    while pos < body.len() && !looks_like_box(body, pos) && strings.len() < 2 {
+        strings.push(read_c_string(body, &mut pos));
+    }
+    let mut entry = TextSubtitleSampleEntry::default();
+    match strings.len() {
+        0 => {}
+        1 => entry.mime_format = strings.pop().unwrap(),
+        _ => {
+            entry.mime_format = strings.pop().unwrap();
+            entry.content_encoding = strings.pop().unwrap();
+        }
+    }
+    walk_boxes(body, pos, |fc, payload| {
+        match fc {
+            b"btrt" => entry.bitrate = Some(parse_btrt(payload)?),
+            b"txtC" => entry.text_config = Some(parse_txtc(payload)),
+            _ => {}
+        }
+        Ok(())
+    })?;
+    Ok(entry)
+}
+
+/// Dispatch a subtitle sample-description body to the right variant by
+/// its `format` FourCC. Returns `Ok(None)` for any FourCC that is not a
+/// recognised `SubtitleSampleEntry` subclass.
+pub fn parse_subtitle_sample_entry(
+    format: &[u8; 4],
+    body: &[u8],
+) -> Result<Option<SubtitleSampleEntry>> {
+    match format {
+        b"stpp" => Ok(Some(SubtitleSampleEntry::Xml(parse_stpp(body)?))),
+        b"sbtt" => Ok(Some(SubtitleSampleEntry::Text(parse_sbtt(body)?))),
+        _ => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,5 +659,81 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(e.bitrate().unwrap().avg_bitrate, 3);
+    }
+
+    #[test]
+    fn stpp_namespace_schema_aux_and_btrt() {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"http://www.w3.org/ns/ttml");
+        body.push(0); // namespace
+        body.extend_from_slice(b"ttml.xsd");
+        body.push(0); // schema_location
+        body.extend_from_slice(b"image/png font/ttf");
+        body.push(0); // auxiliary_mime_types
+        body.extend_from_slice(&btrt_box());
+        let e = parse_stpp(&body).unwrap();
+        assert_eq!(e.namespace, "http://www.w3.org/ns/ttml");
+        assert_eq!(e.schema_location, "ttml.xsd");
+        assert_eq!(e.auxiliary_mime_types, "image/png font/ttf");
+        assert_eq!(e.bitrate.unwrap().avg_bitrate, 150);
+    }
+
+    #[test]
+    fn stpp_namespace_only() {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"urn:ns");
+        body.push(0);
+        let e = parse_stpp(&body).unwrap();
+        assert_eq!(e.namespace, "urn:ns");
+        assert_eq!(e.schema_location, "");
+        assert_eq!(e.auxiliary_mime_types, "");
+        assert!(e.bitrate.is_none());
+    }
+
+    #[test]
+    fn sbtt_mime_and_txtc() {
+        let mut body = Vec::new();
+        body.push(0); // content_encoding empty
+        body.extend_from_slice(b"text/plain");
+        body.push(0);
+        let cfg = b"WEBVTT";
+        let size = 8 + 4 + cfg.len() + 1;
+        body.extend_from_slice(&(size as u32).to_be_bytes());
+        body.extend_from_slice(b"txtC");
+        body.extend_from_slice(&0u32.to_be_bytes());
+        body.extend_from_slice(cfg);
+        body.push(0);
+        let e = parse_sbtt(&body).unwrap();
+        assert_eq!(e.content_encoding, "");
+        assert_eq!(e.mime_format, "text/plain");
+        assert_eq!(e.text_config.as_deref(), Some("WEBVTT"));
+    }
+
+    #[test]
+    fn subtitle_dispatch_and_accessor() {
+        let mut stpp = Vec::new();
+        stpp.extend_from_slice(b"urn:ns");
+        stpp.push(0);
+        assert!(matches!(
+            parse_subtitle_sample_entry(b"stpp", &stpp).unwrap(),
+            Some(SubtitleSampleEntry::Xml(_))
+        ));
+        let mut sbtt = Vec::new();
+        sbtt.extend_from_slice(b"text/plain");
+        sbtt.push(0);
+        assert!(matches!(
+            parse_subtitle_sample_entry(b"sbtt", &sbtt).unwrap(),
+            Some(SubtitleSampleEntry::Text(_))
+        ));
+        assert!(parse_subtitle_sample_entry(b"tx3g", &[]).unwrap().is_none());
+        let e = SubtitleSampleEntry::Xml(XmlSubtitleSampleEntry {
+            bitrate: Some(BitRate {
+                buffer_size_db: 9,
+                max_bitrate: 8,
+                avg_bitrate: 7,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(e.bitrate().unwrap().avg_bitrate, 7);
     }
 }
