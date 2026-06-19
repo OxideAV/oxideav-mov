@@ -137,6 +137,28 @@ pub enum TimecodeSample {
     Record(TimecodeRecord),
 }
 
+/// The starting timecode governing a media track, resolved through its
+/// `tref/tmcd` reference (or directly, for a timecode track itself).
+///
+/// Bundles the decoded sample-0 value with the timecode-system fields
+/// from the `tmcd` sample description needed to interpret it. See
+/// [`crate::MovDemuxer::start_timecode`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StartTimecode {
+    /// 0-based index of the timecode track this value was read from.
+    pub timecode_track_index: usize,
+    /// Frames per second of the timecode format (`tmcd.number_of_frames`).
+    pub number_of_frames: u8,
+    /// Timescale for `frame_duration` (`tmcd.time_scale`).
+    pub time_scale: u32,
+    /// Ticks per frame in `time_scale` units (`tmcd.frame_duration`).
+    pub frame_duration: u32,
+    /// Whether the timecode uses SMPTE drop-frame counting.
+    pub drop_frame: bool,
+    /// The decoded starting timecode value (counter or `[H:M:S:F]`).
+    pub sample: TimecodeSample,
+}
+
 /// A packed `[Hours:Minutes:Seconds:Frames]` timecode record with sign
 /// (QTFF p. 108 "Timecode Sample Data").
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

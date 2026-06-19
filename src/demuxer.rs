@@ -45,7 +45,7 @@ use crate::sample_table::{
 use crate::sidx::{parse_sidx, Sidx};
 use crate::ssix::{parse_ssix, Ssix};
 use crate::styp::{parse_styp, Styp};
-use crate::timecode::TimecodeSample;
+use crate::timecode::{StartTimecode, TimecodeSample};
 use crate::track::{parse_stsd, Track, TrackRef, TrackRefKind};
 use crate::track_load::parse_load;
 use crate::user_data::{parse_udta, UserDataEntry};
@@ -2220,6 +2220,55 @@ impl MovDemuxer {
         let mut buf = vec![0u8; size];
         self.input.read_exact(&mut buf)?;
         Ok(Some(tmcd.decode_sample(&buf)?))
+    }
+
+    /// Resolve the **starting timecode** governing `track_index`.
+    ///
+    /// QTFF p. 222 ("Creating a Timecode Track…"): a timecode track holds
+    /// one sample per contiguous source-tape segment, and that sample
+    /// carries the timecode value at the *start* of the segment. Media
+    /// tracks (video/audio) point at their timecode track with a
+    /// `tref/tmcd` reference.
+    ///
+    /// This resolves the governing timecode track — `track_index` itself
+    /// when it is a timecode track, otherwise its first `tref/tmcd`
+    /// target ([`Self::timecode_track_index`]) — reads that track's sample
+    /// 0, and returns the decoded value bundled with the timecode-system
+    /// fields needed to interpret it ([`StartTimecode`]). Returns `None`
+    /// when no timecode track governs `track_index` or its sample 0 is
+    /// missing; `Err` only on an I/O failure.
+    pub fn start_timecode(&mut self, track_index: usize) -> Result<Option<StartTimecode>> {
+        // Pick the timecode track: self if it is one, else the tref/tmcd
+        // target.
+        let tc_track = match self.tracks.get(track_index) {
+            Some(t) if t.is_timecode() => track_index,
+            Some(_) => match self.timecode_track_index(track_index) {
+                Some(i) => i,
+                None => return Ok(None),
+            },
+            None => return Ok(None),
+        };
+        let tmcd = match self
+            .tracks
+            .get(tc_track)
+            .and_then(|t| t.sample_descriptions.first())
+            .and_then(|d| d.tmcd.clone())
+        {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let sample = match self.timecode_sample(tc_track, 0)? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        Ok(Some(StartTimecode {
+            timecode_track_index: tc_track,
+            number_of_frames: tmcd.number_of_frames,
+            time_scale: tmcd.time_scale,
+            frame_duration: tmcd.frame_duration,
+            drop_frame: tmcd.is_drop_frame(),
+            sample,
+        }))
     }
 
     /// Total byte extent of 1-based chunk `chunk_1based` on

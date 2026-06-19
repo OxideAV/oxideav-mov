@@ -19,6 +19,77 @@ use common::*;
 use oxideav_core::ReadSeek;
 use oxideav_mov::{MovDemuxer, TimecodeRecord, TimecodeSample, TMCD_FLAG_COUNTER};
 
+/// Build a two-track movie: a video track (id 1) carrying a `tref/tmcd`
+/// pointing at a timecode track (id 2). The timecode track has a single
+/// record-format sample = `start`.
+fn build_video_plus_timecode(start: [u8; 4], number_of_frames: u8) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut ftyp = Vec::new();
+    ftyp.extend_from_slice(b"qt  ");
+    ftyp.extend_from_slice(&0u32.to_be_bytes());
+    ftyp.extend_from_slice(b"qt  ");
+    push_atom(&mut out, *b"ftyp", &ftyp);
+
+    // mdat: [video 4 bytes][timecode 4 bytes].
+    let mut mdat_body = Vec::new();
+    mdat_body.extend_from_slice(b"VID!");
+    mdat_body.extend_from_slice(&start);
+    let mdat_payload_off = (out.len() + 8) as u32;
+    push_atom(&mut out, *b"mdat", &mdat_body);
+    let video_off = mdat_payload_off;
+    let tc_off = mdat_payload_off + 4;
+
+    let mut moov = Vec::new();
+    push_atom(&mut moov, *b"mvhd", &build_mvhd(30000, 30));
+
+    // Track 1: video, tref/tmcd -> 2.
+    let mut trak1 = Vec::new();
+    push_atom(&mut trak1, *b"tkhd", &build_tkhd(1, 30, 320, 240));
+    let mut tref = Vec::new();
+    push_atom(&mut tref, *b"tmcd", &2u32.to_be_bytes());
+    push_atom(&mut trak1, *b"tref", &tref);
+    let mut mdia1 = Vec::new();
+    push_atom(&mut mdia1, *b"mdhd", &build_mdhd(30000, 30));
+    push_atom(&mut mdia1, *b"hdlr", &build_hdlr(b"mhlr", b"vide"));
+    let mut minf1 = Vec::new();
+    push_atom(&mut minf1, *b"vmhd", &build_vmhd());
+    let mut stbl1 = Vec::new();
+    push_atom(
+        &mut stbl1,
+        *b"stsd",
+        &build_stsd_video(b"avc1", 320, 240, &[]),
+    );
+    push_atom(&mut stbl1, *b"stts", &build_stts_single(1, 30));
+    push_atom(&mut stbl1, *b"stsc", &build_stsc_single(1));
+    push_atom(&mut stbl1, *b"stsz", &build_stsz_constant(4, 1));
+    push_atom(&mut stbl1, *b"stco", &build_stco_single(video_off));
+    push_atom(&mut minf1, *b"stbl", &stbl1);
+    push_atom(&mut mdia1, *b"minf", &minf1);
+    push_atom(&mut trak1, *b"mdia", &mdia1);
+    push_atom(&mut moov, *b"trak", &trak1);
+
+    // Track 2: timecode.
+    let mut trak2 = Vec::new();
+    push_atom(&mut trak2, *b"tkhd", &build_tkhd(2, 30, 0, 0));
+    let mut mdia2 = Vec::new();
+    push_atom(&mut mdia2, *b"mdhd", &build_mdhd(30000, 30));
+    push_atom(&mut mdia2, *b"hdlr", &build_hdlr(b"mhlr", b"tmcd"));
+    let mut minf2 = Vec::new();
+    let mut stbl2 = Vec::new();
+    push_atom(&mut stbl2, *b"stsd", &build_stsd_tmcd(0, number_of_frames));
+    push_atom(&mut stbl2, *b"stts", &build_stts_single(1, 30));
+    push_atom(&mut stbl2, *b"stsc", &build_stsc_single(1));
+    push_atom(&mut stbl2, *b"stsz", &build_stsz_constant(4, 1));
+    push_atom(&mut stbl2, *b"stco", &build_stco_single(tc_off));
+    push_atom(&mut minf2, *b"stbl", &stbl2);
+    push_atom(&mut mdia2, *b"minf", &minf2);
+    push_atom(&mut trak2, *b"mdia", &mdia2);
+    push_atom(&mut moov, *b"trak", &trak2);
+
+    push_atom(&mut out, *b"moov", &moov);
+    out
+}
+
 /// Build a `tmcd` sample-description `stsd` body with the given flags
 /// and frames-per-second; no trailing source reference.
 fn build_stsd_tmcd(flags: u32, number_of_frames: u8) -> Vec<u8> {
@@ -191,4 +262,61 @@ fn non_timecode_track_returns_none() {
     let mut d = MovDemuxer::open(cur).expect("open video");
     assert!(!d.tracks[0].is_timecode());
     assert!(d.timecode_sample(0, 0).unwrap().is_none());
+}
+
+#[test]
+fn start_timecode_resolves_through_tref_from_video() {
+    // QTFF p. 224 worked value: 0x010F2004 = 01:15:32:04.
+    let start = 0x010F_2004u32.to_be_bytes();
+    let bytes = build_video_plus_timecode(start, 30);
+    let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+    let mut d = MovDemuxer::open(cur).expect("open");
+
+    // Asked about the *video* track (index 0): resolves to timecode
+    // track index 1 via tref/tmcd.
+    let st = d.start_timecode(0).unwrap().expect("start timecode");
+    assert_eq!(st.timecode_track_index, 1);
+    assert_eq!(st.number_of_frames, 30);
+    assert!(!st.drop_frame);
+    assert_eq!(
+        st.sample,
+        TimecodeSample::Record(TimecodeRecord {
+            negative: false,
+            hours: 1,
+            minutes: 15,
+            seconds: 32,
+            frames: 4,
+        })
+    );
+}
+
+#[test]
+fn start_timecode_on_timecode_track_itself() {
+    let start = 0x010F_2004u32.to_be_bytes();
+    let bytes = build_video_plus_timecode(start, 30);
+    let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+    let mut d = MovDemuxer::open(cur).expect("open");
+    // Asked directly about the timecode track (index 1).
+    let st = d.start_timecode(1).unwrap().expect("start timecode");
+    assert_eq!(st.timecode_track_index, 1);
+    match st.sample {
+        TimecodeSample::Record(r) => {
+            assert_eq!((r.hours, r.minutes, r.seconds, r.frames), (1, 15, 32, 4));
+        }
+        other => panic!("expected record, got {other:?}"),
+    }
+}
+
+#[test]
+fn start_timecode_none_without_reference() {
+    // A plain timecode movie's video-less single track resolves on
+    // itself; but a movie with no timecode track at all returns None.
+    let samples = [[0u8, 0, 0, 0]];
+    let bytes = build_timecode_movie(0, 30, &samples);
+    let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+    let mut d = MovDemuxer::open(cur).expect("open");
+    // Track 0 IS the timecode track here, so it resolves on itself.
+    assert!(d.start_timecode(0).unwrap().is_some());
+    // Out-of-range track index.
+    assert!(d.start_timecode(9).unwrap().is_none());
 }
