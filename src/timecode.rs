@@ -302,19 +302,42 @@ fn find_name_atom(buf: &[u8]) -> Option<String> {
     None
 }
 
-/// Decode the body of a `name` user-data atom into a best-effort
-/// UTF-8 string. Mirrors the conservative decoder used in
-/// [`crate::user_data`]: valid UTF-8 passes through; invalid UTF-8
-/// falls back to a Mac-Roman → ASCII expansion (bytes ≥ 0x80 → U+FFFD).
+/// Decode the body of a source-reference `name` atom into a best-effort
+/// UTF-8 string.
 ///
-/// QuickTime's `name` payload inside a source reference is a *raw*
-/// counted byte string (no `[ver+flags]` FullBox prefix in the QTFF
-/// description) — so we treat the whole payload as the name. Trailing
-/// NULs are stripped.
+/// QTFF p. 224 ("Creating a Timecode Track…") gives the concrete on-disk
+/// shape of the `name` atom inside a timecode source reference:
+///
+/// ```text
+/// [size:u32]['name'][string_length:u16][language_code:u16][text...]
+/// ```
+///
+/// i.e. the *body* (post-header bytes passed here) is a 16-bit byte count
+/// of the text, a 16-bit Mac language code, then the text itself. We
+/// detect that structured form when the leading `string_length` exactly
+/// accounts for the remaining bytes (`body_len - 4`) and strip the
+/// 4-byte prefix; otherwise we fall back to treating the whole payload
+/// as a raw counted byte string (some writers emit the name with no
+/// length/language header). Trailing NULs are stripped in both cases.
+///
+/// Text decode is conservative (mirrors [`crate::user_data`]): valid
+/// UTF-8 passes through; otherwise a Mac-Roman → ASCII expansion maps
+/// bytes ≥ 0x80 to U+FFFD.
 fn decode_name_payload(raw: &[u8]) -> String {
-    let trimmed = match raw.last() {
-        Some(0) => &raw[..raw.len() - 1],
-        _ => raw,
+    // Structured form per QTFF p. 224: [u16 string_length][u16 language].
+    let text = if raw.len() >= 4 {
+        let declared = u16::from_be_bytes([raw[0], raw[1]]) as usize;
+        if declared == raw.len() - 4 {
+            &raw[4..]
+        } else {
+            raw
+        }
+    } else {
+        raw
+    };
+    let trimmed = match text.last() {
+        Some(0) => &text[..text.len() - 1],
+        _ => text,
     };
     if let Ok(s) = std::str::from_utf8(trimmed) {
         return s.to_string();
@@ -541,5 +564,41 @@ mod tests {
     #[test]
     fn record_from_frames_zero_fps_is_none() {
         assert_eq!(TimecodeRecord::from_frames(10, 0), None);
+    }
+
+    #[test]
+    fn structured_name_source_reference_strips_length_and_language() {
+        // QTFF p. 224 worked example: name body is
+        // [string_length:u16=12][language:u16=0]["my tape name"].
+        let mut p = vec![0u8; 20];
+        p[16] = 20; // 29.97 fps frames
+        let text = b"my tape name"; // 12 bytes
+        let mut name_body = Vec::new();
+        name_body.extend_from_slice(&(text.len() as u16).to_be_bytes());
+        name_body.extend_from_slice(&0u16.to_be_bytes()); // language English
+        name_body.extend_from_slice(text);
+        let mut name_atom = Vec::new();
+        name_atom.extend_from_slice(&((8 + name_body.len()) as u32).to_be_bytes());
+        name_atom.extend_from_slice(b"name");
+        name_atom.extend_from_slice(&name_body);
+        p.extend_from_slice(&name_atom);
+        let t = parse_tmcd_sample_description(&p).unwrap();
+        assert_eq!(t.source_name.as_deref(), Some("my tape name"));
+    }
+
+    #[test]
+    fn raw_name_without_length_header_still_decodes() {
+        // Backward-tolerant raw form: body is just the text, no
+        // length/language prefix. "Tape A1" is 7 bytes, so the leading
+        // u16 (0x5461 = "Ta") will NOT equal len-4, keeping the raw path.
+        let mut p = vec![0u8; 20];
+        let text = b"Tape A1";
+        let mut name_atom = Vec::new();
+        name_atom.extend_from_slice(&((8 + text.len()) as u32).to_be_bytes());
+        name_atom.extend_from_slice(b"name");
+        name_atom.extend_from_slice(text);
+        p.extend_from_slice(&name_atom);
+        let t = parse_tmcd_sample_description(&p).unwrap();
+        assert_eq!(t.source_name.as_deref(), Some("Tape A1"));
     }
 }
