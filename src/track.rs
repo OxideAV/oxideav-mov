@@ -21,6 +21,7 @@ use crate::media_meta::{
     parse_chan, parse_clap, parse_colr, parse_fiel, parse_mjht, parse_mjqt, parse_pasp, Chan, Clap,
     ColorParameters, Cslg, Fiel, MetaKeyValue, Mjht, Mjqt, Pasp, Tapt,
 };
+use crate::metadata_sample::{parse_metadata_sample_entry, MetadataSampleEntry};
 use crate::reference::DataReference;
 use crate::sample_table::{SampleEntry, SampleTable};
 use crate::timecode::{parse_tmcd_sample_description, Tmcd};
@@ -208,6 +209,14 @@ pub struct SampleDescription {
     /// track's handler is a time-code track (`hdlr.is_timecode()`) and
     /// the entry's format FourCC is `tmcd`. See [`Tmcd`].
     pub tmcd: Option<Tmcd>,
+
+    // ─────── Round-344 timed-metadata sample entry ───────
+    /// Parsed ISO BMFF `MetaDataSampleEntry` (`metx` / `mett` / `urim`,
+    /// ISO/IEC 14496-12 §12.3.3) — populated only when the track's
+    /// handler is a timed-metadata track (`hdlr.is_metadata()`) and the
+    /// entry's format FourCC names one of those subclasses. `None` for
+    /// every other handler / format. See [`MetadataSampleEntry`].
+    pub metadata: Option<MetadataSampleEntry>,
 }
 
 impl SampleDescription {
@@ -780,6 +789,17 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
             // Keep the trailing source-reference bytes in `extra` so
             // future rounds can also surface ftab/style atoms.
             entry.extra = body[20..].to_vec();
+        } else if hdlr.is_metadata() && matches!(&format, b"metx" | b"mett" | b"urim") {
+            // ISO BMFF timed-metadata sample entry (ISO/IEC 14496-12
+            // §12.3.3). The SampleEntry base contributes the universal
+            // 16-byte header already consumed above (`size`/`format`/
+            // 6 reserved/`data_reference_index`); `body` therefore starts
+            // at the subclass-specific fields, exactly what
+            // `parse_metadata_sample_entry` expects.
+            entry.metadata = parse_metadata_sample_entry(&format, body)?;
+            // Preserve the raw body for any caller that needs the exact
+            // wire bytes (e.g. round-trip muxing) alongside the typed view.
+            entry.extra = body.to_vec();
         } else if hdlr.is_audio() && body.len() >= 20 {
             // Sound sample description v0 (QTFF p. 100):
             //   ver:2 rev:2 vendor:4 channels:2 sample_size:2

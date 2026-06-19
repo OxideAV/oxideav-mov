@@ -621,6 +621,21 @@ impl Hdlr {
     pub fn is_timecode(&self) -> bool {
         self.component_subtype == *b"tmcd"
     }
+    /// ISO BMFF timed-metadata track (`meta` subtype, ISO/IEC 14496-12
+    /// §12.3.2). Such a track uses a null media header (`nmhd`) and
+    /// declares its samples through a `MetaDataSampleEntry` subclass
+    /// (`metx` / `mett` / `urim`) in `stsd`. Distinct from the `meta`
+    /// *box* (untimed file/movie/track metadata, §8.11) — this is the
+    /// handler component subtype, not the box type.
+    pub fn is_metadata(&self) -> bool {
+        self.component_subtype == *b"meta"
+    }
+    /// ISO BMFF hint track (`hint` subtype, ISO/IEC 14496-12 §12.4.1):
+    /// protocol-packetization metadata (e.g. RTP) referencing a source
+    /// media track.
+    pub fn is_hint(&self) -> bool {
+        self.component_subtype == *b"hint"
+    }
 }
 
 /// Parse an `hdlr` payload.

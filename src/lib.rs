@@ -28,6 +28,7 @@ pub mod kind;
 pub mod leva;
 pub mod matte;
 pub mod media_meta;
+pub mod metadata_sample;
 pub mod muxer;
 pub mod pdin;
 pub mod pnot;
@@ -116,6 +117,10 @@ pub use media_meta::{
     channel_mask_for_layout_tag, parse_fiel, parse_mjht, parse_mjqt, Chan, ChanDescription, Clap,
     ColorParameters, ColorParametersKind, Cslg, Fiel, FieldOrdering, MetaKeyValue, Mjht, Mjqt,
     Pasp, Tapt, FIEL_BODY_LEN,
+};
+pub use metadata_sample::{
+    parse_btrt, parse_metadata_sample_entry, parse_mett, parse_metx, parse_urim, BitRate,
+    MetadataSampleEntry, TextMetadataSampleEntry, UriMetadataSampleEntry, XmlMetadataSampleEntry,
 };
 pub use muxer::{
     FragmentationMode, MovMetadata, MovMuxer, MuxEdit, MuxSample, MuxTrackKind, SampleAuxStream,

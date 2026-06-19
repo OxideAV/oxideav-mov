@@ -67,6 +67,15 @@ Decoding stays in codec crates: this crate calls
   (version 1, Compression ID `-2`, QTFF p. 102). The Apple `chan`
   channel layout is parsed; codec-private blobs (`wave` /
   `esds` / `frma`) stay opaque for the codec crates.
+- Timed-metadata sample entries (ISO/IEC 14496-12 §12.3.3): a `meta`-
+  handler track's `stsd` entry (`Hdlr::is_metadata()`) is decoded into a
+  typed `MetadataSampleEntry` on `SampleDescription::metadata` — `metx`
+  (XML: `content_encoding` / `namespace` / `schema_location`), `mett`
+  (text: `content_encoding` / `mime_format` plus the `txtC` TextConfigBox
+  `text_config`), and `urim` (URI: the `uri ` URIBox string plus the
+  optional `uriI` URIInitBox data). The optional `btrt` BitRateBox
+  (§8.5.2.2) is decoded to `BitRate { buffer_size_db, max_bitrate,
+  avg_bitrate }` and surfaced via `MetadataSampleEntry::bitrate()`.
 - Fragmented MP4 / fMP4 / DASH: `mvex/trex` defaults +
   `moof/traf/tfhd/trun` cascade, `tfdt` baseline DTS, `leva` level
   assignment, and per-fragment sample-aux. `mfra/tfra/mfro`-driven
