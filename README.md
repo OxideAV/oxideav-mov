@@ -48,6 +48,16 @@ Decoding stays in codec crates: this crate calls
 - Video sample-description extensions: `gama`, `pasp`, `clap`, `colr`,
   `fiel` (field handling), and the default Motion-JPEG `mjqt` / `mjht`
   tables (surfaced verbatim).
+- Timecode tracks (`tmcd`): the `stsd` sample description (time scale /
+  frame duration / frames-per-second / drop-frame-etc flags / structured
+  source-tape `name` per QTFF p. 224) plus per-sample **Timecode Sample
+  Data** decoding (QTFF p. 108) — `timecode_sample(track, idx)` reads a
+  sample's `mdat` payload into either a 32-bit tape `Counter` value or a
+  packed `[H:M:S:F]` `Record` (with sign), and `start_timecode(track)`
+  resolves a media track's governing timecode through its `tref/tmcd`
+  reference. `TimecodeRecord::to_frames` / `from_frames` give
+  non-drop-frame conversions (drop-frame absolute counts are out of
+  scope — the SMPTE-12M skip rule is outside the QTFF spec).
 - Sound sample-description versioning: version-0 (uncompressed-sample)
   and version-1 (QTFF p. 101 `SoundDescriptionV1`) layouts. The four
   fixed-ratio fields (`samples_per_packet`, `bytes_per_packet`,
