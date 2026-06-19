@@ -77,6 +77,143 @@ impl Tmcd {
     pub fn is_counter(&self) -> bool {
         self.flags & TMCD_FLAG_COUNTER != 0
     }
+
+    /// Decode one timecode-track **sample payload** (the bytes read out
+    /// of `mdat` for a single timecode sample) according to this sample
+    /// description.
+    ///
+    /// QTFF p. 108 ("Timecode Sample Data") defines two mutually-
+    /// exclusive layouts selected by [`Tmcd::is_counter`]:
+    ///
+    /// * Counter flag set ⇒ a single big-endian 32-bit counter value
+    ///   ([`TimecodeSample::Counter`]).
+    /// * Counter flag clear ⇒ a packed `[H:M:S:F]` record
+    ///   ([`TimecodeSample::Record`]): an 8-bit `Hours`, a 1-bit
+    ///   `Negative` sign packed into the high bit of the next byte whose
+    ///   low 7 bits are `Minutes`, an 8-bit `Seconds`, and an 8-bit
+    ///   `Frames`.
+    ///
+    /// Both layouts are 4 bytes on disk; this accepts any payload of at
+    /// least 4 bytes and ignores trailing bytes (some writers pad the
+    /// sample). Payloads shorter than 4 bytes are rejected.
+    pub fn decode_sample(&self, payload: &[u8]) -> Result<TimecodeSample> {
+        if payload.len() < 4 {
+            return Err(Error::invalid("MOV: timecode sample payload < 4 bytes"));
+        }
+        let raw = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+        if self.is_counter() {
+            Ok(TimecodeSample::Counter(raw))
+        } else {
+            // Byte 1 packs the 1-bit Negative sign (high bit) with the
+            // 7-bit Minutes field (low 7 bits) — QTFF p. 108.
+            let hours = payload[0];
+            let negative = payload[1] & 0x80 != 0;
+            let minutes = payload[1] & 0x7f;
+            let seconds = payload[2];
+            let frames = payload[3];
+            Ok(TimecodeSample::Record(TimecodeRecord {
+                negative,
+                hours,
+                minutes,
+                seconds,
+                frames,
+            }))
+        }
+    }
+}
+
+/// One decoded timecode-track sample payload (QTFF p. 108).
+///
+/// The variant is chosen by the sample description's Counter flag, not
+/// by the bytes themselves — call [`Tmcd::decode_sample`] which consults
+/// the owning [`Tmcd`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimecodeSample {
+    /// A 32-bit tape-counter value (Counter flag set). Interpreted in
+    /// units of the sample description's `number_of_frames` "frames per
+    /// counter tick".
+    Counter(u32),
+    /// A packed `[H:M:S:F]` timecode record (Counter flag clear).
+    Record(TimecodeRecord),
+}
+
+/// A packed `[Hours:Minutes:Seconds:Frames]` timecode record with sign
+/// (QTFF p. 108 "Timecode Sample Data").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TimecodeRecord {
+    /// Sign bit — `true` when the record value is negative (only
+    /// meaningful when the description sets `TMCD_FLAG_NEGATIVES_OK`).
+    pub negative: bool,
+    /// Starting hours (8-bit).
+    pub hours: u8,
+    /// Starting minutes (7-bit; `0..=59` for valid SMPTE timecode).
+    pub minutes: u8,
+    /// Starting seconds (8-bit; `0..=59` for valid SMPTE timecode).
+    pub seconds: u8,
+    /// Starting frames within the second (8-bit). Per QTFF p. 108 this
+    /// must not exceed the description's `number_of_frames`.
+    pub frames: u8,
+}
+
+impl TimecodeRecord {
+    /// Convert this record to an **absolute non-drop-frame frame
+    /// count**, treating `fps` as the number of frames per second
+    /// (the sample description's `number_of_frames`).
+    ///
+    /// This is plain positional arithmetic the QTFF field semantics
+    /// support directly:
+    /// `((H*3600 + M*60 + S) * fps + F)`, negated when `negative`.
+    ///
+    /// NOTE: this does **not** apply SMPTE drop-frame skipping. The
+    /// QTFF specification names the drop-frame flag (p. 106) and the
+    /// glossary describes drop-frame as "a synchronizing technique that
+    /// skips timecodes" (p. 251) but does not state which frame numbers
+    /// are dropped — that arithmetic lives in SMPTE 12M, outside
+    /// `docs/container/`. Callers that need a drop-frame-corrected count
+    /// must apply that correction themselves. Returns `None` if `fps`
+    /// is 0 or the multiplication overflows `i64`.
+    pub fn to_frames(&self, fps: u8) -> Option<i64> {
+        if fps == 0 {
+            return None;
+        }
+        let fps = fps as i64;
+        let total_seconds = (self.hours as i64)
+            .checked_mul(3600)?
+            .checked_add((self.minutes as i64).checked_mul(60)?)?
+            .checked_add(self.seconds as i64)?;
+        let frames = total_seconds
+            .checked_mul(fps)?
+            .checked_add(self.frames as i64)?;
+        Some(if self.negative { -frames } else { frames })
+    }
+
+    /// Inverse of [`TimecodeRecord::to_frames`]: build a record from an
+    /// absolute non-drop-frame frame count at `fps` frames per second.
+    ///
+    /// The sign is taken from `frames`; magnitude is decomposed into
+    /// `H:M:S:F`. Like [`to_frames`](Self::to_frames) this is the
+    /// non-drop-frame mapping only. Returns `None` if `fps` is 0.
+    pub fn from_frames(frames: i64, fps: u8) -> Option<Self> {
+        if fps == 0 {
+            return None;
+        }
+        let negative = frames < 0;
+        let mag = frames.unsigned_abs();
+        let fps_u = fps as u64;
+        let f = (mag % fps_u) as u8;
+        let total_seconds = mag / fps_u;
+        let s = (total_seconds % 60) as u8;
+        let total_minutes = total_seconds / 60;
+        let m = (total_minutes % 60) as u8;
+        let h = (total_minutes / 60).min(u8::MAX as u64) as u8;
+        Some(TimecodeRecord {
+            negative,
+            hours: h,
+            minutes: m,
+            seconds: s,
+            frames: f,
+        })
+    }
 }
 
 /// Parse a `tmcd` sample-description body (the bytes that follow the
@@ -267,5 +404,142 @@ mod tests {
         p[4..8].copy_from_slice(&TMCD_FLAG_COUNTER.to_be_bytes());
         let t = parse_tmcd_sample_description(&p).unwrap();
         assert!(t.is_counter());
+    }
+
+    /// Build a minimal non-counter `tmcd` description at `fps`.
+    fn tmcd_record_desc(fps: u8, flags: u32) -> Tmcd {
+        let mut p = vec![0u8; 20];
+        p[4..8].copy_from_slice(&flags.to_be_bytes());
+        p[8..12].copy_from_slice(&30000u32.to_be_bytes());
+        p[12..16].copy_from_slice(&1001u32.to_be_bytes());
+        p[16] = fps;
+        parse_tmcd_sample_description(&p).unwrap()
+    }
+
+    #[test]
+    fn decode_counter_sample() {
+        let t = tmcd_record_desc(30, TMCD_FLAG_COUNTER);
+        let s = t.decode_sample(&0x0001_2345u32.to_be_bytes()).unwrap();
+        assert_eq!(s, TimecodeSample::Counter(0x0001_2345));
+    }
+
+    #[test]
+    fn decode_record_sample_hmsf() {
+        let t = tmcd_record_desc(30, 0);
+        // 01:23:45:17, positive.
+        let payload = [1u8, 23, 45, 17];
+        let s = t.decode_sample(&payload).unwrap();
+        assert_eq!(
+            s,
+            TimecodeSample::Record(TimecodeRecord {
+                negative: false,
+                hours: 1,
+                minutes: 23,
+                seconds: 45,
+                frames: 17,
+            })
+        );
+    }
+
+    #[test]
+    fn decode_record_negative_sign_packs_into_minutes_byte() {
+        let t = tmcd_record_desc(25, TMCD_FLAG_NEGATIVES_OK);
+        // Hours=2, minutes byte = 0x80 | 10 (negative, 10 minutes).
+        let payload = [2u8, 0x80 | 10, 30, 12];
+        match t.decode_sample(&payload).unwrap() {
+            TimecodeSample::Record(r) => {
+                assert!(r.negative);
+                assert_eq!(r.hours, 2);
+                assert_eq!(r.minutes, 10);
+                assert_eq!(r.seconds, 30);
+                assert_eq!(r.frames, 12);
+            }
+            other => panic!("expected record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_sample_short_payload_errors() {
+        let t = tmcd_record_desc(30, 0);
+        assert!(t.decode_sample(&[0u8; 3]).is_err());
+    }
+
+    #[test]
+    fn decode_sample_ignores_trailing_padding() {
+        let t = tmcd_record_desc(30, 0);
+        let s = t.decode_sample(&[0, 0, 1, 5, 0xAA, 0xBB]).unwrap();
+        assert_eq!(
+            s,
+            TimecodeSample::Record(TimecodeRecord {
+                negative: false,
+                hours: 0,
+                minutes: 0,
+                seconds: 1,
+                frames: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn record_to_frames_non_drop() {
+        // 00:00:10:05 at 30fps = 305 frames.
+        let r = TimecodeRecord {
+            negative: false,
+            hours: 0,
+            minutes: 0,
+            seconds: 10,
+            frames: 5,
+        };
+        assert_eq!(r.to_frames(30), Some(305));
+        // 01:00:00:00 at 30fps = 108000 frames.
+        let r2 = TimecodeRecord {
+            hours: 1,
+            ..Default::default()
+        };
+        assert_eq!(r2.to_frames(30), Some(108_000));
+    }
+
+    #[test]
+    fn record_to_frames_negative() {
+        let r = TimecodeRecord {
+            negative: true,
+            hours: 0,
+            minutes: 0,
+            seconds: 2,
+            frames: 0,
+        };
+        assert_eq!(r.to_frames(25), Some(-50));
+    }
+
+    #[test]
+    fn record_to_frames_zero_fps_is_none() {
+        let r = TimecodeRecord::default();
+        assert_eq!(r.to_frames(0), None);
+    }
+
+    #[test]
+    fn record_from_frames_round_trips() {
+        for fps in [24u8, 25, 30] {
+            for &n in &[0i64, 1, 29, 305, 108_000, -50, 86_399 * 30] {
+                let r = TimecodeRecord::from_frames(n, fps).unwrap();
+                assert_eq!(r.to_frames(fps), Some(n), "fps={fps} n={n}");
+            }
+        }
+    }
+
+    #[test]
+    fn record_from_frames_decomposes() {
+        // 305 frames at 30fps = 00:00:10:05.
+        let r = TimecodeRecord::from_frames(305, 30).unwrap();
+        assert_eq!(r.hours, 0);
+        assert_eq!(r.minutes, 0);
+        assert_eq!(r.seconds, 10);
+        assert_eq!(r.frames, 5);
+        assert!(!r.negative);
+    }
+
+    #[test]
+    fn record_from_frames_zero_fps_is_none() {
+        assert_eq!(TimecodeRecord::from_frames(10, 0), None);
     }
 }

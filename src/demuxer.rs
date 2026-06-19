@@ -45,6 +45,7 @@ use crate::sample_table::{
 use crate::sidx::{parse_sidx, Sidx};
 use crate::ssix::{parse_ssix, Ssix};
 use crate::styp::{parse_styp, Styp};
+use crate::timecode::TimecodeSample;
 use crate::track::{parse_stsd, Track, TrackRef, TrackRefKind};
 use crate::track_load::parse_load;
 use crate::user_data::{parse_udta, UserDataEntry};
@@ -2174,6 +2175,51 @@ impl MovDemuxer {
             .get(track_index)?
             .sample_table
             .sample_offset(sample_idx)
+    }
+
+    /// Read and decode the timecode-track sample at 0-based decode-order
+    /// index `sample_idx` on `track_index` (QTFF p. 108 "Timecode Sample
+    /// Data").
+    ///
+    /// The track's first sample description must carry a `tmcd` body (i.e.
+    /// it is a timecode track, [`Track::is_timecode`]); the per-sample
+    /// payload is read from `mdat` via [`Self::sample_offset`] and decoded
+    /// by [`Tmcd::decode_sample`], yielding either a tape-counter value or
+    /// a packed `[H:M:S:F]` record. Returns `None` when the track is not a
+    /// timecode track / has no `tmcd` description, the index is out of
+    /// range, or the byte offset cannot be resolved; `Err` only on an
+    /// I/O failure reading the sample bytes.
+    pub fn timecode_sample(
+        &mut self,
+        track_index: usize,
+        sample_idx: u32,
+    ) -> Result<Option<TimecodeSample>> {
+        let tmcd = match self
+            .tracks
+            .get(track_index)
+            .and_then(|t| t.sample_descriptions.first())
+            .and_then(|d| d.tmcd.clone())
+        {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let offset = match self.sample_offset(track_index, sample_idx) {
+            Some(o) => o,
+            None => return Ok(None),
+        };
+        let size = match self
+            .tracks
+            .get(track_index)
+            .and_then(|t| t.sample_table.sample_size_at(sample_idx))
+        {
+            Some(s) if s >= 4 => s.min(16) as usize,
+            // A timecode sample is 4 bytes; anything shorter is malformed.
+            _ => return Ok(None),
+        };
+        self.input.seek(SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; size];
+        self.input.read_exact(&mut buf)?;
+        Ok(Some(tmcd.decode_sample(&buf)?))
     }
 
     /// Total byte extent of 1-based chunk `chunk_1based` on

@@ -145,8 +145,8 @@ pub use sub_track::{
     SubTrackSampleGroup,
 };
 pub use timecode::{
-    parse_tmcd_sample_description, Tmcd, TMCD_FLAG_24_HOUR, TMCD_FLAG_COUNTER,
-    TMCD_FLAG_DROP_FRAME, TMCD_FLAG_NEGATIVES_OK,
+    parse_tmcd_sample_description, TimecodeRecord, TimecodeSample, Tmcd, TMCD_FLAG_24_HOUR,
+    TMCD_FLAG_COUNTER, TMCD_FLAG_DROP_FRAME, TMCD_FLAG_NEGATIVES_OK,
 };
 pub use track::{SampleDescription, SoundV1, Track, TrackRef, TrackRefKind};
 pub use track_group::{
