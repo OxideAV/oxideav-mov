@@ -255,6 +255,202 @@ pub fn decode_sap(payload: &[u8]) -> Result<StreamAccessPoint> {
     })
 }
 
+/// One operation point of a `'rash'` RateShareEntry (§10.2.2.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RateShareOperationPoint {
+    /// §10.2.2.3 — total available bitrate (kbit/s) that defines this
+    /// operation point. Only present when `operation_point_count > 1`;
+    /// for the single-point form this field is `0` (the share applies
+    /// to all available bitrates).
+    pub available_bitrate: u32,
+    /// §10.2.2.3 — percentage of available bandwidth to allocate to
+    /// the media at this operation point (`0` = no preference given).
+    pub target_rate_share: u16,
+}
+
+/// Typed `'rash'` entry — §10.2.2.2 RateShareEntry.
+///
+/// Rate-share information lets a server / player extracting data from
+/// a track in combination with other tracks (§10.2.3) allocate the
+/// total available bitrate across simultaneously-served tracks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RateShare {
+    /// §10.2.2.3 — the operation points. When the on-disk
+    /// `operation_point_count` is 1, this holds a single point with
+    /// `available_bitrate == 0` (the spec's "applies to all bitrates"
+    /// single-share form).
+    pub operation_points: Vec<RateShareOperationPoint>,
+    /// §10.2.2.3 — upper bitrate threshold (kbit/s); `0` = no info.
+    pub maximum_bitrate: u32,
+    /// §10.2.2.3 — lower bitrate threshold (kbit/s); `0` = no info.
+    pub minimum_bitrate: u32,
+    /// §10.2.2.3 — discard priority; the track with the highest value
+    /// is discarded first when meeting rate-share constraints.
+    pub discard_priority: u8,
+}
+
+/// One sample-output-rate piece of an `'alst'` AlternativeStartupEntry
+/// (§10.3.2). The alternative startup sequence is divided into
+/// consecutive pieces, each with a constant sample output rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AlternativeStartupPiece {
+    /// §10.3.3 — number of output samples in this piece.
+    pub num_output_samples: u16,
+    /// §10.3.3 — number of total samples in this piece.
+    pub num_total_samples: u16,
+}
+
+/// Typed `'alst'` entry — §10.3.2 AlternativeStartupEntry.
+///
+/// Describes an alternative startup sequence: a subset of samples
+/// (starting from a sync / `'rap '` sample) that lets rendering begin
+/// earlier than when all samples are decoded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlternativeStartup {
+    /// §10.3.3 — number of samples in the alternative startup sequence
+    /// (`0` means the associated sample belongs to no such sequence).
+    pub roll_count: u16,
+    /// §10.3.3 — 1-based index (in decoding order) of the first sample
+    /// intended for output among the sequence's samples.
+    pub first_output_sample: u16,
+    /// §10.3.3 — per-sample decoding-time deltas relative to the
+    /// regular decoding time; `roll_count` entries.
+    pub sample_offsets: Vec<u32>,
+    /// §10.3.3 — optional sample-output-rate pieces filling the rest
+    /// of the structure (may be empty).
+    pub pieces: Vec<AlternativeStartupPiece>,
+}
+
+/// Decode a `'rash'` RateShareEntry payload (§10.2.2.2).
+///
+/// Variable-length; only meaningful for `sgpd` version-1+ boxes where
+/// the on-disk entry size is known (`default_length` or a per-row
+/// `description_length`). The deprecated v0 size-implicit path cannot
+/// carry `'rash'` because its width depends on `operation_point_count`.
+pub fn decode_rash(payload: &[u8]) -> Result<RateShare> {
+    if payload.len() < 2 {
+        return Err(Error::invalid("MOV: sgpd 'rash' entry < 2 bytes"));
+    }
+    let op_count = u16::from_be_bytes([payload[0], payload[1]]);
+    if op_count == 0 {
+        return Err(Error::invalid(
+            "MOV: sgpd 'rash' operation_point_count must be non-zero",
+        ));
+    }
+    let mut cursor = 2usize;
+    let mut operation_points = Vec::with_capacity(op_count as usize);
+    if op_count == 1 {
+        // Single-point form: just one target_rate_share, no bitrate.
+        if payload.len() < cursor + 2 {
+            return Err(Error::invalid("MOV: sgpd 'rash' truncated single share"));
+        }
+        operation_points.push(RateShareOperationPoint {
+            available_bitrate: 0,
+            target_rate_share: u16::from_be_bytes([payload[cursor], payload[cursor + 1]]),
+        });
+        cursor += 2;
+    } else {
+        for _ in 0..op_count {
+            if payload.len() < cursor + 6 {
+                return Err(Error::invalid("MOV: sgpd 'rash' truncated operation point"));
+            }
+            let available_bitrate = u32::from_be_bytes([
+                payload[cursor],
+                payload[cursor + 1],
+                payload[cursor + 2],
+                payload[cursor + 3],
+            ]);
+            let target_rate_share = u16::from_be_bytes([payload[cursor + 4], payload[cursor + 5]]);
+            operation_points.push(RateShareOperationPoint {
+                available_bitrate,
+                target_rate_share,
+            });
+            cursor += 6;
+        }
+    }
+    if payload.len() < cursor + 9 {
+        return Err(Error::invalid(
+            "MOV: sgpd 'rash' truncated bitrate / discard trailer",
+        ));
+    }
+    let maximum_bitrate = u32::from_be_bytes([
+        payload[cursor],
+        payload[cursor + 1],
+        payload[cursor + 2],
+        payload[cursor + 3],
+    ]);
+    let minimum_bitrate = u32::from_be_bytes([
+        payload[cursor + 4],
+        payload[cursor + 5],
+        payload[cursor + 6],
+        payload[cursor + 7],
+    ]);
+    let discard_priority = payload[cursor + 8];
+    Ok(RateShare {
+        operation_points,
+        maximum_bitrate,
+        minimum_bitrate,
+        discard_priority,
+    })
+}
+
+/// Decode an `'alst'` AlternativeStartupEntry payload (§10.3.2).
+///
+/// Variable-length; meaningful for `sgpd` version-1+ boxes where the
+/// on-disk entry size delimits the trailing optional pieces. The
+/// `do { } while (until end of structure)` loop in the spec is
+/// realised by consuming `(num_output_samples, num_total_samples)`
+/// pairs until the payload is exhausted.
+pub fn decode_alst(payload: &[u8]) -> Result<AlternativeStartup> {
+    if payload.len() < 4 {
+        return Err(Error::invalid("MOV: sgpd 'alst' entry < 4 bytes"));
+    }
+    let roll_count = u16::from_be_bytes([payload[0], payload[1]]);
+    let first_output_sample = u16::from_be_bytes([payload[2], payload[3]]);
+    let mut cursor = 4usize;
+    // `sample_offset[i]` for i in 1..=roll_count (4 bytes each).
+    let need = 4usize
+        .checked_mul(roll_count as usize)
+        .ok_or_else(|| Error::invalid("MOV: sgpd 'alst' roll_count overflow"))?;
+    if payload.len() < cursor + need {
+        return Err(Error::invalid(
+            "MOV: sgpd 'alst' truncated sample_offset table",
+        ));
+    }
+    let mut sample_offsets = Vec::with_capacity(roll_count as usize);
+    for _ in 0..roll_count {
+        sample_offsets.push(u32::from_be_bytes([
+            payload[cursor],
+            payload[cursor + 1],
+            payload[cursor + 2],
+            payload[cursor + 3],
+        ]));
+        cursor += 4;
+    }
+    // Optional output-rate pieces fill the remaining 4-byte-aligned
+    // tail. A trailing fragment < 4 bytes is malformed.
+    let tail = payload.len() - cursor;
+    if tail % 4 != 0 {
+        return Err(Error::invalid(
+            "MOV: sgpd 'alst' trailing piece table not a multiple of 4 bytes",
+        ));
+    }
+    let mut pieces = Vec::with_capacity(tail / 4);
+    while cursor + 4 <= payload.len() {
+        pieces.push(AlternativeStartupPiece {
+            num_output_samples: u16::from_be_bytes([payload[cursor], payload[cursor + 1]]),
+            num_total_samples: u16::from_be_bytes([payload[cursor + 2], payload[cursor + 3]]),
+        });
+        cursor += 4;
+    }
+    Ok(AlternativeStartup {
+        roll_count,
+        first_output_sample,
+        sample_offsets,
+        pieces,
+    })
+}
+
 /// Parse a `sbgp` payload (FullBox `sbgp`, §8.9.2.2).
 ///
 /// Layout:
@@ -871,6 +1067,112 @@ mod tests {
     fn truncated_tele_sap_error() {
         assert!(decode_tele(&[]).is_err());
         assert!(decode_sap(&[]).is_err());
+    }
+
+    #[test]
+    fn decode_rash_single_operation_point() {
+        // op_count=1 → one 16-bit target_rate_share (no bitrate field),
+        // then max/min bitrate (u32) + discard_priority (u8).
+        let mut p = Vec::new();
+        p.extend_from_slice(&1u16.to_be_bytes()); // operation_point_count
+        p.extend_from_slice(&7500u16.to_be_bytes()); // target_rate_share
+        p.extend_from_slice(&2000u32.to_be_bytes()); // maximum_bitrate
+        p.extend_from_slice(&500u32.to_be_bytes()); // minimum_bitrate
+        p.push(64); // discard_priority
+        let r = decode_rash(&p).unwrap();
+        assert_eq!(r.operation_points.len(), 1);
+        assert_eq!(r.operation_points[0].available_bitrate, 0);
+        assert_eq!(r.operation_points[0].target_rate_share, 7500);
+        assert_eq!(r.maximum_bitrate, 2000);
+        assert_eq!(r.minimum_bitrate, 500);
+        assert_eq!(r.discard_priority, 64);
+    }
+
+    #[test]
+    fn decode_rash_multi_operation_point() {
+        // op_count=2 → each point is (available_bitrate:u32,
+        // target_rate_share:u16); then the u32/u32/u8 trailer.
+        let mut p = Vec::new();
+        p.extend_from_slice(&2u16.to_be_bytes());
+        p.extend_from_slice(&1000u32.to_be_bytes()); // pt0 available_bitrate
+        p.extend_from_slice(&3000u16.to_be_bytes()); // pt0 target_rate_share
+        p.extend_from_slice(&4000u32.to_be_bytes()); // pt1 available_bitrate
+        p.extend_from_slice(&6000u16.to_be_bytes()); // pt1 target_rate_share
+        p.extend_from_slice(&5000u32.to_be_bytes()); // maximum_bitrate
+        p.extend_from_slice(&800u32.to_be_bytes()); // minimum_bitrate
+        p.push(200); // discard_priority
+        let r = decode_rash(&p).unwrap();
+        assert_eq!(r.operation_points.len(), 2);
+        assert_eq!(r.operation_points[0].available_bitrate, 1000);
+        assert_eq!(r.operation_points[0].target_rate_share, 3000);
+        assert_eq!(r.operation_points[1].available_bitrate, 4000);
+        assert_eq!(r.operation_points[1].target_rate_share, 6000);
+        assert_eq!(r.discard_priority, 200);
+    }
+
+    #[test]
+    fn decode_rash_rejects_zero_op_count_and_truncation() {
+        let mut zero = Vec::new();
+        zero.extend_from_slice(&0u16.to_be_bytes());
+        zero.extend_from_slice(&[0u8; 9]);
+        assert!(decode_rash(&zero).is_err());
+        // op_count=1 but missing the 9-byte trailer.
+        let mut trunc = Vec::new();
+        trunc.extend_from_slice(&1u16.to_be_bytes());
+        trunc.extend_from_slice(&7500u16.to_be_bytes());
+        assert!(decode_rash(&trunc).is_err());
+    }
+
+    #[test]
+    fn decode_alst_offsets_and_pieces() {
+        // roll_count=2, first_output_sample=1, two 32-bit offsets,
+        // then two optional (num_output, num_total) pieces.
+        let mut p = Vec::new();
+        p.extend_from_slice(&2u16.to_be_bytes()); // roll_count
+        p.extend_from_slice(&1u16.to_be_bytes()); // first_output_sample
+        p.extend_from_slice(&10u32.to_be_bytes()); // sample_offset[1]
+        p.extend_from_slice(&20u32.to_be_bytes()); // sample_offset[2]
+        p.extend_from_slice(&3u16.to_be_bytes()); // piece0 num_output
+        p.extend_from_slice(&5u16.to_be_bytes()); // piece0 num_total
+        p.extend_from_slice(&7u16.to_be_bytes()); // piece1 num_output
+        p.extend_from_slice(&9u16.to_be_bytes()); // piece1 num_total
+        let a = decode_alst(&p).unwrap();
+        assert_eq!(a.roll_count, 2);
+        assert_eq!(a.first_output_sample, 1);
+        assert_eq!(a.sample_offsets, vec![10, 20]);
+        assert_eq!(a.pieces.len(), 2);
+        assert_eq!(a.pieces[0].num_output_samples, 3);
+        assert_eq!(a.pieces[0].num_total_samples, 5);
+        assert_eq!(a.pieces[1].num_total_samples, 9);
+    }
+
+    #[test]
+    fn decode_alst_no_optional_pieces() {
+        // roll_count=0 is the spec "not part of any sequence" case;
+        // header alone with no offsets and no pieces is valid.
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u16.to_be_bytes());
+        p.extend_from_slice(&0u16.to_be_bytes());
+        let a = decode_alst(&p).unwrap();
+        assert_eq!(a.roll_count, 0);
+        assert!(a.sample_offsets.is_empty());
+        assert!(a.pieces.is_empty());
+    }
+
+    #[test]
+    fn decode_alst_rejects_misaligned_tail_and_short_offsets() {
+        // roll_count claims 1 offset but only 2 trailing bytes.
+        let mut short = Vec::new();
+        short.extend_from_slice(&1u16.to_be_bytes());
+        short.extend_from_slice(&0u16.to_be_bytes());
+        short.extend_from_slice(&[0u8, 0]); // < 4 bytes for the offset
+        assert!(decode_alst(&short).is_err());
+        // Valid offsets, then a 2-byte (misaligned) trailing fragment.
+        let mut misaligned = Vec::new();
+        misaligned.extend_from_slice(&0u16.to_be_bytes());
+        misaligned.extend_from_slice(&0u16.to_be_bytes());
+        misaligned.extend_from_slice(&[0u8, 0]);
+        assert!(decode_alst(&misaligned).is_err());
     }
 
     #[test]
