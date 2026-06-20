@@ -11,9 +11,9 @@
 //!   payload — e.g. roll-distance, num-leading-samples — keyed by
 //!   the same FourCC `grouping_type` as the `sbgp`.
 //!
-//! This crate decodes the structural envelope plus the three
-//! well-known typed entries defined in §10.1 / §10.4 that callers
-//! need for spec-correct random-access:
+//! This crate decodes the structural envelope plus the well-known
+//! typed entries defined in §10.1 .. §10.6 that callers need for
+//! spec-correct random-access and adaptive streaming:
 //!
 //! * `'roll'` — VisualRollRecoveryEntry / AudioRollRecoveryEntry
 //!   (§10.1.1.2). `signed int(16) roll_distance` — number of
@@ -28,11 +28,29 @@
 //!   num_leading_samples_known | 7 bit num_leading_samples`. Open
 //!   random-access points where samples following in decode order
 //!   but preceding in presentation order may be undecodable.
+//! * `'tele'` — TemporalLevelEntry (§10.5.2). `1 bit
+//!   level_independently_decodable | 7 bit reserved`. Codec-
+//!   independent temporal-level grouping: the temporal level equals
+//!   the group-description index, enabling extraction of temporal
+//!   subsequences.
+//! * `'sap '` — SAPEntry (§10.6.2). `1 bit dependent_flag | 3 bit
+//!   reserved | 4 bit SAP_type`. Tags samples as Stream Access
+//!   Points (Annex I) of the indicated SAP type.
+//! * `'rash'` — RateShareEntry (§10.2.2.2). Variable-length rate-
+//!   share record (per-operation-point target shares + min / max
+//!   bitrate + discard priority) used by servers / players when
+//!   allocating bandwidth across simultaneously-served tracks.
+//! * `'alst'` — AlternativeStartupEntry (§10.3.2). Variable-length
+//!   record describing an alternative startup sequence (a subset of
+//!   samples that lets rendering begin earlier than full decode).
 //!
 //! Per spec note in §8.9.3.2, version-0 `sgpd` entries are deprecated
 //! because their size is implicit; this crate parses them by relying
-//! on the known fixed sizes of the typed entries above (2 bytes for
-//! `'roll'` / `'prol'`, 1 byte for `'rap '`). Version-1 entries
+//! on the known fixed sizes of the fixed-width typed entries above
+//! (2 bytes for `'roll'` / `'prol'`, 1 byte for `'rap '` / `'tele'`
+//! / `'sap '`). The variable-length `'rash'` / `'alst'` entries only
+//! have a defined on-disk size in version-1+ boxes (`default_length`
+//! or a per-row `description_length`). Version-1 entries
 //! either have a global `default_length` or a per-entry
 //! `description_length` prefix, both of which we honour. Version-2
 //! additionally carries `default_sample_description_index`.
@@ -178,6 +196,62 @@ pub fn decode_rap(payload: &[u8]) -> Result<VisualRandomAccess> {
     Ok(VisualRandomAccess {
         num_leading_samples_known: (b & 0x80) != 0,
         num_leading_samples: b & 0x7f,
+    })
+}
+
+/// Typed `'tele'` entry — §10.5.2 TemporalLevelEntry.
+///
+/// The temporal level of every sample in the group equals its
+/// `sgpd` group-description index (1, 2, 3, …); samples of one
+/// temporal level have no coding dependencies on samples of higher
+/// levels, so a reader can extract a temporal subsequence by keeping
+/// only the levels up to a chosen index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TemporalLevel {
+    /// §10.5.3 — `1` means all samples of this level have no coding
+    /// dependencies on samples of other levels; `0` means no
+    /// information is provided.
+    pub level_independently_decodable: bool,
+}
+
+/// Typed `'sap '` entry — §10.6.2 SAPEntry (Stream Access Point).
+///
+/// Identifies samples (the first byte of which is the ISAU position
+/// for a SAP, Annex I) as being of the indicated SAP type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamAccessPoint {
+    /// §10.6.3 — `false` for non-layered media. `true` specifies that
+    /// the reference layers, if any, for predicting the target layers
+    /// may have to be decoded for accessing a sample of this group.
+    pub dependent: bool,
+    /// §10.6.3 — SAP type (Annex I). Values `0` and `7` are reserved;
+    /// `1`..=`6` specify the SAP type of the associated samples.
+    pub sap_type: u8,
+}
+
+/// Decode a 1-byte `'tele'` payload into a [`TemporalLevel`].
+/// Bit layout (§10.5.2): top bit = `level_independently_decodable`,
+/// remaining 7 bits reserved (= 0; parsers ignore the value).
+pub fn decode_tele(payload: &[u8]) -> Result<TemporalLevel> {
+    if payload.is_empty() {
+        return Err(Error::invalid("MOV: sgpd 'tele' entry < 1 byte"));
+    }
+    Ok(TemporalLevel {
+        level_independently_decodable: (payload[0] & 0x80) != 0,
+    })
+}
+
+/// Decode a 1-byte `'sap '` payload into a [`StreamAccessPoint`].
+/// Bit layout (§10.6.2): bit 0 = `dependent_flag`, bits 1..=3
+/// reserved (= 0), bits 4..=7 = `SAP_type`.
+pub fn decode_sap(payload: &[u8]) -> Result<StreamAccessPoint> {
+    if payload.is_empty() {
+        return Err(Error::invalid("MOV: sgpd 'sap ' entry < 1 byte"));
+    }
+    let b = payload[0];
+    Ok(StreamAccessPoint {
+        dependent: (b & 0x80) != 0,
+        sap_type: b & 0x0f,
     })
 }
 
@@ -586,6 +660,8 @@ fn implicit_v0_size(grouping_type: &[u8; 4]) -> Option<usize> {
         b"roll" => Some(2),
         b"prol" => Some(2),
         b"rap " => Some(1),
+        b"tele" => Some(1),
+        b"sap " => Some(1),
         _ => None,
     }
 }
@@ -741,6 +817,60 @@ mod tests {
         let r2 = decode_rap(&[0x03]).unwrap();
         assert!(!r2.num_leading_samples_known);
         assert_eq!(r2.num_leading_samples, 3);
+    }
+
+    #[test]
+    fn decode_tele_independently_decodable_bit() {
+        // §10.5.2 — top bit = level_independently_decodable, low 7
+        // reserved (=0; parsers ignore).
+        let t = decode_tele(&[0x80]).unwrap();
+        assert!(t.level_independently_decodable);
+        // Reserved low bits must not affect the decode.
+        let t2 = decode_tele(&[0x7f]).unwrap();
+        assert!(!t2.level_independently_decodable);
+    }
+
+    #[test]
+    fn decode_sap_dependent_and_type() {
+        // §10.6.2 — bit0 dependent_flag, bits1..3 reserved, bits4..7
+        // SAP_type. 0x83 → dependent=1, reserved=0, SAP_type=3.
+        let s = decode_sap(&[0x83]).unwrap();
+        assert!(s.dependent);
+        assert_eq!(s.sap_type, 3);
+        // Non-dependent SAP type 1.
+        let s2 = decode_sap(&[0x01]).unwrap();
+        assert!(!s2.dependent);
+        assert_eq!(s2.sap_type, 1);
+    }
+
+    #[test]
+    fn sgpd_v0_tele_sap_implicit_size() {
+        // v0 sgpd with 'tele' entries must split into 1-byte rows via
+        // the implicit-size catalogue (§8.9.3.2 deprecated path).
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u32.to_be_bytes()); // version 0 + flags
+        body.extend_from_slice(b"tele");
+        body.extend_from_slice(&2u32.to_be_bytes()); // entry_count
+        body.push(0x80); // level 1: independently decodable
+        body.push(0x00); // level 2: no info
+        let parsed = parse_sgpd(&body).unwrap();
+        assert_eq!(parsed.entries.len(), 2);
+        assert!(
+            decode_tele(&parsed.entries[0].payload)
+                .unwrap()
+                .level_independently_decodable
+        );
+        assert!(
+            !decode_tele(&parsed.entries[1].payload)
+                .unwrap()
+                .level_independently_decodable
+        );
+    }
+
+    #[test]
+    fn truncated_tele_sap_error() {
+        assert!(decode_tele(&[]).is_err());
+        assert!(decode_sap(&[]).is_err());
     }
 
     #[test]
