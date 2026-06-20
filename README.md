@@ -30,7 +30,10 @@ Decoding stays in codec crates: this crate calls
   `stco` / `co64`, `stss`, `stsh` (shadow sync), `sdtp`, `stdp`,
   `padb`, `subs` (sub-samples), `saiz` / `saio` (sample-aux), and
   sample groups (`sbgp` / `sgpd` v0/v1/v2 plus the compact `csgp`)
-  with typed `'roll'` / `'prol'` / `'rap '` lookups.
+  with typed per-sample lookups for every standardized §10 grouping
+  type — `'roll'` / `'prol'` / `'rap '` (random-access), `'tele'`
+  (temporal level), `'sap '` (Stream Access Point), `'rash'`
+  (rate share), and `'alst'` (alternative startup sequence).
 - Per-sample iterator yielding `(index, file_offset, size, dts,
   duration, sample_description_id, keyframe)`, plus a random-access
   surface (`chunk_for_sample`, `sample_offset`, `chunk_byte_extent`, …)

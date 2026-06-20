@@ -1978,6 +1978,81 @@ impl MovDemuxer {
         crate::sample_groups::decode_rap(&entry.payload).ok()
     }
 
+    /// Look up the `'tele'` TemporalLevelEntry (§10.5.2) for a sample.
+    ///
+    /// Returns `(temporal_level, level_independently_decodable)` where
+    /// `temporal_level` is the 1-based `sgpd` group-description index
+    /// (the spec defines the temporal level to *equal* that index).
+    /// Returns `None` when the track has no `'tele'` grouping or the
+    /// sample isn't covered.
+    pub fn temporal_level_for(
+        &self,
+        track_index: usize,
+        sample_zero_based: u32,
+    ) -> Option<(u32, bool)> {
+        let table = &self.tracks.get(track_index)?.sample_table;
+        let idx = table
+            .group_description_index_for_sample(&crate::atom::fourcc("tele"), sample_zero_based)?;
+        let (_sbgp, sgpd) = table.sample_group(&crate::atom::fourcc("tele"))?;
+        let entry = sgpd.entry(idx)?;
+        let tele = crate::sample_groups::decode_tele(&entry.payload).ok()?;
+        Some((idx, tele.level_independently_decodable))
+    }
+
+    /// Look up the `'sap '` SAPEntry (§10.6.2) for a specific sample.
+    ///
+    /// Returns `None` when the track has no `'sap '` grouping or when
+    /// the sample isn't covered by the grouping.
+    pub fn stream_access_point_for(
+        &self,
+        track_index: usize,
+        sample_zero_based: u32,
+    ) -> Option<crate::sample_groups::StreamAccessPoint> {
+        let table = &self.tracks.get(track_index)?.sample_table;
+        let idx = table
+            .group_description_index_for_sample(&crate::atom::fourcc("sap "), sample_zero_based)?;
+        let (_sbgp, sgpd) = table.sample_group(&crate::atom::fourcc("sap "))?;
+        let entry = sgpd.entry(idx)?;
+        crate::sample_groups::decode_sap(&entry.payload).ok()
+    }
+
+    /// Look up the `'rash'` RateShareEntry (§10.2.2.2) for a specific
+    /// sample. The same rate-share record typically applies to many
+    /// consecutive samples, so this resolves through the `sbgp` run.
+    ///
+    /// Returns `None` when the track has no `'rash'` grouping or when
+    /// the sample isn't covered by the grouping.
+    pub fn rate_share_for(
+        &self,
+        track_index: usize,
+        sample_zero_based: u32,
+    ) -> Option<crate::sample_groups::RateShare> {
+        let table = &self.tracks.get(track_index)?.sample_table;
+        let idx = table
+            .group_description_index_for_sample(&crate::atom::fourcc("rash"), sample_zero_based)?;
+        let (_sbgp, sgpd) = table.sample_group(&crate::atom::fourcc("rash"))?;
+        let entry = sgpd.entry(idx)?;
+        crate::sample_groups::decode_rash(&entry.payload).ok()
+    }
+
+    /// Look up the `'alst'` AlternativeStartupEntry (§10.3.2) for a
+    /// specific sample.
+    ///
+    /// Returns `None` when the track has no `'alst'` grouping or when
+    /// the sample isn't covered by the grouping.
+    pub fn alternative_startup_for(
+        &self,
+        track_index: usize,
+        sample_zero_based: u32,
+    ) -> Option<crate::sample_groups::AlternativeStartup> {
+        let table = &self.tracks.get(track_index)?.sample_table;
+        let idx = table
+            .group_description_index_for_sample(&crate::atom::fourcc("alst"), sample_zero_based)?;
+        let (_sbgp, sgpd) = table.sample_group(&crate::atom::fourcc("alst"))?;
+        let entry = sgpd.entry(idx)?;
+        crate::sample_groups::decode_alst(&entry.payload).ok()
+    }
+
     /// Return the union of sync samples (`stss`) and `'rap '`-marked
     /// samples (§10.4.1) for a track, expressed as 0-based sample
     /// indices in decode order.
