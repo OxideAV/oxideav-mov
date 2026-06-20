@@ -520,6 +520,11 @@ struct TrackWrite {
     /// 14496-12 §8.10.1). When non-empty the muxer emits a `udta` as the
     /// last child of this track's `trak`. Empty ⇒ no `udta` box.
     metadata: Vec<MovMetadata>,
+    /// Optional track-level Apple QuickTime Metadata items (the modern
+    /// `trak/meta` = `hdlr` `mdta` + `keys` + `ilst` shape). When
+    /// non-empty the muxer emits a `meta` as a trailing child of this
+    /// track's `trak` (after `udta`). Empty ⇒ no `meta` box.
+    apple_metadata: Vec<MovMetaItem>,
 }
 
 /// Fragmentation policy for [`MovMuxer::write_to_fragmented`].
@@ -702,6 +707,7 @@ impl MovMuxer {
             sample_to_groups: Vec::new(),
             edits: Vec::new(),
             metadata: Vec::new(),
+            apple_metadata: Vec::new(),
         });
         self.tracks.len() as u32
     }
@@ -941,6 +947,30 @@ impl MovMuxer {
     /// init `moov` is left metadata-free.
     pub fn set_apple_metadata(&mut self, items: &[MovMetaItem]) {
         self.apple_metadata = items.to_vec();
+    }
+
+    /// Attach **Apple QuickTime Metadata** items to a previously-added
+    /// track, emitted as a `trak/meta` box (`hdlr` `mdta` + `keys` +
+    /// `ilst`) that is a trailing child of the track's `trak` (after any
+    /// track-level `udta` from [`MovMuxer::set_track_metadata`]).
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// The on-disk shape and round-trip semantics are identical to
+    /// [`MovMuxer::set_apple_metadata`]; the result surfaces on
+    /// [`crate::demuxer::Track::meta`]. Replaces any track-level Apple
+    /// metadata from a previous call; returns an error (leaving the track
+    /// unchanged) for an unknown `track_id`.
+    pub fn set_track_apple_metadata(&mut self, track_id: u32, items: &[MovMetaItem]) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_track_apple_metadata unknown track id {track_id}"
+                ))
+            })?;
+        self.tracks[idx].apple_metadata = items.to_vec();
+        Ok(())
     }
 
     /// Emit the file to a writer.
@@ -1430,10 +1460,15 @@ fn build_trak(
         *b"mdia",
         &build_mdia(t, chunk_offset, need_co64, aux_offset),
     );
-    // Track-level user-data box as the last child of `trak` (QTFF
+    // Track-level user-data box as a trailing child of `trak` (QTFF
     // p. 41, Figure 2-3: `udta` is the trailing track-atom child).
     if !t.metadata.is_empty() {
         push_atom(&mut trak, *b"udta", &build_udta(&t.metadata));
+    }
+    // Track-level Apple QuickTime Metadata box, after `udta`. Read side
+    // dispatches a `trak`-scope `meta` to the same Apple parser.
+    if !t.apple_metadata.is_empty() {
+        push_atom(&mut trak, *b"meta", &build_meta(&t.apple_metadata));
     }
     trak
 }
@@ -2704,6 +2739,7 @@ mod tests {
             sample_to_groups: Vec::new(),
             edits: Vec::new(),
             metadata: Vec::new(),
+            apple_metadata: Vec::new(),
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -2742,6 +2778,7 @@ mod tests {
             sample_to_groups: Vec::new(),
             edits: Vec::new(),
             metadata: Vec::new(),
+            apple_metadata: Vec::new(),
         }
     }
 
@@ -3023,6 +3060,7 @@ mod tests {
             sample_to_groups: Vec::new(),
             edits: Vec::new(),
             metadata: Vec::new(),
+            apple_metadata: Vec::new(),
         };
         assert!(build_stss(&t).is_none());
     }
@@ -3042,6 +3080,7 @@ mod tests {
             sample_to_groups: Vec::new(),
             edits: Vec::new(),
             metadata: Vec::new(),
+            apple_metadata: Vec::new(),
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -3089,6 +3128,7 @@ mod tests {
             sample_to_groups: Vec::new(),
             edits: Vec::new(),
             metadata: Vec::new(),
+            apple_metadata: Vec::new(),
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -3127,6 +3167,7 @@ mod tests {
             sample_to_groups: Vec::new(),
             edits: Vec::new(),
             metadata: Vec::new(),
+            apple_metadata: Vec::new(),
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

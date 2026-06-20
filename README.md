@@ -159,6 +159,9 @@ offset is negative — so B-frame reorder round-trips PTS exactly.
   `keys` row, so the read-side `parse_keys` / `parse_ilst` resolve every item
   back onto `MovDemuxer::meta` (namespace / key / type-code / value preserved).
   Coexists with `udta` when both are set; no `meta` box when empty.
+  `set_track_apple_metadata(track_id, &[MovMetaItem])` does the same at track
+  scope (`trak/meta`, surfacing on `Track::meta`); movie and track scopes are
+  independent.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.

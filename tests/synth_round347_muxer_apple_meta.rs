@@ -189,3 +189,57 @@ fn apple_meta_coexists_with_udta() {
     assert_eq!(d.meta.len(), 1);
     assert_eq!(d.meta[0].as_str(), Some("Modern"));
 }
+
+#[test]
+fn track_level_apple_meta_roundtrips() {
+    let mut m = MovMuxer::new();
+    let id = one_audio_track(&mut m);
+    m.set_track_apple_metadata(
+        id,
+        &[
+            MovMetaItem::utf8("com.apple.quicktime.title", "Track Title"),
+            MovMetaItem::signed_int("com.example.gain", 42),
+        ],
+    )
+    .expect("attach track apple metadata");
+    let bytes = m.encode_to_vec().expect("encode");
+    assert!(bytes.windows(4).any(|w| w == b"meta"));
+
+    let d = open(bytes);
+    // No movie-level meta.
+    assert!(d.meta.is_empty());
+    // Track-level meta present in order.
+    assert_eq!(d.tracks.len(), 1);
+    let t = &d.tracks[0];
+    assert_eq!(t.meta.len(), 2);
+    assert_eq!(t.meta[0].key, "com.apple.quicktime.title");
+    assert_eq!(t.meta[0].as_str(), Some("Track Title"));
+    assert_eq!(t.meta[1].key, "com.example.gain");
+    assert_eq!(t.meta[1].type_code, META_TYPE_BE_SIGNED_INT);
+    assert_eq!(t.meta[1].value, 42i32.to_be_bytes().to_vec());
+}
+
+#[test]
+fn set_track_apple_metadata_rejects_unknown_track_id() {
+    let mut m = MovMuxer::new();
+    let _ = one_audio_track(&mut m);
+    let err = m.set_track_apple_metadata(99, &[MovMetaItem::utf8("k", "v")]);
+    assert!(err.is_err(), "unknown track id must error");
+}
+
+#[test]
+fn movie_and_track_apple_meta_independent() {
+    let mut m = MovMuxer::new();
+    let id = one_audio_track(&mut m);
+    m.set_apple_metadata(&[MovMetaItem::utf8("com.example.movie", "M")]);
+    m.set_track_apple_metadata(id, &[MovMetaItem::utf8("com.example.track", "T")])
+        .expect("attach");
+    let d = open(m.encode_to_vec().expect("encode"));
+
+    assert_eq!(d.meta.len(), 1);
+    assert_eq!(d.meta[0].key, "com.example.movie");
+    assert_eq!(d.meta[0].as_str(), Some("M"));
+    assert_eq!(d.tracks[0].meta.len(), 1);
+    assert_eq!(d.tracks[0].meta[0].key, "com.example.track");
+    assert_eq!(d.tracks[0].meta[0].as_str(), Some("T"));
+}
