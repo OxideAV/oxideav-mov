@@ -148,6 +148,17 @@ offset is negative — so B-frame reorder round-trips PTS exactly.
   (`name` / `auth` / `cprt`) and `raw` (opaque FourCC) cover the QT-7+
   and unknown shapes. All round-trip through `parse_udta` and surface on
   `MovDemuxer::user_data` / `Track::user_data`.
+- `set_apple_metadata(&[MovMetaItem])` emits the modern Apple **QuickTime
+  Metadata** box (`moov/meta` = `hdlr` `mdta` + `keys` + `ilst`), distinct from
+  the legacy `udta` above. Each `MovMetaItem` becomes one `keys` declaration
+  (`[namespace][key]`, namespace defaulting to `mdta`) paired with one `ilst`
+  entry whose `data` sub-atom carries the typed value: `MovMetaItem::utf8`
+  (type-code 1), `::signed_int` (type-code 21, 32-bit BE), or `::typed` for an
+  explicit namespace / type-indicator / raw bytes. Duplicate keys each get their
+  own `keys`/`ilst` slot; the 1-based `ilst` key-index references the matching
+  `keys` row, so the read-side `parse_keys` / `parse_ilst` resolve every item
+  back onto `MovDemuxer::meta` (namespace / key / type-code / value preserved).
+  Coexists with `udta` when both are set; no `meta` box when empty.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.

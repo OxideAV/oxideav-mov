@@ -125,8 +125,9 @@ pub use metadata_sample::{
     XmlMetadataSampleEntry, XmlSubtitleSampleEntry,
 };
 pub use muxer::{
-    FragmentationMode, MovMetadata, MovMuxer, MuxEdit, MuxSample, MuxTrackKind, SampleAuxStream,
-    SampleToGroupWrite, UTF8_INTL_TEXT_FLAG,
+    FragmentationMode, MovMetaItem, MovMetadata, MovMuxer, MuxEdit, MuxSample, MuxTrackKind,
+    SampleAuxStream, SampleToGroupWrite, META_NAMESPACE_MDTA, META_TYPE_BE_SIGNED_INT,
+    META_TYPE_BE_UNSIGNED_INT, META_TYPE_RAW, META_TYPE_UTF8, UTF8_INTL_TEXT_FLAG,
 };
 pub use pdin::{parse_pdin, Pdin, PdinEntry};
 pub use pnot::{parse_pnot, Pnot, MAC_TO_UNIX_EPOCH_SECONDS, PNOT_BODY_LEN};

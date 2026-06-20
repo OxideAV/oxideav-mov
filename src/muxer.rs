@@ -344,6 +344,124 @@ impl MovMetadata {
 /// Combine with [`MovMetadata::iso_language`] for a UTF-8 `©XXX` body.
 pub const UTF8_INTL_TEXT_FLAG: u16 = 0x8000;
 
+/// Apple `ilst` `data` sub-atom **type-indicator** for a UTF-8 text
+/// value (the "well-known type" set; QuickTime Metadata format). The
+/// read-side [`crate::media_meta::MetaKeyValue::as_str`] decodes a
+/// value as UTF-8 only when its `type_code` equals this.
+pub const META_TYPE_UTF8: u32 = 1;
+/// Apple `ilst` `data` type-indicator for a big-endian signed integer
+/// (the value width — 1 / 2 / 4 / 8 bytes — is the `data` payload
+/// length). Used by e.g. `com.apple.quicktime.…` numeric keys.
+pub const META_TYPE_BE_SIGNED_INT: u32 = 21;
+/// Apple `ilst` `data` type-indicator for a big-endian unsigned
+/// integer (value width = payload length).
+pub const META_TYPE_BE_UNSIGNED_INT: u32 = 22;
+/// Apple `ilst` `data` type-indicator for raw / undefined bytes —
+/// an opaque blob with no further structure imposed by the format.
+pub const META_TYPE_RAW: u32 = 0;
+
+/// The default `meta`-atom key namespace (Apple QuickTime Metadata
+/// format). Almost every real-world `moov/meta` key is declared in the
+/// `mdta` (metadata) namespace; reverse-DNS key names
+/// (`com.apple.quicktime.title`, `com.android.version`, …) live here.
+pub const META_NAMESPACE_MDTA: [u8; 4] = *b"mdta";
+
+/// One movie-level Apple **QuickTime Metadata** key-value item, emitted
+/// into a `moov/meta` box (`hdlr` `mdta` + `keys` + `ilst`) by
+/// [`MovMuxer::set_apple_metadata`].
+///
+/// This is the modern QuickTime / iTunes-style key-value metadata shape
+/// (distinct from the legacy `udta` User Data Box driven by
+/// [`MovMetadata`]). Each item carries:
+///
+/// * a 4-byte key **namespace** (`namespace`, typically
+///   [`META_NAMESPACE_MDTA`]),
+/// * a UTF-8 **key** name (`key`, e.g. `"com.apple.quicktime.title"`),
+/// * a typed **value** — its on-disk `data` sub-atom `type_code`
+///   (one of [`META_TYPE_UTF8`] / [`META_TYPE_BE_SIGNED_INT`] /
+///   [`META_TYPE_BE_UNSIGNED_INT`] / [`META_TYPE_RAW`], or any caller-
+///   supplied indicator) plus the raw value bytes.
+///
+/// A file written with these items round-trips through the read-side
+/// [`crate::media_meta::parse_keys`] / [`crate::media_meta::parse_ilst`]
+/// and surfaces on [`crate::demuxer::MovDemuxer::meta`] as a
+/// [`crate::media_meta::MetaKeyValue`] with the same `namespace`, `key`,
+/// `type_code`, and `value`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MovMetaItem {
+    namespace: [u8; 4],
+    key: String,
+    type_code: u32,
+    value: Vec<u8>,
+}
+
+impl MovMetaItem {
+    /// A UTF-8 text item in the `mdta` namespace — the common case
+    /// (`type_code` = [`META_TYPE_UTF8`]). `key` is the reverse-DNS key
+    /// name (e.g. `"com.apple.quicktime.title"`); `text` is the value.
+    pub fn utf8(key: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            namespace: META_NAMESPACE_MDTA,
+            key: key.into(),
+            type_code: META_TYPE_UTF8,
+            value: text.into().into_bytes(),
+        }
+    }
+
+    /// A big-endian signed-integer item in the `mdta` namespace
+    /// (`type_code` = [`META_TYPE_BE_SIGNED_INT`]). The value is written
+    /// as a 4-byte big-endian `i32` — Apple permits 1/2/4/8-byte widths;
+    /// this constructor emits the 32-bit form. Use
+    /// [`MovMetaItem::typed`] for an explicit width.
+    pub fn signed_int(key: impl Into<String>, value: i32) -> Self {
+        Self {
+            namespace: META_NAMESPACE_MDTA,
+            key: key.into(),
+            type_code: META_TYPE_BE_SIGNED_INT,
+            value: value.to_be_bytes().to_vec(),
+        }
+    }
+
+    /// A fully-explicit item: caller supplies the key `namespace`, the
+    /// UTF-8 `key` name, the `data` `type_code` (well-known-type
+    /// indicator), and the raw value `bytes`. Use this for namespaces
+    /// other than `mdta`, or value type codes outside the
+    /// [`META_TYPE_UTF8`] / `..._INT` / [`META_TYPE_RAW`] set.
+    pub fn typed(
+        namespace: [u8; 4],
+        key: impl Into<String>,
+        type_code: u32,
+        bytes: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            namespace,
+            key: key.into(),
+            type_code,
+            value: bytes.into(),
+        }
+    }
+
+    /// The key namespace (4 bytes, typically [`META_NAMESPACE_MDTA`]).
+    pub fn namespace(&self) -> [u8; 4] {
+        self.namespace
+    }
+
+    /// The UTF-8 key name.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The `data` sub-atom type-indicator for the value.
+    pub fn type_code(&self) -> u32 {
+        self.type_code
+    }
+
+    /// The raw value bytes.
+    pub fn value(&self) -> &[u8] {
+        &self.value
+    }
+}
+
 /// Per-track media kind dispatch — drives `hdlr.component_subtype`,
 /// the `vmhd`/`smhd` choice, and the `stsd` body shape.
 #[derive(Clone, Debug)]
@@ -468,6 +586,13 @@ pub struct MovMuxer {
     /// after the last `trak`. Empty ⇒ no `udta` box. Honoured on the
     /// non-fragmented path; the fragmented init `moov` ignores it.
     metadata: Vec<MovMetadata>,
+    /// Optional movie-level Apple QuickTime Metadata items (the modern
+    /// `moov/meta` = `hdlr` `mdta` + `keys` + `ilst` shape, distinct
+    /// from the legacy `udta` in `metadata`). When non-empty the muxer
+    /// emits a `moov/meta` after the last `trak` (and after `udta` when
+    /// both are present). Empty ⇒ no `meta` box. Honoured on the
+    /// non-fragmented path; the fragmented init `moov` ignores it.
+    apple_metadata: Vec<MovMetaItem>,
 }
 
 impl Default for MovMuxer {
@@ -485,6 +610,7 @@ impl MovMuxer {
             fragmentation: None,
             compress_movie_resource: false,
             metadata: Vec::new(),
+            apple_metadata: Vec::new(),
         }
     }
 
@@ -793,6 +919,28 @@ impl MovMuxer {
             })?;
         self.tracks[idx].metadata = items.to_vec();
         Ok(())
+    }
+
+    /// Attach movie-level **Apple QuickTime Metadata** items, emitted as
+    /// a `moov/meta` box (`hdlr` `mdta` + `keys` + `ilst`) after the
+    /// last `trak` (and after any `udta` from [`MovMuxer::set_metadata`]
+    /// when both are present).
+    ///
+    /// This is the modern key-value metadata shape (e.g.
+    /// `com.apple.quicktime.title`, `com.apple.quicktime.make`), distinct
+    /// from the legacy `udta` User Data Box. Each [`MovMetaItem`] becomes
+    /// one `keys` declaration (`[namespace][key]`) paired with one `ilst`
+    /// entry whose `data` sub-atom carries the typed value. Duplicate
+    /// keys are written verbatim (one `keys`/`ilst` slot each), in
+    /// `items` order. A file written this way round-trips through the
+    /// read side and surfaces on [`crate::demuxer::MovDemuxer::meta`].
+    ///
+    /// Replaces any Apple metadata set by a previous call. Only the
+    /// non-fragmented [`MovMuxer::encode_to_vec`] /
+    /// [`write_to`](MovMuxer::write_to) path emits it; the fragmented
+    /// init `moov` is left metadata-free.
+    pub fn set_apple_metadata(&mut self, items: &[MovMetaItem]) {
+        self.apple_metadata = items.to_vec();
     }
 
     /// Emit the file to a writer.
@@ -1121,7 +1269,94 @@ fn build_moov(
     if !m.metadata.is_empty() {
         push_atom(&mut moov, *b"udta", &build_udta(&m.metadata));
     }
+    // Movie-level Apple QuickTime Metadata box (`hdlr`+`keys`+`ilst`),
+    // after `udta`. Read side dispatches a `moov`-scope `meta` to the
+    // Apple parser (`crate::media_meta::parse_keys` / `parse_ilst`).
+    if !m.apple_metadata.is_empty() {
+        push_atom(&mut moov, *b"meta", &build_meta(&m.apple_metadata));
+    }
     moov
+}
+
+/// Build a movie-level Apple QuickTime Metadata box (`meta`) payload
+/// from a list of [`MovMetaItem`]s. Emits the three Apple children in
+/// order: `hdlr` (handler subtype `mdta`), `keys` (the ordered key
+/// declarations), and `ilst` (the matching typed values).
+///
+/// No leading `[ver+flags]` FullBox header is written — Apple's
+/// `moov`/`trak` `meta` omits it (the read-side `parse_meta_atom` peeks
+/// the first child header and proceeds directly when it is a valid
+/// sub-atom, which the `hdlr` first child always is).
+///
+/// The `ilst` entry at 1-based index `i` references the `keys`
+/// declaration at the same index, mirroring
+/// [`crate::media_meta::parse_ilst`]. Duplicate keys are emitted as
+/// independent slots, preserving `items` order.
+fn build_meta(items: &[MovMetaItem]) -> Vec<u8> {
+    let mut meta = Vec::new();
+    push_atom(&mut meta, *b"hdlr", &build_meta_hdlr());
+    push_atom(&mut meta, *b"keys", &build_keys(items));
+    push_atom(&mut meta, *b"ilst", &build_ilst(items));
+    meta
+}
+
+/// Build the `hdlr` (Handler Reference Box) payload for an Apple
+/// metadata `meta` box: handler/component subtype `mdta` (QTFF p. 57 /
+/// ISO/IEC 14496-12 §8.4.3). Layout mirrors `build_hdlr` but with a
+/// `mdta` subtype and an empty (zero-length, NUL-terminated) name —
+/// matching the read-side `parse_hdlr` / `Hdlr::is_metadata`.
+fn build_meta_hdlr() -> Vec<u8> {
+    let mut p = Vec::with_capacity(25);
+    p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+    p.extend_from_slice(&0u32.to_be_bytes()); // pre_defined / component_type
+    p.extend_from_slice(b"mdta"); // handler_type / component_subtype
+    p.extend_from_slice(&[0u8; 12]); // reserved (manuf + flags + flags_mask)
+    p.push(0); // counted-Pascal name length 0
+    p
+}
+
+/// Build the `keys` (Metadata Item Keys Box) payload — a FullBox
+/// header (`[ver+flags=4]`) + `[entry_count:4]` then one
+/// `[size:4][namespace:4][key_value: size-8]` record per item, in
+/// `items` order. Exactly the layout `crate::media_meta::parse_keys`
+/// consumes.
+fn build_keys(items: &[MovMetaItem]) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+    p.extend_from_slice(&(items.len() as u32).to_be_bytes()); // entry_count
+    for item in items {
+        let key_bytes = item.key.as_bytes();
+        let size = (8 + key_bytes.len()) as u32; // [size:4][ns:4][key]
+        p.extend_from_slice(&size.to_be_bytes());
+        p.extend_from_slice(&item.namespace);
+        p.extend_from_slice(key_bytes);
+    }
+    p
+}
+
+/// Build the `ilst` (Metadata Item List Box) payload — one entry per
+/// item, each `[entry_size:4][key_index:4]` followed by a single
+/// `data` sub-atom `[size:4]['data'][type_code:4][locale:4][value]`.
+/// `key_index` is the 1-based index into the parallel `keys` list, so
+/// the read-side `parse_ilst` resolves it back to the same key.
+fn build_ilst(items: &[MovMetaItem]) -> Vec<u8> {
+    let mut p = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        // `data` sub-atom: [size:4]['data'][type:4][locale:4][value].
+        let data_size = (16 + item.value.len()) as u32;
+        let mut data = Vec::with_capacity(data_size as usize);
+        data.extend_from_slice(&data_size.to_be_bytes());
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&item.type_code.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes()); // locale = 0
+        data.extend_from_slice(&item.value);
+        // ilst entry: [entry_size:4][key_index:4][data...].
+        let entry_size = (8 + data.len()) as u32;
+        p.extend_from_slice(&entry_size.to_be_bytes());
+        p.extend_from_slice(&((i as u32) + 1).to_be_bytes()); // 1-based key index
+        p.extend_from_slice(&data);
+    }
+    p
 }
 
 fn build_mvhd(m: &MovMuxer) -> Vec<u8> {
