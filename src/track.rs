@@ -69,7 +69,30 @@ pub enum TrackRefKind {
     Hint,
     /// `mpod` — MPEG-DASH / MPEG-4 OD reference.
     Mpod,
-    /// Anything else (`subt`, `cdsc`, vendor-specific, …).
+    /// `cdsc` — Content Describes (ISO/IEC 14496-12 §8.3.3.3). This
+    /// (descriptive / metadata) track describes the referenced content
+    /// track; e.g. a timed-metadata track links to the media it
+    /// annotates (§12.3.2), and an RTCP reception hint track links to
+    /// its RTP reception hint track.
+    ContentDescribes,
+    /// `font` — this track uses fonts carried/defined in the referenced
+    /// track (ISO/IEC 14496-12 §8.3.3.3).
+    Font,
+    /// `hind` — this track depends on the referenced hint track and
+    /// should only be used if that hint track is used (§8.3.3.3); the
+    /// referenced tracks shall themselves be hint tracks.
+    HintDependency,
+    /// `vdep` — this track carries auxiliary depth video information for
+    /// the referenced video track (§8.3.3.3).
+    VideoDepth,
+    /// `vplx` — this track carries auxiliary parallax video information
+    /// for the referenced video track (§8.3.3.3).
+    VideoParallax,
+    /// `subt` — this track carries subtitle / timed-text / overlay
+    /// graphical information for the referenced track or its alternate
+    /// group (§8.3.3.3).
+    Subtitle,
+    /// Anything else (vendor-specific / from a derived specification).
     Other,
 }
 
@@ -83,6 +106,12 @@ impl TrackRefKind {
             b"sync" => Self::Sync,
             b"hint" => Self::Hint,
             b"mpod" => Self::Mpod,
+            b"cdsc" => Self::ContentDescribes,
+            b"font" => Self::Font,
+            b"hind" => Self::HintDependency,
+            b"vdep" => Self::VideoDepth,
+            b"vplx" => Self::VideoParallax,
+            b"subt" => Self::Subtitle,
             _ => Self::Other,
         }
     }
@@ -553,6 +582,62 @@ impl Track {
     /// inside `tref`.
     pub fn non_primary_source_track_refs(&self) -> Vec<u32> {
         self.track_refs_of_kind(TrackRefKind::NonPrimarySource)
+    }
+
+    /// 1-based track-ids of every track this track *describes* via a
+    /// `tref/cdsc` Content-Describes reference (ISO/IEC 14496-12
+    /// §8.3.3.3). A descriptive or metadata track points at the content
+    /// track it annotates — e.g. a timed-metadata track (§12.3.2) or an
+    /// RTCP reception hint track linking to its RTP reception hint
+    /// track. As with the other `tref` accessors a 0-valued slot is
+    /// filtered out and declaration order is preserved across every
+    /// `'cdsc'` reference-type atom inside `tref`.
+    pub fn content_describes_track_refs(&self) -> Vec<u32> {
+        self.track_refs_of_kind(TrackRefKind::ContentDescribes)
+    }
+
+    /// 1-based track-ids of every track this track draws fonts from via
+    /// a `tref/font` reference (ISO/IEC 14496-12 §8.3.3.3) — e.g. a
+    /// timed-text / subtitle track naming the track that carries the
+    /// font resources it renders with. 0-valued slots filtered;
+    /// declaration order preserved.
+    pub fn font_track_refs(&self) -> Vec<u32> {
+        self.track_refs_of_kind(TrackRefKind::Font)
+    }
+
+    /// 1-based track-ids of every hint track this track depends on via a
+    /// `tref/hind` Hint-Dependency reference (ISO/IEC 14496-12
+    /// §8.3.3.3): this track should only be used if the referenced hint
+    /// track is also used (e.g. layered IP multicast over RTP). The
+    /// referenced tracks are themselves hint tracks. 0-valued slots
+    /// filtered; declaration order preserved.
+    pub fn hint_dependency_track_refs(&self) -> Vec<u32> {
+        self.track_refs_of_kind(TrackRefKind::HintDependency)
+    }
+
+    /// 1-based track-ids of every video track this track supplies
+    /// auxiliary **depth** information for via a `tref/vdep` reference
+    /// (ISO/IEC 14496-12 §8.3.3.3). 0-valued slots filtered; declaration
+    /// order preserved.
+    pub fn video_depth_track_refs(&self) -> Vec<u32> {
+        self.track_refs_of_kind(TrackRefKind::VideoDepth)
+    }
+
+    /// 1-based track-ids of every video track this track supplies
+    /// auxiliary **parallax** information for via a `tref/vplx`
+    /// reference (ISO/IEC 14496-12 §8.3.3.3). 0-valued slots filtered;
+    /// declaration order preserved.
+    pub fn video_parallax_track_refs(&self) -> Vec<u32> {
+        self.track_refs_of_kind(TrackRefKind::VideoParallax)
+    }
+
+    /// 1-based track-ids of every track this track supplies subtitle /
+    /// timed-text / overlay-graphical information for via a `tref/subt`
+    /// reference (ISO/IEC 14496-12 §8.3.3.3). The reference may target
+    /// the listed track or any track in the alternate group it belongs
+    /// to. 0-valued slots filtered; declaration order preserved.
+    pub fn subtitle_track_refs(&self) -> Vec<u32> {
+        self.track_refs_of_kind(TrackRefKind::Subtitle)
     }
 
     /// Track-level `dref` data-reference list. Empty when the track
@@ -1154,5 +1239,74 @@ mod tests {
         assert_eq!(v[0].audio_version, 1);
         assert_eq!(v[0].sound_v1, None);
         assert!(!v[0].is_vbr());
+    }
+
+    // ─────────────── tref reference-type classification ───────────────
+
+    #[test]
+    fn track_ref_kind_classifies_iso_bmff_types() {
+        assert_eq!(
+            TrackRefKind::from_fourcc(b"cdsc"),
+            TrackRefKind::ContentDescribes
+        );
+        assert_eq!(TrackRefKind::from_fourcc(b"font"), TrackRefKind::Font);
+        assert_eq!(
+            TrackRefKind::from_fourcc(b"hind"),
+            TrackRefKind::HintDependency
+        );
+        assert_eq!(TrackRefKind::from_fourcc(b"vdep"), TrackRefKind::VideoDepth);
+        assert_eq!(
+            TrackRefKind::from_fourcc(b"vplx"),
+            TrackRefKind::VideoParallax
+        );
+        assert_eq!(TrackRefKind::from_fourcc(b"subt"), TrackRefKind::Subtitle);
+        // Pre-existing QuickTime types still classify.
+        assert_eq!(TrackRefKind::from_fourcc(b"chap"), TrackRefKind::Chapter);
+        assert_eq!(TrackRefKind::from_fourcc(b"hint"), TrackRefKind::Hint);
+        // Unknown stays Other.
+        assert_eq!(TrackRefKind::from_fourcc(b"xxxx"), TrackRefKind::Other);
+    }
+
+    fn track_with_ref(fourcc: &[u8; 4], ids: Vec<u32>) -> Track {
+        Track {
+            references: vec![TrackRef {
+                kind: TrackRefKind::from_fourcc(fourcc),
+                fourcc: *fourcc,
+                track_ids: ids,
+            }],
+            ..Track::default()
+        }
+    }
+
+    #[test]
+    fn cdsc_accessor_returns_described_track_ids() {
+        // A metadata track describing content track 1, with a 0-valued
+        // (unused) slot that must be filtered out.
+        let t = track_with_ref(b"cdsc", vec![1, 0]);
+        assert_eq!(t.content_describes_track_refs(), vec![1]);
+        // Other typed accessors don't pick up the cdsc reference.
+        assert!(t.subtitle_track_refs().is_empty());
+        assert!(t.font_track_refs().is_empty());
+    }
+
+    #[test]
+    fn iso_bmff_ref_accessors_route_by_kind() {
+        assert_eq!(track_with_ref(b"font", vec![3]).font_track_refs(), vec![3]);
+        assert_eq!(
+            track_with_ref(b"hind", vec![4, 5]).hint_dependency_track_refs(),
+            vec![4, 5]
+        );
+        assert_eq!(
+            track_with_ref(b"vdep", vec![2]).video_depth_track_refs(),
+            vec![2]
+        );
+        assert_eq!(
+            track_with_ref(b"vplx", vec![6]).video_parallax_track_refs(),
+            vec![6]
+        );
+        assert_eq!(
+            track_with_ref(b"subt", vec![7]).subtitle_track_refs(),
+            vec![7]
+        );
     }
 }

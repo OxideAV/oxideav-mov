@@ -43,8 +43,11 @@ Decoding stays in codec crates: this crate calls
   composition-shift edits and non-unity `media_rate`. `next_packet`
   keeps the media-time PTS contract.
 - Track relationships: typed `tref` accessors for every QTFF reference
-  kind (`chap`, `tmcd`, `sync`, `scpt`, `hint`, `ssrc`) with track-id
-  → index resolvers; `tsel` (track selection / switch groups),
+  kind (`chap`, `tmcd`, `sync`, `scpt`, `hint`, `ssrc`) plus the ISO
+  BMFF §8.3.3.3 reference types `cdsc` (content-describes), `font`,
+  `hind` (hint dependency), `vdep` / `vplx` (auxiliary depth / parallax
+  video), and `subt` — with track-id → index resolvers; `tsel`
+  (track selection / switch groups),
   `kind`, `trgr` (track groups), and `strk` sub-tracks. `tkhd` flags
   + `alternate_group` surfaced via `presentation_tracks()` /
   `alternate_groups()` / `switch_groups()`.
