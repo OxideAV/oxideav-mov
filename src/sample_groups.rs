@@ -740,7 +740,7 @@ pub fn parse_csgp(payload: &[u8]) -> Result<SampleToGroup> {
 ///   remainder evenly by `entry_count` so the caller still gets the
 ///   raw bytes back. Per spec note in §8.9.3.2 this version is
 ///   deprecated; we keep it for compatibility with older
-///   ffmpeg-authored files.
+///   third-party-muxer-authored files.
 /// * v1 — `default_length` ≠ 0 means every entry is exactly that many
 ///   bytes; `default_length == 0` means each entry begins with a
 ///   `description_length:u32` prefix.
