@@ -13,11 +13,11 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CMOV, CO64, CSGP, CSLG,
-    CTAB, CTTS, DINF, DREF, EDTS, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, HMHD, ILST, IMAP, KEYS,
-    LOAD, MATT, MAX_INMEMORY_ATOM_BODY, MDAT, MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD,
-    PADB, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP,
-    SDTP, SGPD, SIDX, SKIP, SMHD, SSIX, STBL, STCO, STDP, STSC, STSD, STSH, STSS, STSZ, STTS, STYP,
-    STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID, VMHD, WIDE,
+    CTAB, CTTS, DINF, DREF, EDTS, ELNG, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, HMHD, ILST, IMAP,
+    KEYS, LOAD, MATT, MAX_INMEMORY_ATOM_BODY, MDAT, MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX,
+    MVHD, NMHD, PADB, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SAIO,
+    SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, SSIX, STBL, STCO, STDP, STHD, STSC, STSD, STSH, STSS,
+    STSZ, STTS, STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID, VMHD, WIDE,
 };
 use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
@@ -28,7 +28,8 @@ use crate::edit::{parse_elst, EditList};
 use crate::fragment::{parse_mfra, parse_mvex, resolve_traf_samples, Mehd, Tfra, TrexDefaults};
 use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
 use crate::header::{
-    parse_ftyp, parse_hdlr, parse_hmhd, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp, Mvhd,
+    parse_elng, parse_ftyp, parse_hdlr, parse_hmhd, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp,
+    MediaHeaderKind, Mvhd,
 };
 use crate::leva::Leva;
 use crate::matte::parse_matt;
@@ -3514,6 +3515,13 @@ fn parse_mdia<R: Read + Seek + ?Sized>(
                 let body = read_payload(r, child)?;
                 track.hdlr = parse_hdlr(&body)?;
             }
+            t if t == &ELNG => {
+                // Extended Language Tag Box (ISO/IEC 14496-12 §8.4.6) —
+                // an optional `mdia` peer of the media header carrying a
+                // BCP 47 language tag that overrides `mdhd.language`.
+                let body = read_payload(r, child)?;
+                track.extended_language = Some(parse_elng(&body)?);
+            }
             t if t == &MINF => {
                 parse_minf(r, child, track)?;
             }
@@ -3532,20 +3540,39 @@ fn parse_minf<R: Read + Seek + ?Sized>(
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
     walk_children(r, Some(body_end), |r, child| {
         match &child.fourcc {
-            t if t == &VMHD || t == &SMHD => {
-                // Typed per-MediaType media-information header. The
-                // handler type already classifies the track for us;
-                // the body has no payload-affecting fields beyond what
-                // round 1 already surfaces via `Track::is_video` /
+            t if t == &VMHD => {
+                // Video Media Header Box (§12.1.2). Body has no
+                // payload-affecting fields beyond what `Track::is_video`
+                // already surfaces; record which media header was present.
+                track.media_header_kind = MediaHeaderKind::Video;
+            }
+            t if t == &SMHD => {
+                // Sound Media Header Box (§12.2.2). As `vmhd`, the typed
+                // body carries no field we don't already surface via
                 // `Track::is_audio`.
+                track.media_header_kind = MediaHeaderKind::Sound;
+            }
+            t if t == &STHD => {
+                // Subtitle Media Header Box (ISO/IEC 14496-12 §12.6.2) —
+                // an empty FullBox (version 0, flags 0). Only its
+                // presence classifies the track; record the kind.
+                track.media_header_kind = MediaHeaderKind::Subtitle;
+            }
+            t if t == &NMHD => {
+                // Null Media Header Box (ISO/IEC 14496-12 §8.4.5.2) —
+                // an empty FullBox used by streams (e.g. timed metadata,
+                // §12.3.2) for which no specific media header is defined.
+                track.media_header_kind = MediaHeaderKind::Null;
             }
             t if t == &GMHD => {
+                track.media_header_kind = MediaHeaderKind::Generic;
                 track.gmhd = Some(parse_gmhd(r, child)?);
             }
             t if t == &HMHD => {
                 // Hint Media Header Box (ISO/IEC 14496-12 §12.4.2) —
                 // PDU-size / bit-rate buffering metadata for a hint
                 // track. Surfaced on `Track::hmhd`.
+                track.media_header_kind = MediaHeaderKind::Hint;
                 let body = read_payload(r, child)?;
                 track.hmhd = Some(parse_hmhd(&body)?);
             }
@@ -4139,6 +4166,10 @@ mod tests {
         assert!(d.ftyp.as_ref().unwrap().is_quicktime());
         assert_eq!(d.tracks.len(), 1);
         assert!(d.tracks[0].is_video());
+        // The minimal movie writes a `vmhd`; the media-header kind is
+        // surfaced and no `elng` peer is present.
+        assert_eq!(d.tracks[0].media_header_kind, MediaHeaderKind::Video);
+        assert!(d.tracks[0].extended_language.is_none());
         assert_eq!(d.tracks[0].primary_format(), Some(*b"rle "));
         // Demuxer trait surface
         assert_eq!(d.streams().len(), 1);
@@ -4149,6 +4180,81 @@ mod tests {
         assert!(pkt.flags.keyframe);
         // Past-the-end yields Eof
         assert!(matches!(d.next_packet(), Err(Error::Eof)));
+    }
+
+    #[test]
+    fn parse_mdia_surfaces_nmhd_and_elng() {
+        // Build a `mdia` for a timed-metadata track: hdlr(meta) + elng
+        // + minf{ nmhd }. `parse_mdia` should record the null media
+        // header kind and the extended-language tag.
+        let mut hdlr = Vec::new();
+        hdlr.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+        hdlr.extend_from_slice(b"mhlr");
+        hdlr.extend_from_slice(b"meta"); // metadata handler
+        hdlr.extend_from_slice(&[0u8; 12]);
+        hdlr.push(0); // empty Pascal-string name
+
+        // elng: FullBox + "en-US\0"
+        let mut elng = Vec::new();
+        elng.extend_from_slice(&0u32.to_be_bytes());
+        elng.extend_from_slice(b"en-US");
+        elng.push(0);
+
+        // nmhd: empty FullBox
+        let nmhd = 0u32.to_be_bytes().to_vec();
+        let mut minf = Vec::new();
+        push_atom(&mut minf, *b"nmhd", &nmhd);
+
+        let mut mdia = Vec::new();
+        let mdhd = vec![0u8; 24];
+        push_atom(&mut mdia, *b"mdhd", &mdhd);
+        push_atom(&mut mdia, *b"hdlr", &hdlr);
+        push_atom(&mut mdia, *b"elng", &elng);
+        push_atom(&mut mdia, *b"minf", &minf);
+
+        let mut buf = Vec::new();
+        push_atom(&mut buf, *b"mdia", &mdia);
+
+        let mut cur = Cursor::new(buf);
+        let hdr = read_atom_header(&mut cur).unwrap().unwrap();
+        assert_eq!(hdr.fourcc, *b"mdia");
+        let mut track = Track::default();
+        parse_mdia(&mut cur, &hdr, &mut track).unwrap();
+
+        assert!(track.hdlr.is_metadata());
+        assert_eq!(track.media_header_kind, MediaHeaderKind::Null);
+        assert_eq!(track.extended_language.as_deref(), Some("en-US"));
+    }
+
+    #[test]
+    fn parse_mdia_surfaces_sthd_for_subtitle_track() {
+        // Subtitle track: hdlr(subt) + minf{ sthd }.
+        let mut hdlr = Vec::new();
+        hdlr.extend_from_slice(&0u32.to_be_bytes());
+        hdlr.extend_from_slice(b"mhlr");
+        hdlr.extend_from_slice(b"subt");
+        hdlr.extend_from_slice(&[0u8; 12]);
+        hdlr.push(0);
+
+        let sthd = 0u32.to_be_bytes().to_vec();
+        let mut minf = Vec::new();
+        push_atom(&mut minf, *b"sthd", &sthd);
+
+        let mut mdia = Vec::new();
+        push_atom(&mut mdia, *b"mdhd", &[0u8; 24]);
+        push_atom(&mut mdia, *b"hdlr", &hdlr);
+        push_atom(&mut mdia, *b"minf", &minf);
+
+        let mut buf = Vec::new();
+        push_atom(&mut buf, *b"mdia", &mdia);
+        let mut cur = Cursor::new(buf);
+        let hdr = read_atom_header(&mut cur).unwrap().unwrap();
+        let mut track = Track::default();
+        parse_mdia(&mut cur, &hdr, &mut track).unwrap();
+
+        assert!(track.is_subtitle());
+        assert_eq!(track.media_header_kind, MediaHeaderKind::Subtitle);
+        assert!(track.extended_language.is_none());
     }
 
     /// Build a v0 `sidx` payload with a single media reference so the

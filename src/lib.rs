@@ -102,7 +102,10 @@ pub use fragment::{
 pub use gmhd::{
     parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, GraphicsMode, Tcmi, TextHeader,
 };
-pub use header::{parse_hmhd, BrandClass, Ftyp, Hdlr, Hmhd, Mdhd, Mvhd, Tkhd, TrackRotation};
+pub use header::{
+    parse_elng, parse_hmhd, BrandClass, Ftyp, Hdlr, Hmhd, Mdhd, MediaHeaderKind, Mvhd, Tkhd,
+    TrackRotation,
+};
 pub use heif_write::{HeifDerivation, HeifItem, HeifItemReference, HeifProperty, HeifWriter};
 pub use iprp::{
     parse_amve_payload, parse_auxc_payload, parse_cclv_payload, parse_clli_payload,

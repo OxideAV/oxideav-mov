@@ -88,6 +88,14 @@ Decoding stays in codec crates: this crate calls
 - Hint tracks (`hdlr.is_hint()`): the Hint Media Header Box (`hmhd`,
   ISO/IEC 14496-12 §12.4.2) is decoded into `Hmhd { max_pdu_size,
   avg_pdu_size, max_bitrate, avg_bitrate }` on `Track::hmhd`.
+- Media-header classification (§8.4.5.1): every track records which
+  media-header box its `minf` carried — `vmhd` / `smhd` / `hmhd` /
+  `sthd` (Subtitle Media Header, §12.6.2) / `nmhd` (Null Media Header,
+  §8.4.5.2, used by timed-metadata tracks) / `gmhd` — on
+  `Track::media_header_kind` (`MediaHeaderKind`). The optional `elng`
+  Extended Language Tag Box (§8.4.6) is parsed onto
+  `Track::extended_language` (an RFC 4646 / BCP 47 tag such as
+  `"en-US"` that overrides the packed `mdhd.language`).
 - Fragmented MP4 / fMP4 / DASH: `mvex/trex` defaults +
   `moof/traf/tfhd/trun` cascade, `tfdt` baseline DTS, `leva` level
   assignment, and per-fragment sample-aux. `mfra/tfra/mfro`-driven

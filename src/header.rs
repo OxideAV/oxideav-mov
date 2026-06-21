@@ -692,6 +692,55 @@ pub fn parse_hmhd(payload: &[u8]) -> Result<Hmhd> {
     })
 }
 
+/// Which media-header box (ISO/IEC 14496-12 §8.4.5.1) was present in a
+/// track's `minf`. §8.4.5.1 mandates "Exactly one specific media header
+/// shall be present" — the box's *type* classifies the media even though
+/// the typed-header variants (`nmhd`/`sthd`) carry no payload fields. The
+/// box type a track actually wrote is a useful classification signal that
+/// the handler subtype alone doesn't always pin down (e.g. a generic
+/// stream can use either `gmhd` or `nmhd`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MediaHeaderKind {
+    /// No media-header box was found in `minf` (malformed per spec, but
+    /// tolerated; the default).
+    #[default]
+    None,
+    /// `vmhd` — Video Media Header Box (§12.1.2). Video tracks.
+    Video,
+    /// `smhd` — Sound Media Header Box (§12.2.2). Audio tracks.
+    Sound,
+    /// `hmhd` — Hint Media Header Box (§12.4.2). Hint tracks. The parsed
+    /// fields are on [`crate::track::Track::hmhd`].
+    Hint,
+    /// `sthd` — Subtitle Media Header Box (§12.6.2). Subtitle tracks. An
+    /// empty FullBox (version 0, flags 0); only its presence is signalled.
+    Subtitle,
+    /// `nmhd` — Null Media Header Box (§8.4.5.2). Streams for which no
+    /// specific media header is identified (e.g. timed metadata, §12.3.2).
+    /// An empty FullBox; only its presence is signalled.
+    Null,
+    /// `gmhd` — QuickTime Base Media Information Header Atom (QTFF p. 64).
+    /// Generic media; the parsed extensions are on
+    /// [`crate::track::Track::gmhd`].
+    Generic,
+}
+
+/// Parse an `elng` Extended Language Tag Box (ISO/IEC 14496-12 §8.4.6).
+///
+/// `class ExtendedLanguageBox extends FullBox('elng', 0, 0) { string
+/// extended_language; }` — the body after the 4-byte FullBox header is a
+/// single NUL-terminated UTF-8 string holding an RFC 4646 (BCP 47)
+/// language tag such as `"en-US"`, `"fr-FR"`, or `"zh-CN"`. The tag
+/// overrides the packed `mdhd.language` code when the two disagree
+/// (§8.4.6.1). A missing terminator is tolerated (the remaining bytes are
+/// taken as the tag); the returned string excludes the terminating NUL.
+pub fn parse_elng(payload: &[u8]) -> Result<String> {
+    need(payload, 0, 4, "elng FullBox header")?;
+    let body = &payload[4..];
+    let end = body.iter().position(|&b| b == 0).unwrap_or(body.len());
+    Ok(String::from_utf8_lossy(&body[..end]).into_owned())
+}
+
 // ─────────────── helpers ───────────────
 
 #[inline]
@@ -736,6 +785,36 @@ mod tests {
     #[test]
     fn hmhd_too_short_errors() {
         assert!(parse_hmhd(&[0u8; 8]).is_err());
+    }
+
+    #[test]
+    fn elng_parses_bcp47_tag() {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes()); // FullBox ver+flags
+        p.extend_from_slice(b"en-US");
+        p.push(0); // NUL terminator
+        assert_eq!(parse_elng(&p).unwrap(), "en-US");
+    }
+
+    #[test]
+    fn elng_tolerates_missing_terminator() {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(b"zh-CN"); // no trailing NUL
+        assert_eq!(parse_elng(&p).unwrap(), "zh-CN");
+    }
+
+    #[test]
+    fn elng_empty_tag_is_empty_string() {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.push(0); // empty NUL-terminated string
+        assert_eq!(parse_elng(&p).unwrap(), "");
+    }
+
+    #[test]
+    fn elng_too_short_for_fullbox_header_errors() {
+        assert!(parse_elng(&[0u8; 3]).is_err());
     }
 
     #[test]

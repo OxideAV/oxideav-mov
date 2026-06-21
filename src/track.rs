@@ -14,7 +14,7 @@ use crate::edit::{
     media_pts_to_movie_pts, movie_pts_to_media_pts, resolve_edit_segments, EditList, EditSegment,
 };
 use crate::gmhd::Gmhd;
-use crate::header::{Hdlr, Hmhd, Mdhd, Tkhd};
+use crate::header::{Hdlr, Hmhd, Mdhd, MediaHeaderKind, Tkhd};
 use crate::kind::KindEntry;
 use crate::matte::Matte;
 use crate::media_meta::{
@@ -387,6 +387,26 @@ pub struct Track {
     /// fragmented `qt  ` or `mp4` plays straight through
     /// [`crate::MovDemuxer::next_packet`].
     pub fragment_samples: Vec<SampleEntry>,
+    /// Which media-header box was found in this track's `minf`
+    /// (ISO/IEC 14496-12 §8.4.5.1, "Exactly one specific media header
+    /// shall be present"). Surfaces the box *type* the producer wrote —
+    /// `vmhd` / `smhd` / `hmhd` / `sthd` / `nmhd` / `gmhd` — which is a
+    /// finer classification signal than the handler subtype alone (a
+    /// generic stream can legally pick either `gmhd` or `nmhd`; a
+    /// subtitle track uses `sthd`). [`MediaHeaderKind::None`] when no
+    /// media-header box was present (malformed but tolerated). The two
+    /// empty-FullBox variants (`nmhd`/`sthd`) carry no further fields;
+    /// the parsed-payload variants surface on [`Self::hmhd`] / [`Self::gmhd`].
+    /// Round 357.
+    pub media_header_kind: MediaHeaderKind,
+    /// Extended language tag (`elng`, ISO/IEC 14496-12 §8.4.6) — an
+    /// RFC 4646 (BCP 47) language tag such as `"en-US"` parsed from the
+    /// optional `elng` peer of the media header inside `mdia`. Overrides
+    /// the packed [`Mdhd::language`] code when the two disagree
+    /// (§8.4.6.1). `None` when the track carries no `elng` box (the
+    /// common case; callers should fall back to `mdhd.language`).
+    /// Round 357.
+    pub extended_language: Option<String>,
     /// Per-fragment sample-auxiliary-information records collected
     /// from each `traf` that names this track (ISO/IEC 14496-12
     /// §8.7.8.1 / §8.7.9.1, `traf` scope per §8.8.6). Empty for
