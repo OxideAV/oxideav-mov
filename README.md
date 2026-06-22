@@ -64,6 +64,18 @@ Decoding stays in codec crates: this crate calls
   reference. `TimecodeRecord::to_frames` / `from_frames` give
   non-drop-frame conversions (drop-frame absolute counts are out of
   scope — the SMPTE-12M skip rule is outside the QTFF spec).
+- QuickTime Text Sample Description (`text` format inside `stsd` on a
+  classic `text`-handler track, QTFF pp. 108–110): the display config of
+  a QuickTime text track is decoded into a typed `TextSampleDescription`
+  on `SampleDescription::text` — `display_flags` (drop-shadow / anti-alias
+  / scroll / key-text / use-movie-background, surfaced via accessors),
+  `text_justification` (left / center / right), the 48-bit RGB
+  fore/background colours (`Rgb48`), the `default_text_box` rectangle, the
+  `font_number` / `font_face` style bitmask (bold / italic / underline /
+  …), and the trailing Pascal font `text_name`. Distinct from the
+  per-sample text payload decoded by `parse_text_sample_styles` and from
+  the `gmhd/text` media-information header. Non-`text` handlers leave the
+  field `None`.
 - Sound sample-description versioning: version-0 (uncompressed-sample)
   and version-1 (QTFF p. 101 `SoundDescriptionV1`) layouts. The four
   fixed-ratio fields (`samples_per_packet`, `bytes_per_packet`,

@@ -42,6 +42,7 @@ pub mod sidx;
 pub mod ssix;
 pub mod styp;
 pub mod sub_track;
+pub mod text_sample;
 pub mod timecode;
 pub mod track;
 pub mod track_group;
@@ -154,6 +155,14 @@ pub use styp::{parse_styp, Styp};
 pub use sub_track::{
     find_sub_tracks_in_udta, parse_stri, parse_strk, parse_stsg, SubTrack, SubTrackInformation,
     SubTrackSampleGroup,
+};
+pub use text_sample::{
+    parse_text_sample_description, Rgb48, TextBox, TextJustification, TextSampleDescription,
+    TEXT_FACE_BOLD, TEXT_FACE_CONDENSE, TEXT_FACE_EXTEND, TEXT_FACE_ITALIC, TEXT_FACE_OUTLINE,
+    TEXT_FACE_SHADOW, TEXT_FACE_UNDERLINE, TEXT_FLAG_ANTI_ALIAS, TEXT_FLAG_CONTINUOUS_SCROLL,
+    TEXT_FLAG_DONT_AUTO_SCALE, TEXT_FLAG_DROP_SHADOW, TEXT_FLAG_HORIZONTAL_SCROLL,
+    TEXT_FLAG_KEY_TEXT, TEXT_FLAG_REVERSE_SCROLL, TEXT_FLAG_SCROLL_IN, TEXT_FLAG_SCROLL_OUT,
+    TEXT_FLAG_USE_MOVIE_BG_COLOR, TEXT_SAMPLE_DESC_FIXED_LEN,
 };
 pub use timecode::{
     parse_tmcd_sample_description, StartTimecode, TimecodeRecord, TimecodeSample, Tmcd,

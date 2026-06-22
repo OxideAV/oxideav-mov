@@ -27,6 +27,9 @@ use crate::metadata_sample::{
 };
 use crate::reference::DataReference;
 use crate::sample_table::{SampleEntry, SampleTable};
+use crate::text_sample::{
+    parse_text_sample_description, TextSampleDescription, TEXT_SAMPLE_DESC_FIXED_LEN,
+};
 use crate::timecode::{parse_tmcd_sample_description, Tmcd};
 use crate::track_load::Load;
 use crate::track_selection::TrackSelection;
@@ -256,6 +259,16 @@ pub struct SampleDescription {
     /// entry's format FourCC names one of those subclasses. `None` for
     /// every other handler / format. See [`SubtitleSampleEntry`].
     pub subtitle: Option<SubtitleSampleEntry>,
+
+    // ─────── Round-360 QuickTime Text Sample Description ───────
+    /// Parsed QuickTime Text Sample Description (`text` format FourCC,
+    /// QTFF pp. 108–110) — populated only when the track's handler is a
+    /// classic QuickTime text track (`hdlr.is_text()`) and the entry's
+    /// format FourCC is `text`. Carries display flags, justification,
+    /// fore/background colours, the default text box, font face/number,
+    /// and the trailing Pascal font name. `None` for every other handler
+    /// / format. See [`TextSampleDescription`].
+    pub text: Option<TextSampleDescription>,
 }
 
 impl SampleDescription {
@@ -926,6 +939,18 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
             // entries above, `body` starts at the subclass-specific
             // fields after the universal 16-byte SampleEntry header.
             entry.subtitle = parse_subtitle_sample_entry(&format, body)?;
+            entry.extra = body.to_vec();
+        } else if hdlr.is_text() && &format == b"text" && body.len() >= TEXT_SAMPLE_DESC_FIXED_LEN {
+            // QuickTime Text Sample Description (QTFF pp. 108–110). A
+            // classic `text`-handler track declares its display config
+            // (flags, justification, fore/background colour, default
+            // text box, font face/number, Pascal font name) here. Distinct
+            // from the per-sample text payload (`[len:u16][text][exts]`)
+            // decoded by `chapter::parse_text_sample_styles`, and from the
+            // `gmhd/text` media-information header (`gmhd::TextHeader`).
+            entry.text = Some(parse_text_sample_description(body)?);
+            // Preserve the raw body so a round-trip muxer / future style
+            // extension reader retains the exact wire bytes.
             entry.extra = body.to_vec();
         } else if hdlr.is_audio() && body.len() >= 20 {
             // Sound sample description v0 (QTFF p. 100):
