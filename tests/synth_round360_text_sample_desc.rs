@@ -194,3 +194,67 @@ fn non_text_handler_leaves_text_none() {
     let d = MovDemuxer::open(cur).expect("open video fixture");
     assert!(d.tracks[0].sample_descriptions[0].text.is_none());
 }
+
+/// Build a single-entry `stsd` carrying an `stxt` SimpleTextSampleEntry
+/// (ISO/IEC 14496-12 §12.5.3): content_encoding + mime_format strings.
+fn build_stsd_stxt() -> Vec<u8> {
+    let mut body = Vec::new();
+    body.push(0); // content_encoding omitted (empty NUL string)
+    body.extend_from_slice(b"text/plain");
+    body.push(0); // mime_format
+
+    let mut p = Vec::new();
+    p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+    p.extend_from_slice(&1u32.to_be_bytes()); // entry count
+    let entry_size: u32 = (16 + body.len()) as u32;
+    p.extend_from_slice(&entry_size.to_be_bytes());
+    p.extend_from_slice(b"stxt");
+    p.extend_from_slice(&[0u8; 6]); // reserved
+    p.extend_from_slice(&1u16.to_be_bytes()); // dref index
+    p.extend_from_slice(&body);
+    p
+}
+
+#[test]
+fn stxt_simple_text_entry_surfaces_on_text_handler() {
+    let mut out = Vec::new();
+    let mut sample = Vec::new();
+    sample.extend_from_slice(b"hi");
+    let mdat_payload_off = (out.len() + 8) as u32;
+    push_atom(&mut out, *b"mdat", &sample);
+    let sample_off = mdat_payload_off;
+
+    let mut moov = Vec::new();
+    push_atom(&mut moov, *b"mvhd", &build_mvhd(600, 60));
+    let mut trak = Vec::new();
+    push_atom(&mut trak, *b"tkhd", &build_tkhd(1, 60, 0, 0));
+    let mut mdia = Vec::new();
+    push_atom(&mut mdia, *b"mdhd", &build_mdhd(600, 60));
+    push_atom(&mut mdia, *b"hdlr", &build_hdlr(b"mhlr", b"text"));
+    let mut minf = Vec::new();
+    let mut stbl = Vec::new();
+    push_atom(&mut stbl, *b"stsd", &build_stsd_stxt());
+    push_atom(&mut stbl, *b"stts", &build_stts_single(1, 60));
+    push_atom(&mut stbl, *b"stsc", &build_stsc_single(1));
+    push_atom(
+        &mut stbl,
+        *b"stsz",
+        &build_stsz_constant(sample.len() as u32, 1),
+    );
+    push_atom(&mut stbl, *b"stco", &build_stco_single(sample_off));
+    push_atom(&mut minf, *b"stbl", &stbl);
+    push_atom(&mut mdia, *b"minf", &minf);
+    push_atom(&mut trak, *b"mdia", &mdia);
+    push_atom(&mut moov, *b"trak", &trak);
+    push_atom(&mut out, *b"moov", &moov);
+
+    let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(out));
+    let d = MovDemuxer::open(cur).expect("open stxt fixture");
+    let sd = &d.tracks[0].sample_descriptions[0];
+    assert_eq!(&sd.format, b"stxt");
+    // The QuickTime `text` description is NOT populated for an `stxt` entry.
+    assert!(sd.text.is_none());
+    let st = sd.simple_text.as_ref().expect("stxt parsed");
+    assert_eq!(st.content_encoding, "");
+    assert_eq!(st.mime_format, "text/plain");
+}

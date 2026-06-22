@@ -124,9 +124,9 @@ pub use media_meta::{
 };
 pub use metadata_sample::{
     parse_btrt, parse_metadata_sample_entry, parse_mett, parse_metx, parse_sbtt, parse_stpp,
-    parse_subtitle_sample_entry, parse_urim, BitRate, MetadataSampleEntry, SubtitleSampleEntry,
-    TextMetadataSampleEntry, TextSubtitleSampleEntry, UriMetadataSampleEntry,
-    XmlMetadataSampleEntry, XmlSubtitleSampleEntry,
+    parse_stxt, parse_subtitle_sample_entry, parse_urim, BitRate, MetadataSampleEntry,
+    SimpleTextSampleEntry, SubtitleSampleEntry, TextMetadataSampleEntry, TextSubtitleSampleEntry,
+    UriMetadataSampleEntry, XmlMetadataSampleEntry, XmlSubtitleSampleEntry,
 };
 pub use muxer::{
     FragmentationMode, MovMetaItem, MovMetadata, MovMuxer, MuxEdit, MuxSample, MuxTrackKind,

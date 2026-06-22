@@ -22,8 +22,8 @@ use crate::media_meta::{
     ColorParameters, Cslg, Fiel, MetaKeyValue, Mjht, Mjqt, Pasp, Tapt,
 };
 use crate::metadata_sample::{
-    parse_metadata_sample_entry, parse_subtitle_sample_entry, MetadataSampleEntry,
-    SubtitleSampleEntry,
+    parse_metadata_sample_entry, parse_stxt, parse_subtitle_sample_entry, MetadataSampleEntry,
+    SimpleTextSampleEntry, SubtitleSampleEntry,
 };
 use crate::reference::DataReference;
 use crate::sample_table::{SampleEntry, SampleTable};
@@ -269,6 +269,15 @@ pub struct SampleDescription {
     /// and the trailing Pascal font name. `None` for every other handler
     /// / format. See [`TextSampleDescription`].
     pub text: Option<TextSampleDescription>,
+
+    /// Parsed ISO BMFF `SimpleTextSampleEntry` (`stxt`, ISO/IEC
+    /// 14496-12 §12.5.3) — populated only when the track's handler is a
+    /// timed-text track (`hdlr.is_text()`) and the entry's format FourCC
+    /// is `stxt`. Carries `content_encoding` / `mime_format` plus the
+    /// optional `btrt` BitRateBox and `txtC` TextConfigBox. Distinct from
+    /// the QuickTime [`TextSampleDescription`] (`text` FourCC) carried on
+    /// the same handler type. `None` for every other handler / format.
+    pub simple_text: Option<SimpleTextSampleEntry>,
 }
 
 impl SampleDescription {
@@ -951,6 +960,14 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
             entry.text = Some(parse_text_sample_description(body)?);
             // Preserve the raw body so a round-trip muxer / future style
             // extension reader retains the exact wire bytes.
+            entry.extra = body.to_vec();
+        } else if hdlr.is_text() && &format == b"stxt" {
+            // ISO BMFF SimpleTextSampleEntry (ISO/IEC 14496-12 §12.5.3),
+            // a timed-text track variant carried on the same `text`
+            // handler as the QuickTime `text` description but selected by
+            // the `stxt` FourCC. `body` starts at the subclass-specific
+            // fields after the universal 16-byte SampleEntry header.
+            entry.simple_text = Some(parse_stxt(body)?);
             entry.extra = body.to_vec();
         } else if hdlr.is_audio() && body.len() >= 20 {
             // Sound sample description v0 (QTFF p. 100):

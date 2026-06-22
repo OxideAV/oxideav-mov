@@ -94,6 +94,12 @@ Decoding stays in codec crates: this crate calls
   optional `uriI` URIInitBox data). The optional `btrt` BitRateBox
   (§8.5.2.2) is decoded to `BitRate { buffer_size_db, max_bitrate,
   avg_bitrate }` and surfaced via `MetadataSampleEntry::bitrate()`.
+- Timed-text simple sample entry (ISO/IEC 14496-12 §12.5.3): a `text`-
+  handler track's `stsd` entry whose FourCC is `stxt` is decoded into a
+  typed `SimpleTextSampleEntry` on `SampleDescription::simple_text` —
+  `content_encoding` / `mime_format` plus the optional `btrt` BitRateBox
+  and `txtC` TextConfigBox. Selected by the `stxt` FourCC, so it coexists
+  on the same `text` handler with the QuickTime `text` description above.
 - Subtitle sample entries (ISO/IEC 14496-12 §12.6.3): a `subt`-handler
   track's `stsd` entry (`Hdlr::is_subtitle()`) is decoded into a typed
   `SubtitleSampleEntry` on `SampleDescription::subtitle` — `stpp`

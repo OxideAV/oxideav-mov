@@ -207,6 +207,28 @@ pub struct TextSubtitleSampleEntry {
     pub bitrate: Option<BitRate>,
 }
 
+/// `stxt` — SimpleTextSampleEntry (ISO/IEC 14496-12 §12.5.3.2), carried
+/// on a timed-**text** track (`hdlr` subtype `text`, §12.5.1, with a null
+/// media header `nmhd`). Structurally identical to the `mett`
+/// [`TextMetadataSampleEntry`] — an optional `content_encoding` then a
+/// mandatory `mime_format`, followed by optional `btrt` + `txtC` boxes —
+/// but it is the timed-text counterpart rather than a metadata entry, so
+/// it gets its own type. Disambiguated from the QuickTime
+/// [`crate::text_sample::TextSampleDescription`] (FourCC `text`) by the
+/// `stxt` FourCC.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SimpleTextSampleEntry {
+    /// MIME type identifying the content encoding; empty when not encoded.
+    pub content_encoding: String,
+    /// MIME type identifying the content format of the samples
+    /// (e.g. `text/html`, `text/plain`).
+    pub mime_format: String,
+    /// `txtC` TextConfigBox initial text; `None` when the box is absent.
+    pub text_config: Option<String>,
+    /// Optional bit-rate box.
+    pub bitrate: Option<BitRate>,
+}
+
 /// Read a NUL-terminated UTF-8 string starting at `*pos`. Advances `*pos`
 /// past the terminating NUL. Returns the string (excluding the NUL). When
 /// no NUL is found before end-of-buffer, the remaining bytes are taken as
@@ -467,6 +489,36 @@ pub fn parse_sbtt(body: &[u8]) -> Result<TextSubtitleSampleEntry> {
     Ok(entry)
 }
 
+/// Parse an `stxt` SimpleTextSampleEntry body (after the SampleEntry
+/// 8-byte tail). ISO/IEC 14496-12 §12.5.3.2. Same shape as `mett`:
+/// `content_encoding` (optional) then `mime_format` (mandatory), with
+/// optional `btrt` + `txtC` boxes.
+pub fn parse_stxt(body: &[u8]) -> Result<SimpleTextSampleEntry> {
+    let mut pos = 0usize;
+    let mut strings: Vec<String> = Vec::new();
+    while pos < body.len() && !looks_like_box(body, pos) && strings.len() < 2 {
+        strings.push(read_c_string(body, &mut pos));
+    }
+    let mut entry = SimpleTextSampleEntry::default();
+    match strings.len() {
+        0 => {}
+        1 => entry.mime_format = strings.pop().unwrap(),
+        _ => {
+            entry.mime_format = strings.pop().unwrap();
+            entry.content_encoding = strings.pop().unwrap();
+        }
+    }
+    walk_boxes(body, pos, |fc, payload| {
+        match fc {
+            b"btrt" => entry.bitrate = Some(parse_btrt(payload)?),
+            b"txtC" => entry.text_config = Some(parse_txtc(payload)),
+            _ => {}
+        }
+        Ok(())
+    })?;
+    Ok(entry)
+}
+
 /// Dispatch a subtitle sample-description body to the right variant by
 /// its `format` FourCC. Returns `Ok(None)` for any FourCC that is not a
 /// recognised `SubtitleSampleEntry` subclass.
@@ -707,6 +759,40 @@ mod tests {
         assert_eq!(e.content_encoding, "");
         assert_eq!(e.mime_format, "text/plain");
         assert_eq!(e.text_config.as_deref(), Some("WEBVTT"));
+    }
+
+    #[test]
+    fn stxt_mime_and_content_encoding_and_txtc() {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"application/gzip"); // content_encoding
+        body.push(0);
+        body.extend_from_slice(b"text/plain"); // mime_format
+        body.push(0);
+        let cfg = b"header";
+        let size = 8 + 4 + cfg.len() + 1;
+        body.extend_from_slice(&(size as u32).to_be_bytes());
+        body.extend_from_slice(b"txtC");
+        body.extend_from_slice(&0u32.to_be_bytes());
+        body.extend_from_slice(cfg);
+        body.push(0);
+        body.extend_from_slice(&btrt_box());
+        let e = parse_stxt(&body).unwrap();
+        assert_eq!(e.content_encoding, "application/gzip");
+        assert_eq!(e.mime_format, "text/plain");
+        assert_eq!(e.text_config.as_deref(), Some("header"));
+        assert_eq!(e.bitrate.unwrap().avg_bitrate, 150);
+    }
+
+    #[test]
+    fn stxt_single_string_is_mime() {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"text/html");
+        body.push(0);
+        let e = parse_stxt(&body).unwrap();
+        assert_eq!(e.content_encoding, "");
+        assert_eq!(e.mime_format, "text/html");
+        assert!(e.text_config.is_none());
+        assert!(e.bitrate.is_none());
     }
 
     #[test]
