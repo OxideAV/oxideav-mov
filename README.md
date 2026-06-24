@@ -213,6 +213,23 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   `set_track_apple_metadata(track_id, &[MovMetaItem])` does the same at track
   scope (`trak/meta`, surfacing on `Track::meta`); movie and track scopes are
   independent.
+- `set_visual_extensions(track_id, VisualExtensions)` attaches the typed
+  visual sample-description extension boxes to a **video** track (ISO/IEC
+  14496-12 §12.1.4 / §12.1.5, QTFF p. 94): `pasp` (Pixel Aspect Ratio),
+  `colr` (Colour Information — Apple `nclc` / ISO `nclx` with the
+  `full_range_flag` top bit / ICC / `Other`), `clap` (Clean Aperture, with
+  signed `horiz_off_n` / `vert_off_n`), `fiel` (Field Handling), and `gama`
+  (a 16.16 fixed-point gamma). Each populated `VisualExtensions` field
+  emits its box into the video `stsd` entry's trailing slot — after the
+  70-byte fixed body and after the codec-config `extra_stsd_atoms`, so a
+  decoder-config box (`avcC` / `hvcC`) stays first — in a stable canonical
+  order (`colr`, `pasp`, `clap`, `fiel`, `gama`). The new
+  `Pasp`/`Clap`/`ColorParameters`/`Fiel` `to_body_bytes` serialisers are
+  the exact inverses of the read-side `parse_*` decoders, so the file
+  round-trips through the demuxer's `scan_video_extensions` back onto
+  `SampleDescription`'s `pasp` / `colr` / `clap` / `fiel` / `gamma`. An
+  empty set writes nothing; a non-video track or unknown `track_id` is
+  rejected.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.

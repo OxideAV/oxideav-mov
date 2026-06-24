@@ -131,8 +131,8 @@ pub use metadata_sample::{
 pub use muxer::{
     FragmentationMode, MovMetaItem, MovMetadata, MovMuxer, MuxEdit, MuxSample, MuxTrackKind,
     SampleAuxStream, SampleGroupBoxForm, SampleGroupDescriptionWrite, SampleToGroupWrite,
-    META_NAMESPACE_MDTA, META_TYPE_BE_SIGNED_INT, META_TYPE_BE_UNSIGNED_INT, META_TYPE_RAW,
-    META_TYPE_UTF8, UTF8_INTL_TEXT_FLAG,
+    VisualExtensions, META_NAMESPACE_MDTA, META_TYPE_BE_SIGNED_INT, META_TYPE_BE_UNSIGNED_INT,
+    META_TYPE_RAW, META_TYPE_UTF8, UTF8_INTL_TEXT_FLAG,
 };
 pub use pdin::{parse_pdin, Pdin, PdinEntry};
 pub use pnot::{parse_pnot, Pnot, MAC_TO_UNIX_EPOCH_SECONDS, PNOT_BODY_LEN};
