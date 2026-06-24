@@ -46,6 +46,18 @@ pub fn parse_pasp(payload: &[u8]) -> Result<Pasp> {
     })
 }
 
+impl Pasp {
+    /// Serialise to the 8-byte `pasp` body (ISO BMFF §12.1.4.2) — the
+    /// exact inverse of [`parse_pasp`]. No box header; the caller frames
+    /// the `[size][type]` prefix.
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(8);
+        v.extend_from_slice(&self.h_spacing.to_be_bytes());
+        v.extend_from_slice(&self.v_spacing.to_be_bytes());
+        v
+    }
+}
+
 /// Clean Aperture region (ISO BMFF §12.1.4). Eight 32-bit values
 /// representing four fractions: width N/D, height N/D, horiz off N/D,
 /// vert off N/D. The offset numerators are signed in the spec; we keep
@@ -81,6 +93,24 @@ pub fn parse_clap(payload: &[u8]) -> Result<Clap> {
         vert_off_n: i(24),
         vert_off_d: r32(28),
     })
+}
+
+impl Clap {
+    /// Serialise to the 32-byte `clap` body (ISO BMFF §12.1.4) — the
+    /// exact inverse of [`parse_clap`]. The two offset numerators are
+    /// signed; everything else is unsigned. No box header.
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(32);
+        v.extend_from_slice(&self.clean_aperture_width_n.to_be_bytes());
+        v.extend_from_slice(&self.clean_aperture_width_d.to_be_bytes());
+        v.extend_from_slice(&self.clean_aperture_height_n.to_be_bytes());
+        v.extend_from_slice(&self.clean_aperture_height_d.to_be_bytes());
+        v.extend_from_slice(&self.horiz_off_n.to_be_bytes());
+        v.extend_from_slice(&self.horiz_off_d.to_be_bytes());
+        v.extend_from_slice(&self.vert_off_n.to_be_bytes());
+        v.extend_from_slice(&self.vert_off_d.to_be_bytes());
+        v
+    }
 }
 
 /// Colour parameter atom payload variants.
@@ -163,6 +193,51 @@ pub fn parse_colr(payload: &[u8]) -> Result<ColorParameters> {
         },
     };
     Ok(ColorParameters { kind })
+}
+
+impl ColorParameters {
+    /// Serialise to the `colr` body (Apple `nclc` / ISO `nclx` / ICC) —
+    /// the exact inverse of [`parse_colr`]. The leading 4 bytes are the
+    /// `colorParameterType` FourCC, followed by the variant-specific
+    /// payload. No box header; the caller frames `[size][type]`.
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::new();
+        match &self.kind {
+            ColorParametersKind::Nclc {
+                primaries,
+                transfer,
+                matrix,
+            } => {
+                v.extend_from_slice(b"nclc");
+                v.extend_from_slice(&primaries.to_be_bytes());
+                v.extend_from_slice(&transfer.to_be_bytes());
+                v.extend_from_slice(&matrix.to_be_bytes());
+            }
+            ColorParametersKind::Nclx {
+                primaries,
+                transfer,
+                matrix,
+                full_range,
+            } => {
+                v.extend_from_slice(b"nclx");
+                v.extend_from_slice(&primaries.to_be_bytes());
+                v.extend_from_slice(&transfer.to_be_bytes());
+                v.extend_from_slice(&matrix.to_be_bytes());
+                // §12.1.5: top bit is full_range_flag; remaining 7 bits
+                // reserved (0).
+                v.push(if *full_range { 0x80 } else { 0 });
+            }
+            ColorParametersKind::Icc { kind, profile } => {
+                v.extend_from_slice(kind);
+                v.extend_from_slice(profile);
+            }
+            ColorParametersKind::Other { kind, body } => {
+                v.extend_from_slice(kind);
+                v.extend_from_slice(body);
+            }
+        }
+        v
+    }
 }
 
 /// Field handling — `fiel` video sample-description extension
@@ -274,6 +349,15 @@ pub fn parse_fiel(payload: &[u8]) -> Result<Fiel> {
         field_count: payload[0],
         field_ordering: payload[1],
     })
+}
+
+impl Fiel {
+    /// Serialise to the 2-byte `fiel` body (QTFF p. 94, Table 3-2) —
+    /// the exact inverse of [`parse_fiel`]: `[field_count][field_ordering]`.
+    /// No box header.
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        vec![self.field_count, self.field_ordering]
+    }
 }
 
 /// Default Motion-JPEG quantization table — `mjqt` video
@@ -1333,5 +1417,103 @@ mod tests {
         let m = Mjht::default();
         assert!(m.is_empty());
         assert_eq!(m.len(), 0);
+    }
+
+    #[test]
+    fn pasp_serialise_roundtrip() {
+        let p = Pasp {
+            h_spacing: 40,
+            v_spacing: 33,
+        };
+        let body = p.to_body_bytes();
+        assert_eq!(body.len(), 8);
+        assert_eq!(parse_pasp(&body).unwrap(), p);
+    }
+
+    #[test]
+    fn clap_serialise_roundtrip_signed_offsets() {
+        let c = Clap {
+            clean_aperture_width_n: 1916,
+            clean_aperture_width_d: 1,
+            clean_aperture_height_n: 1076,
+            clean_aperture_height_d: 1,
+            horiz_off_n: -2,
+            horiz_off_d: 1,
+            vert_off_n: 5,
+            vert_off_d: 1,
+        };
+        let body = c.to_body_bytes();
+        assert_eq!(body.len(), 32);
+        assert_eq!(parse_clap(&body).unwrap(), c);
+    }
+
+    #[test]
+    fn colr_nclc_serialise_roundtrip() {
+        let c = ColorParameters {
+            kind: ColorParametersKind::Nclc {
+                primaries: 1,
+                transfer: 1,
+                matrix: 1,
+            },
+        };
+        let body = c.to_body_bytes();
+        assert_eq!(body.len(), 10); // 4 (type) + 6
+        assert_eq!(parse_colr(&body).unwrap(), c);
+    }
+
+    #[test]
+    fn colr_nclx_serialise_roundtrip_full_range() {
+        let c = ColorParameters {
+            kind: ColorParametersKind::Nclx {
+                primaries: 9,
+                transfer: 16,
+                matrix: 9,
+                full_range: true,
+            },
+        };
+        let body = c.to_body_bytes();
+        assert_eq!(body.len(), 11); // 4 (type) + 7
+        assert_eq!(body[10] & 0x80, 0x80);
+        assert_eq!(parse_colr(&body).unwrap(), c);
+    }
+
+    #[test]
+    fn colr_nclx_serialise_roundtrip_limited_range() {
+        let c = ColorParameters {
+            kind: ColorParametersKind::Nclx {
+                primaries: 1,
+                transfer: 13,
+                matrix: 6,
+                full_range: false,
+            },
+        };
+        let body = c.to_body_bytes();
+        assert_eq!(body[10] & 0x80, 0x00);
+        assert_eq!(parse_colr(&body).unwrap(), c);
+    }
+
+    #[test]
+    fn colr_icc_serialise_roundtrip() {
+        let profile = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11];
+        let c = ColorParameters {
+            kind: ColorParametersKind::Icc {
+                kind: *b"prof",
+                profile: profile.clone(),
+            },
+        };
+        let body = c.to_body_bytes();
+        assert_eq!(&body[..4], b"prof");
+        assert_eq!(parse_colr(&body).unwrap(), c);
+    }
+
+    #[test]
+    fn fiel_serialise_roundtrip() {
+        let f = Fiel {
+            field_count: 2,
+            field_ordering: 6,
+        };
+        let body = f.to_body_bytes();
+        assert_eq!(body, vec![2, 6]);
+        assert_eq!(parse_fiel(&body).unwrap(), f);
     }
 }
