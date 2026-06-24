@@ -147,6 +147,13 @@ PTS − DTS) emit a `ctts` Composition Time to Sample Box (§8.6.1.3):
 omitted when every offset is zero, version 0 for an all-non-negative
 track, auto-promoted to version 1 (signed `int(32)`) the moment any
 offset is negative — so B-frame reorder round-trips PTS exactly.
+`auto_cslg(track_id)` / `set_cslg(track_id, Cslg)` add the matching
+Composition to Decode Box (`cslg`, §8.6.1.4) right after the `ctts`:
+`auto_cslg` derives the five bounds (`compositionToDTSShift`, least /
+greatest `composition_offset`, composition start / end time) from the
+track's per-sample offsets + durations; both auto-promote to v1 when a
+field leaves the signed-32-bit range. Round-trips through `parse_cslg`
+and satisfies the demuxer's `cslg`/`ctts` cross-validation.
 
 - `set_edit_list(track_id, &[MuxEdit])` emits an `edts/elst` (QTFF
   p. 47 / §8.6.6) between `tkhd` and `mdia`. `MuxEdit::segment` is a
@@ -169,7 +176,19 @@ offset is negative — so B-frame reorder round-trips PTS exactly.
   indices are run-length-encoded into the compact pattern form (one
   `pattern_length == 1` pattern per run) with minimum-width field
   selectors; the `parse_csgp` read path expands them back to the exact
-  per-sample assignment.
+  per-sample assignment. `add_sample_to_group_with_form(…,
+  SampleGroupBoxForm::Classic)` instead writes the widely-compatible
+  run-length `sbgp` (SampleToGroupBox, §8.9.2) — same mapping, the form
+  every ISO BMFF reader understands (round-trips through `parse_sbgp`).
+- `set_sample_group_description(track_id, SampleGroupDescriptionWrite)`
+  writes the sibling `sgpd` (SampleGroupDescriptionBox, §8.9.3) that a
+  `csgp`/`sbgp`'s indices reference — without it a non-zero index points
+  at nothing. Written version 1 (constant `default_length` when entries
+  are uniform, else a per-entry `description_length` prefix), before the
+  `sbgp`/`csgp` boxes per §8.9.3 ordering. Typed §10 entry constructors
+  (`roll_entry` / `prol_entry` / `rap_entry` / `tele_entry` /
+  `sap_entry`) mirror the read-side decoders; round-trips through
+  `parse_sgpd`.
 - `set_metadata(&[MovMetadata])` (movie scope, `moov/udta`) and
   `set_track_metadata(track_id, &[MovMetadata])` (track scope,
   `trak/udta`) emit a User Data Box (QTFF pp. 36–38 / §8.10.1).
