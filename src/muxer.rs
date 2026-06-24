@@ -173,6 +173,32 @@ pub struct SampleToGroupWrite {
     pub indices: Vec<u32>,
 }
 
+/// Which on-disk Sample-to-Group box carries a [`SampleToGroupWrite`].
+///
+/// Both forms encode the identical per-sample
+/// `group_description_index` mapping and round-trip through the
+/// demuxer's `SampleTable` sample-group accessors; they differ only in
+/// wire encoding:
+///
+/// * [`Compact`](Self::Compact) — the `csgp` (CompactSampleToGroupBox,
+///   ISO/IEC 14496-12:2020 §8.9.5). Replicates a small set of
+///   per-sample-index *patterns* with minimum-width field selectors.
+///   Smaller for repetitive mappings but a 2020 addition some older
+///   readers don't parse.
+/// * [`Classic`](Self::Classic) — the `sbgp` (SampleToGroupBox,
+///   §8.9.2). A flat run-length table of
+///   `[sample_count][group_description_index]` rows, understood by
+///   every ISO BMFF reader since the box was introduced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SampleGroupBoxForm {
+    /// Emit a `csgp` (CompactSampleToGroupBox). The default.
+    #[default]
+    Compact,
+    /// Emit a `sbgp` (SampleToGroupBox) — the widely-compatible
+    /// run-length form.
+    Classic,
+}
+
 /// The sibling Sample Group Description Box (`sgpd`, ISO/IEC 14496-12
 /// §8.9.3) a [`SampleToGroupWrite`]'s indices reference.
 ///
@@ -617,10 +643,11 @@ struct TrackWrite {
     /// data and emits a matching `saiz` + single-entry `saio` pair.
     sample_aux: Option<SampleAuxStream>,
     /// Optional `stbl`-scope sample-to-group assignments (ISO/IEC
-    /// 14496-12:2020 §8.9.5). Each entry emits one `csgp`
-    /// (CompactSampleToGroupBox); multiple entries (distinct
-    /// `grouping_type`s) emit one `csgp` each, in insertion order.
-    sample_to_groups: Vec<SampleToGroupWrite>,
+    /// 14496-12 §8.9.2 / §8.9.5). Each entry emits one `csgp`
+    /// (CompactSampleToGroupBox) or `sbgp` (SampleToGroupBox) per its
+    /// paired [`SampleGroupBoxForm`]; multiple entries (distinct
+    /// `grouping_type`s) emit one box each, in insertion order.
+    sample_to_groups: Vec<(SampleToGroupWrite, SampleGroupBoxForm)>,
     /// Optional `stbl`-scope sample-group **descriptions** (ISO/IEC
     /// 14496-12 §8.9.3). Each entry emits one `sgpd`
     /// (SampleGroupDescriptionBox) — the sibling box whose typed entries
@@ -924,19 +951,38 @@ impl MovMuxer {
     /// emitted by [`MovMuxer::set_sample_group_description`]. Pair the
     /// two for a conformant file (a non-zero index with no matching
     /// `sgpd` entry points at nothing).
+    ///
+    /// To emit the widely-compatible classic run-length `sbgp`
+    /// (SampleToGroupBox, §8.9.2) instead of the compact `csgp`, use
+    /// [`MovMuxer::add_sample_to_group_with_form`] with
+    /// [`SampleGroupBoxForm::Classic`].
     pub fn add_sample_to_group(
         &mut self,
         track_id: u32,
         assignment: SampleToGroupWrite,
     ) -> Result<()> {
-        let idx = (track_id as usize)
-            .checked_sub(1)
-            .filter(|&i| i < self.tracks.len())
-            .ok_or_else(|| {
-                Error::invalid(format!(
-                    "MOV muxer: add_sample_to_group unknown track id {track_id}"
-                ))
-            })?;
+        self.add_sample_to_group_with_form(track_id, assignment, SampleGroupBoxForm::Compact)
+    }
+
+    /// Attach a `stbl`-scope sample-to-group assignment, choosing
+    /// whether it is carried by the compact `csgp` (§8.9.5) or the
+    /// classic run-length `sbgp` (§8.9.2) — see [`SampleGroupBoxForm`].
+    ///
+    /// Identical to [`MovMuxer::add_sample_to_group`] in every other
+    /// respect (index-count validation, replace-by-`grouping_type`,
+    /// pairing with a sibling `sgpd`); the only difference is which box
+    /// the per-sample index mapping is written into. Both forms
+    /// round-trip back through `MovDemuxer` with the same per-sample
+    /// group-description indices (`sbgp` via
+    /// [`crate::sample_groups::parse_sbgp`], `csgp` via
+    /// [`crate::sample_groups::parse_csgp`]).
+    pub fn add_sample_to_group_with_form(
+        &mut self,
+        track_id: u32,
+        assignment: SampleToGroupWrite,
+        form: SampleGroupBoxForm,
+    ) -> Result<()> {
+        let idx = self.track_index(track_id, "add_sample_to_group")?;
         let want = self.tracks[idx].samples.len();
         if assignment.indices.len() != want {
             return Err(Error::invalid(format!(
@@ -945,15 +991,15 @@ impl MovMuxer {
             )));
         }
         // Replace-by-grouping_type so a caller correcting an assignment
-        // does not leave two `csgp` boxes naming the same `sgpd`.
+        // does not leave two boxes naming the same `sgpd`.
         if let Some(slot) = self.tracks[idx]
             .sample_to_groups
             .iter_mut()
-            .find(|g| g.grouping_type == assignment.grouping_type)
+            .find(|(g, _)| g.grouping_type == assignment.grouping_type)
         {
-            *slot = assignment;
+            *slot = (assignment, form);
         } else {
-            self.tracks[idx].sample_to_groups.push(assignment);
+            self.tracks[idx].sample_to_groups.push((assignment, form));
         }
         Ok(())
     }
@@ -2000,10 +2046,15 @@ fn build_stbl(
     for d in &t.sample_group_descriptions {
         push_atom(&mut stbl, *b"sgpd", &build_sgpd(d));
     }
-    // Compact Sample to Group Box(es) (ISO/IEC 14496-12:2020 §8.9.5) —
-    // one `csgp` per attached grouping_type, after the sample-aux pair.
-    for g in &t.sample_to_groups {
-        push_atom(&mut stbl, *b"csgp", &build_csgp(g));
+    // Sample to Group Box(es) (ISO/IEC 14496-12 §8.9.2 / §8.9.5) — one
+    // per attached grouping_type, after the sgpd boxes. The compact
+    // `csgp` or the classic run-length `sbgp` per the caller's chosen
+    // form.
+    for (g, form) in &t.sample_to_groups {
+        match form {
+            SampleGroupBoxForm::Compact => push_atom(&mut stbl, *b"csgp", &build_csgp(g)),
+            SampleGroupBoxForm::Classic => push_atom(&mut stbl, *b"sbgp", &build_sbgp(g)),
+        }
     }
     stbl
 }
@@ -2143,6 +2194,44 @@ fn build_csgp(g: &SampleToGroupWrite) -> Vec<u8> {
         csgp_push_bits(&mut bits, &mut bit_len, idx, index_width);
     }
     p.extend_from_slice(&bits);
+    p
+}
+
+/// Build a `sbgp` (SampleToGroupBox) payload from a per-sample index
+/// assignment — ISO/IEC 14496-12 §8.9.2.2. The classic run-length form:
+/// consecutive samples sharing one `group_description_index` collapse
+/// into a single `[sample_count][group_description_index]` row. Version
+/// 1 (carrying `grouping_type_parameter`) is used when the assignment
+/// supplies one; version 0 otherwise. Round-trips through
+/// [`parse_sbgp`].
+///
+/// [`parse_sbgp`]: crate::sample_groups::parse_sbgp
+fn build_sbgp(g: &SampleToGroupWrite) -> Vec<u8> {
+    // Run-length the per-sample indices into (sample_count, index) rows.
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for &idx in &g.indices {
+        match runs.last_mut() {
+            Some(last) if last.1 == idx => last.0 += 1,
+            _ => runs.push((1, idx)),
+        }
+    }
+    let version: u8 = if g.grouping_type_parameter.is_some() {
+        1
+    } else {
+        0
+    };
+    let mut p = Vec::with_capacity(8 + if version == 1 { 4 } else { 0 } + runs.len() * 8);
+    p.push(version);
+    p.extend_from_slice(&[0, 0, 0]); // flags
+    p.extend_from_slice(&g.grouping_type);
+    if let Some(gtp) = g.grouping_type_parameter {
+        p.extend_from_slice(&gtp.to_be_bytes());
+    }
+    p.extend_from_slice(&(runs.len() as u32).to_be_bytes()); // entry_count
+    for (count, idx) in runs {
+        p.extend_from_slice(&count.to_be_bytes());
+        p.extend_from_slice(&idx.to_be_bytes());
+    }
     p
 }
 
@@ -3913,11 +4002,14 @@ mod tests {
     #[test]
     fn build_stbl_emits_csgp_when_attached() {
         let mut t = track_with_offsets(&[0, 0, 0, 0]);
-        t.sample_to_groups.push(SampleToGroupWrite {
-            grouping_type: *b"roll",
-            grouping_type_parameter: None,
-            indices: vec![1, 1, 2, 2],
-        });
+        t.sample_to_groups.push((
+            SampleToGroupWrite {
+                grouping_type: *b"roll",
+                grouping_type_parameter: None,
+                indices: vec![1, 1, 2, 2],
+            },
+            SampleGroupBoxForm::Compact,
+        ));
         let stbl = build_stbl(&t, 0x40, false, None);
         assert!(
             stbl.windows(4).any(|w| w == b"csgp"),
