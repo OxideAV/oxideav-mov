@@ -58,7 +58,7 @@ use oxideav_core::{Error, Result};
 #[cfg(not(feature = "registry"))]
 use crate::standalone::{Error, Result};
 
-use crate::media_meta::Cslg;
+use crate::media_meta::{Clap, ColorParameters, Cslg, Fiel, Pasp};
 use std::io::Write;
 
 /// One sample destined for a track. The muxer copies `data` into the
@@ -623,6 +623,77 @@ pub enum MuxTrackKind {
     },
 }
 
+/// Typed visual sample-description extension boxes for a video track
+/// (ISO/IEC 14496-12 §12.1.4 / §12.1.5, QTFF p. 94 Table 3-2).
+///
+/// Attach via [`MovMuxer::set_visual_extensions`]. Each populated field
+/// emits its box into the trailing slot of the video `stsd` entry —
+/// after the 70-byte fixed body and after the codec-config
+/// `extra_stsd_atoms` (so a decoder's `avcC` / `hvcC` stays first, the
+/// conventional ordering). Every field defaults to `None`, in which
+/// case its box is omitted. The emitted boxes round-trip back through
+/// the demuxer's `scan_video_extensions` onto
+/// [`crate::track::SampleDescription`]'s `pasp` / `colr` / `clap` /
+/// `fiel` / `gamma` fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VisualExtensions {
+    /// Pixel Aspect Ratio (`pasp`, §12.1.4.2).
+    pub pasp: Option<Pasp>,
+    /// Colour Information (`colr`, Apple `nclc` / ISO `nclx` / ICC,
+    /// §12.1.5).
+    pub colr: Option<ColorParameters>,
+    /// Clean Aperture (`clap`, §12.1.4).
+    pub clap: Option<Clap>,
+    /// Field Handling (`fiel`, QTFF p. 94 Table 3-2). QuickTime-only.
+    pub fiel: Option<Fiel>,
+    /// Gamma (`gama`, QTFF p. 94 Table 3-2) as a 16.16 fixed-point
+    /// value — the same `u32` representation the demuxer surfaces on
+    /// `SampleDescription::gamma`.
+    pub gamma: Option<u32>,
+}
+
+impl VisualExtensions {
+    /// True when no extension box would be emitted.
+    pub fn is_empty(&self) -> bool {
+        self.pasp.is_none()
+            && self.colr.is_none()
+            && self.clap.is_none()
+            && self.fiel.is_none()
+            && self.gamma.is_none()
+    }
+
+    /// Serialise the populated extensions into a framed
+    /// `[size:u32 BE][type:[u8;4]][body]` blob, in a fixed canonical
+    /// order (`colr`, `pasp`, `clap`, `fiel`, `gama`). Box order inside
+    /// a sample entry is not significant to a conformant reader, so a
+    /// stable order is chosen for deterministic output.
+    fn to_framed_atoms(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut push = |fourcc: &[u8; 4], body: &[u8]| {
+            let size = (8 + body.len()) as u32;
+            out.extend_from_slice(&size.to_be_bytes());
+            out.extend_from_slice(fourcc);
+            out.extend_from_slice(body);
+        };
+        if let Some(c) = &self.colr {
+            push(b"colr", &c.to_body_bytes());
+        }
+        if let Some(p) = &self.pasp {
+            push(b"pasp", &p.to_body_bytes());
+        }
+        if let Some(c) = &self.clap {
+            push(b"clap", &c.to_body_bytes());
+        }
+        if let Some(f) = &self.fiel {
+            push(b"fiel", &f.to_body_bytes());
+        }
+        if let Some(g) = self.gamma {
+            push(b"gama", &g.to_be_bytes());
+        }
+        out
+    }
+}
+
 /// Internal per-track accumulator the muxer mutates as `add_track`
 /// is called. The actual layout pass runs in [`MovMuxer::write_to`].
 struct TrackWrite {
@@ -676,6 +747,11 @@ struct TrackWrite {
     /// non-empty the muxer emits a `meta` as a trailing child of this
     /// track's `trak` (after `udta`). Empty ⇒ no `meta` box.
     apple_metadata: Vec<MovMetaItem>,
+    /// Optional typed visual sample-description extension boxes
+    /// (`pasp` / `colr` / `clap` / `fiel` / `gama`, ISO/IEC 14496-12
+    /// §12.1.4 / §12.1.5, QTFF p. 94). Only meaningful for a video
+    /// track; ignored on audio. Empty ⇒ no extension boxes.
+    visual_extensions: VisualExtensions,
 }
 
 /// Fragmentation policy for [`MovMuxer::write_to_fragmented`].
@@ -861,6 +937,7 @@ impl MovMuxer {
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
+            visual_extensions: VisualExtensions::default(),
         });
         self.tracks.len() as u32
     }
@@ -1266,6 +1343,42 @@ impl MovMuxer {
                 ))
             })?;
         self.tracks[idx].apple_metadata = items.to_vec();
+        Ok(())
+    }
+
+    /// Attach typed visual sample-description extension boxes
+    /// (`pasp` / `colr` / `clap` / `fiel` / `gama`, ISO/IEC 14496-12
+    /// §12.1.4 / §12.1.5, QTFF p. 94) to a previously-added **video**
+    /// track.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// Each populated [`VisualExtensions`] field emits its box into the
+    /// video `stsd` entry's trailing slot — after the 70-byte fixed body
+    /// and after the codec-config `extra_stsd_atoms` passed to
+    /// `add_track`, so a decoder-config box (`avcC` / `hvcC`) stays
+    /// first. The boxes round-trip back onto
+    /// [`crate::track::SampleDescription`]'s `pasp` / `colr` / `clap` /
+    /// `fiel` / `gamma` fields. Replaces any extensions from a previous
+    /// call.
+    ///
+    /// Returns an error (leaving the track unchanged) for an unknown
+    /// `track_id` or when the track is an audio track — visual
+    /// extensions are only defined for a visual sample entry.
+    pub fn set_visual_extensions(&mut self, track_id: u32, ext: VisualExtensions) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_visual_extensions unknown track id {track_id}"
+                ))
+            })?;
+        if !matches!(self.tracks[idx].kind, MuxTrackKind::Video { .. }) {
+            return Err(Error::invalid(format!(
+                "MOV muxer: set_visual_extensions on non-video track {track_id} (visual extensions are only defined for a visual sample entry)"
+            )));
+        }
+        self.tracks[idx].visual_extensions = ext;
         Ok(())
     }
 
@@ -2368,7 +2481,10 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
             body[24..26].copy_from_slice(&width.to_be_bytes());
             body[26..28].copy_from_slice(&height.to_be_bytes());
             e.extend_from_slice(&body);
+            // Codec-config blobs (`avcC` / `hvcC` / …) come first by
+            // convention, then the typed visual extension boxes.
             e.extend_from_slice(&t.extra_stsd_atoms);
+            e.extend_from_slice(&t.visual_extensions.to_framed_atoms());
             wrap_stsd_entry(format, &e)
         }
         MuxTrackKind::Audio {
@@ -3201,6 +3317,7 @@ mod tests {
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
+            visual_extensions: VisualExtensions::default(),
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -3242,6 +3359,7 @@ mod tests {
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
+            visual_extensions: VisualExtensions::default(),
         }
     }
 
@@ -3334,6 +3452,162 @@ mod tests {
             assert_eq!(entry.pts(), dts + off as i64, "PTS at sample {i}");
             dts += entry.duration as i64;
         }
+    }
+
+    #[cfg(feature = "registry")]
+    #[test]
+    fn visual_extensions_roundtrip_through_demuxer() {
+        use crate::media_meta::{ColorParameters, ColorParametersKind, FieldOrdering};
+        // Build a one-sample video track decorated with every typed
+        // visual extension box and confirm each surfaces back on the
+        // demuxer's first sample description.
+        let mut m = MovMuxer::new().with_movie_timescale(600);
+        let tid = m.add_track(
+            MuxTrackKind::Video {
+                format: *b"mp4v",
+                width: 1920,
+                height: 1080,
+            },
+            30000,
+            vec![MuxSample {
+                data: vec![0u8; 16],
+                duration: 1000,
+                keyframe: true,
+                composition_offset: 0,
+            }],
+            &[],
+        );
+        let ext = VisualExtensions {
+            pasp: Some(Pasp {
+                h_spacing: 40,
+                v_spacing: 33,
+            }),
+            colr: Some(ColorParameters {
+                kind: ColorParametersKind::Nclx {
+                    primaries: 9,
+                    transfer: 16,
+                    matrix: 9,
+                    full_range: true,
+                },
+            }),
+            clap: Some(Clap {
+                clean_aperture_width_n: 1916,
+                clean_aperture_width_d: 1,
+                clean_aperture_height_n: 1076,
+                clean_aperture_height_d: 1,
+                horiz_off_n: -2,
+                horiz_off_d: 1,
+                vert_off_n: 2,
+                vert_off_d: 1,
+            }),
+            fiel: Some(Fiel {
+                field_count: 2,
+                field_ordering: 6,
+            }),
+            gamma: Some(0x0002_3333), // ~2.2 in 16.16
+        };
+        m.set_visual_extensions(tid, ext.clone())
+            .expect("set visual extensions");
+        let bytes = m
+            .encode_to_vec()
+            .expect("encode MOV with visual extensions");
+
+        let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+        let d = MovDemuxer::open(cur).expect("open MOV with visual extensions");
+        let sd = &d.tracks[0].sample_descriptions[0];
+        assert_eq!(sd.pasp, ext.pasp, "pasp round-trips");
+        assert_eq!(sd.colr, ext.colr, "colr round-trips");
+        assert_eq!(sd.clap, ext.clap, "clap round-trips");
+        assert_eq!(sd.fiel, ext.fiel, "fiel round-trips");
+        assert_eq!(sd.gamma, ext.gamma, "gama round-trips");
+        // Spot-check a typed accessor survived the round-trip.
+        assert_eq!(
+            sd.fiel.unwrap().ordering(),
+            Some(FieldOrdering::BottomFieldFirst)
+        );
+    }
+
+    #[cfg(feature = "registry")]
+    #[test]
+    fn visual_extensions_partial_only_emits_set_boxes() {
+        use crate::media_meta::{ColorParameters, ColorParametersKind};
+        // Only `colr` set ⇒ exactly one extension box, no pasp/clap/fiel.
+        let mut m = MovMuxer::new().with_movie_timescale(600);
+        let tid = m.add_track(
+            MuxTrackKind::Video {
+                format: *b"mp4v",
+                width: 64,
+                height: 48,
+            },
+            30000,
+            vec![MuxSample {
+                data: vec![0u8; 8],
+                duration: 1000,
+                keyframe: true,
+                composition_offset: 0,
+            }],
+            &[],
+        );
+        let ext = VisualExtensions {
+            colr: Some(ColorParameters {
+                kind: ColorParametersKind::Nclc {
+                    primaries: 1,
+                    transfer: 1,
+                    matrix: 1,
+                },
+            }),
+            ..Default::default()
+        };
+        m.set_visual_extensions(tid, ext).expect("set colr only");
+        let bytes = m.encode_to_vec().expect("encode");
+        let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+        let d = MovDemuxer::open(cur).expect("open");
+        let sd = &d.tracks[0].sample_descriptions[0];
+        assert!(sd.colr.is_some(), "colr present");
+        assert!(sd.pasp.is_none(), "no pasp emitted");
+        assert!(sd.clap.is_none(), "no clap emitted");
+        assert!(sd.fiel.is_none(), "no fiel emitted");
+        assert!(sd.gamma.is_none(), "no gama emitted");
+    }
+
+    #[test]
+    fn visual_extensions_rejected_on_audio_track() {
+        let mut m = MovMuxer::new();
+        let tid = m.add_track(
+            MuxTrackKind::Audio {
+                format: *b"mp4a",
+                channels: 2,
+                bits_per_sample: 16,
+                sample_rate: 48000,
+            },
+            48000,
+            vec![MuxSample {
+                data: vec![0u8; 4],
+                duration: 1024,
+                keyframe: true,
+                composition_offset: 0,
+            }],
+            &[],
+        );
+        let ext = VisualExtensions {
+            pasp: Some(Pasp {
+                h_spacing: 1,
+                v_spacing: 1,
+            }),
+            ..Default::default()
+        };
+        assert!(
+            m.set_visual_extensions(tid, ext).is_err(),
+            "visual extensions are not valid on an audio sample entry"
+        );
+    }
+
+    #[test]
+    fn visual_extensions_unknown_track_id_errors() {
+        let mut m = MovMuxer::new();
+        assert!(m
+            .set_visual_extensions(99, VisualExtensions::default())
+            .is_err());
     }
 
     #[test]
@@ -3526,6 +3800,7 @@ mod tests {
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
+            visual_extensions: VisualExtensions::default(),
         };
         assert!(build_stss(&t).is_none());
     }
@@ -3548,6 +3823,7 @@ mod tests {
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
+            visual_extensions: VisualExtensions::default(),
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -3598,6 +3874,7 @@ mod tests {
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
+            visual_extensions: VisualExtensions::default(),
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -3639,6 +3916,7 @@ mod tests {
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
+            visual_extensions: VisualExtensions::default(),
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows
