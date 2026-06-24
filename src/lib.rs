@@ -130,8 +130,9 @@ pub use metadata_sample::{
 };
 pub use muxer::{
     FragmentationMode, MovMetaItem, MovMetadata, MovMuxer, MuxEdit, MuxSample, MuxTrackKind,
-    SampleAuxStream, SampleToGroupWrite, META_NAMESPACE_MDTA, META_TYPE_BE_SIGNED_INT,
-    META_TYPE_BE_UNSIGNED_INT, META_TYPE_RAW, META_TYPE_UTF8, UTF8_INTL_TEXT_FLAG,
+    SampleAuxStream, SampleGroupDescriptionWrite, SampleToGroupWrite, META_NAMESPACE_MDTA,
+    META_TYPE_BE_SIGNED_INT, META_TYPE_BE_UNSIGNED_INT, META_TYPE_RAW, META_TYPE_UTF8,
+    UTF8_INTL_TEXT_FLAG,
 };
 pub use pdin::{parse_pdin, Pdin, PdinEntry};
 pub use pnot::{parse_pnot, Pnot, MAC_TO_UNIX_EPOCH_SECONDS, PNOT_BODY_LEN};
@@ -140,9 +141,10 @@ pub use reference::{parse_dref, DataReference, ReferenceMovie};
 pub use render::{ispe_dimensions, render_grid, render_iden, render_iovl, Rgba8Canvas};
 pub use sample_aux::{parse_saio, parse_saiz, AuxInfoType, FragmentSampleAux, Saio, Saiz};
 pub use sample_groups::{
-    decode_prol, decode_rap, decode_roll, parse_csgp, parse_sbgp, parse_sgpd, split_csgp_index,
-    AudioPreRoll, CsgpIndex, RollRecovery, SampleGroupDescription, SampleGroupDescriptionEntry,
-    SampleToGroup, SampleToGroupEntry, VisualRandomAccess, CSGP_FRAGMENT_LOCAL_BIT,
+    decode_prol, decode_rap, decode_roll, decode_sap, decode_tele, parse_csgp, parse_sbgp,
+    parse_sgpd, split_csgp_index, AudioPreRoll, CsgpIndex, RollRecovery, SampleGroupDescription,
+    SampleGroupDescriptionEntry, SampleToGroup, SampleToGroupEntry, StreamAccessPoint,
+    TemporalLevel, VisualRandomAccess, CSGP_FRAGMENT_LOCAL_BIT,
 };
 pub use sample_table::{
     parse_padb, parse_sdtp, parse_stdp, parse_stsh, parse_stz2, parse_subs, IsLeading,

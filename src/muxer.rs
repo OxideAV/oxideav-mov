@@ -172,6 +172,97 @@ pub struct SampleToGroupWrite {
     pub indices: Vec<u32>,
 }
 
+/// The sibling Sample Group Description Box (`sgpd`, ISO/IEC 14496-12
+/// §8.9.3) a [`SampleToGroupWrite`]'s indices reference.
+///
+/// A `csgp` / `sbgp` only carries a per-sample 1-based
+/// `group_description_index`; the descriptions those indices select
+/// live in a separate `sgpd` of the matching `grouping_type`. Without
+/// the `sgpd` a non-zero index points at nothing and the file is
+/// non-conformant (§8.9.3 — "The associated SampleToGroup shall
+/// indicate the same value for the grouping type"). This struct is the
+/// write-side counterpart that emits it.
+///
+/// Entries are 1-based: `entries[0]` is `group_description_index == 1`.
+/// Each entry is the raw `SampleGroupEntry` payload for the
+/// `grouping_type` (the §10 typed-entry constructors below build the
+/// standard ones). The box is written **version 1** with a
+/// `default_length` equal to the common entry length when every entry
+/// is the same size, or with `default_length == 0` plus a per-entry
+/// `description_length` prefix when the lengths vary (§8.9.3.2 — the
+/// recommended encoding; version 0 is deprecated because its entries
+/// carry no size).
+///
+/// The read-side counterpart is
+/// [`crate::sample_groups::parse_sgpd`] /
+/// [`crate::sample_groups::SampleGroupDescription`]; a file written
+/// with this round-trips back through `MovDemuxer` with the same
+/// per-entry payloads, and the typed decoders
+/// ([`crate::sample_groups::decode_roll`], …) recover the structured
+/// fields.
+#[derive(Clone, Debug)]
+pub struct SampleGroupDescriptionWrite {
+    /// `grouping_type` FourCC — must equal the matching
+    /// [`SampleToGroupWrite::grouping_type`].
+    pub grouping_type: [u8; 4],
+    /// One raw `SampleGroupEntry` payload per group description, in
+    /// `group_description_index` order (entry 0 ⇒ index 1). Use the
+    /// `roll_entry` / `prol_entry` / `rap_entry` / `tele_entry` /
+    /// `sap_entry` constructors for the standard §10 types, or supply
+    /// raw bytes for a codec-specific grouping.
+    pub entries: Vec<Vec<u8>>,
+}
+
+impl SampleGroupDescriptionWrite {
+    /// A `sgpd` of `grouping_type` with the given raw entry payloads
+    /// (one per `group_description_index`, in 1-based order).
+    pub fn new(grouping_type: [u8; 4], entries: Vec<Vec<u8>>) -> Self {
+        Self {
+            grouping_type,
+            entries,
+        }
+    }
+
+    /// A `'roll'` VisualRollRecoveryEntry / AudioRollRecoveryEntry
+    /// payload (§10.1.1.2): `signed int(16) roll_distance`. Round-trips
+    /// through [`crate::sample_groups::decode_roll`].
+    pub fn roll_entry(roll_distance: i16) -> Vec<u8> {
+        roll_distance.to_be_bytes().to_vec()
+    }
+
+    /// A `'prol'` AudioPreRollEntry payload (§10.1.1.2):
+    /// `signed int(16) roll_distance`. Round-trips through
+    /// [`crate::sample_groups::decode_prol`].
+    pub fn prol_entry(roll_distance: i16) -> Vec<u8> {
+        roll_distance.to_be_bytes().to_vec()
+    }
+
+    /// A `'rap '` VisualRandomAccessEntry payload (§10.4.2):
+    /// `1 bit num_leading_samples_known | 7 bits num_leading_samples`.
+    /// Round-trips through [`crate::sample_groups::decode_rap`].
+    /// `num_leading_samples` is masked to 7 bits.
+    pub fn rap_entry(num_leading_samples_known: bool, num_leading_samples: u8) -> Vec<u8> {
+        let b = (u8::from(num_leading_samples_known) << 7) | (num_leading_samples & 0x7F);
+        vec![b]
+    }
+
+    /// A `'tele'` TemporalLevelEntry payload (§10.5.2):
+    /// `1 bit level_independently_decodable | 7 bits reserved`.
+    /// Round-trips through [`crate::sample_groups::decode_tele`].
+    pub fn tele_entry(level_independently_decodable: bool) -> Vec<u8> {
+        vec![u8::from(level_independently_decodable) << 7]
+    }
+
+    /// A `'sap '` SAPEntry payload (§10.6.2):
+    /// `1 bit dependent_flag | 3 bits reserved | 4 bits SAP_type`.
+    /// Round-trips through [`crate::sample_groups::decode_sap`].
+    /// `sap_type` is masked to 4 bits.
+    pub fn sap_entry(dependent_flag: bool, sap_type: u8) -> Vec<u8> {
+        let b = (u8::from(dependent_flag) << 7) | (sap_type & 0x0F);
+        vec![b]
+    }
+}
+
 /// One entry of a track's edit list, destined for an `edts > elst`
 /// (Edit List Box, QTFF p. 47 / ISO/IEC 14496-12 §8.6.6).
 ///
@@ -511,6 +602,14 @@ struct TrackWrite {
     /// (CompactSampleToGroupBox); multiple entries (distinct
     /// `grouping_type`s) emit one `csgp` each, in insertion order.
     sample_to_groups: Vec<SampleToGroupWrite>,
+    /// Optional `stbl`-scope sample-group **descriptions** (ISO/IEC
+    /// 14496-12 §8.9.3). Each entry emits one `sgpd`
+    /// (SampleGroupDescriptionBox) — the sibling box whose typed entries
+    /// the `csgp`/`sbgp` per-sample indices reference. One `sgpd` per
+    /// `grouping_type`, written before the `csgp` boxes per §8.9.3's
+    /// containment order. Empty ⇒ no `sgpd` (a `csgp` then only carries
+    /// the index mapping with the description supplied out-of-band).
+    sample_group_descriptions: Vec<SampleGroupDescriptionWrite>,
     /// Optional edit list (QTFF p. 47 / ISO/IEC 14496-12 §8.6.6). When
     /// non-empty, the muxer emits an `edts > elst` between `tkhd` and
     /// `mdia` inside the track's `trak`. Empty ⇒ no `edts` box (the
@@ -705,6 +804,7 @@ impl MovMuxer {
             extra_stsd_atoms: extra_stsd_atoms.to_vec(),
             sample_aux: None,
             sample_to_groups: Vec::new(),
+            sample_group_descriptions: Vec::new(),
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
@@ -791,10 +891,13 @@ impl MovMuxer {
     ///
     /// Multiple calls with distinct `grouping_type`s accumulate (one
     /// `csgp` per call); a second call with a `grouping_type` already
-    /// present **replaces** the prior assignment for that type. The
-    /// muxer does not emit the sibling `sgpd` — the caller supplies the
-    /// group descriptions through `extra` `stbl` content or a follow-up
-    /// API; `csgp` only carries the index mapping.
+    /// present **replaces** the prior assignment for that type.
+    ///
+    /// The `csgp` only carries the per-sample index mapping; the typed
+    /// descriptions those indices reference live in a sibling `sgpd`
+    /// emitted by [`MovMuxer::set_sample_group_description`]. Pair the
+    /// two for a conformant file (a non-zero index with no matching
+    /// `sgpd` entry points at nothing).
     pub fn add_sample_to_group(
         &mut self,
         track_id: u32,
@@ -825,6 +928,70 @@ impl MovMuxer {
             *slot = assignment;
         } else {
             self.tracks[idx].sample_to_groups.push(assignment);
+        }
+        Ok(())
+    }
+
+    /// Attach a Sample Group Description Box (`sgpd`, ISO/IEC 14496-12
+    /// §8.9.3) to a previously-added track — the sibling box whose typed
+    /// entries a [`SampleToGroupWrite`]'s per-sample indices reference.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// The `sgpd` is written **version 1** inside the track's `stbl`,
+    /// immediately before the `csgp` boxes (§8.9.3's containment order).
+    /// Entries are 1-based: `entries[0]` is the description selected by
+    /// `group_description_index == 1`. When every entry is the same
+    /// length the box uses a constant `default_length`; otherwise it
+    /// uses `default_length == 0` with a per-entry `description_length`
+    /// prefix (§8.9.3.2).
+    ///
+    /// Build the standard §10 entry payloads with
+    /// [`SampleGroupDescriptionWrite::roll_entry`] /
+    /// [`prol_entry`](SampleGroupDescriptionWrite::prol_entry) /
+    /// [`rap_entry`](SampleGroupDescriptionWrite::rap_entry) /
+    /// [`tele_entry`](SampleGroupDescriptionWrite::tele_entry) /
+    /// [`sap_entry`](SampleGroupDescriptionWrite::sap_entry), or supply
+    /// raw bytes for a codec-specific grouping.
+    ///
+    /// Multiple calls with distinct `grouping_type`s accumulate (one
+    /// `sgpd` per call); a second call with a `grouping_type` already
+    /// present **replaces** the prior description for that type (§8.9.3 —
+    /// "at most one instance of this box with a particular grouping type
+    /// in a Sample Table Box"). An empty `entries` list is rejected (a
+    /// `sgpd` with no descriptions is pointless and some readers reject
+    /// `entry_count == 0`).
+    ///
+    /// The file round-trips back through `MovDemuxer`:
+    /// [`crate::sample_groups::parse_sgpd`] recovers the per-entry
+    /// payloads and the typed decoders recover the structured fields.
+    pub fn set_sample_group_description(
+        &mut self,
+        track_id: u32,
+        description: SampleGroupDescriptionWrite,
+    ) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_sample_group_description unknown track id {track_id}"
+                ))
+            })?;
+        if description.entries.is_empty() {
+            return Err(Error::invalid(format!(
+                "MOV muxer: sgpd for track {track_id} must carry at least one entry"
+            )));
+        }
+        // Replace-by-grouping_type so the track never carries two `sgpd`
+        // boxes naming the same grouping_type (§8.9.3 forbids it).
+        if let Some(slot) = self.tracks[idx]
+            .sample_group_descriptions
+            .iter_mut()
+            .find(|d| d.grouping_type == description.grouping_type)
+        {
+            *slot = description;
+        } else {
+            self.tracks[idx].sample_group_descriptions.push(description);
         }
         Ok(())
     }
@@ -1737,12 +1904,53 @@ fn build_stbl(
         push_atom(&mut stbl, *b"saiz", &build_saiz(aux));
         push_atom(&mut stbl, *b"saio", &build_saio(aux, off));
     }
+    // Sample Group Description Box(es) (ISO/IEC 14496-12 §8.9.3) — one
+    // `sgpd` per attached grouping_type, written before the
+    // `sbgp`/`csgp` boxes that reference them (§8.9.3 containment order).
+    for d in &t.sample_group_descriptions {
+        push_atom(&mut stbl, *b"sgpd", &build_sgpd(d));
+    }
     // Compact Sample to Group Box(es) (ISO/IEC 14496-12:2020 §8.9.5) —
     // one `csgp` per attached grouping_type, after the sample-aux pair.
     for g in &t.sample_to_groups {
         push_atom(&mut stbl, *b"csgp", &build_csgp(g));
     }
     stbl
+}
+
+/// Build a `sgpd` (SampleGroupDescriptionBox) payload — ISO/IEC
+/// 14496-12 §8.9.3.2. Written **version 1**: when every entry shares
+/// one length the box uses a constant `default_length` (no per-entry
+/// prefix); otherwise `default_length == 0` with a `description_length`
+/// `u32` before each entry. Version 1 is preferred over the deprecated
+/// version 0 because the entry sizes are explicit on disk (§8.9.3.2
+/// NOTE — version-0 entries carry no signalled size). Round-trips
+/// through [`parse_sgpd`].
+///
+/// [`parse_sgpd`]: crate::sample_groups::parse_sgpd
+fn build_sgpd(d: &SampleGroupDescriptionWrite) -> Vec<u8> {
+    // A constant default_length is usable only when every entry is the
+    // same length and that length is non-zero (default_length == 0 is
+    // the sentinel for "variable, prefixed"). An empty entry list is
+    // rejected upstream at set_sample_group_description.
+    let first_len = d.entries.first().map(Vec::len).unwrap_or(0);
+    let uniform = first_len != 0 && d.entries.iter().all(|e| e.len() == first_len);
+    let default_length = if uniform { first_len as u32 } else { 0 };
+
+    let mut p = Vec::new();
+    p.push(1); // version 1
+    p.extend_from_slice(&[0, 0, 0]); // flags
+    p.extend_from_slice(&d.grouping_type);
+    p.extend_from_slice(&default_length.to_be_bytes());
+    p.extend_from_slice(&(d.entries.len() as u32).to_be_bytes()); // entry_count
+    for entry in &d.entries {
+        if default_length == 0 {
+            // Variable-length: prefix each entry with its size.
+            p.extend_from_slice(&(entry.len() as u32).to_be_bytes());
+        }
+        p.extend_from_slice(entry);
+    }
+    p
 }
 
 /// Minimal 2-bit size code (per `docs/container/isobmff/
@@ -2737,6 +2945,7 @@ mod tests {
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
             sample_to_groups: Vec::new(),
+            sample_group_descriptions: Vec::new(),
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
@@ -2776,6 +2985,7 @@ mod tests {
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
             sample_to_groups: Vec::new(),
+            sample_group_descriptions: Vec::new(),
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
@@ -3058,6 +3268,7 @@ mod tests {
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
             sample_to_groups: Vec::new(),
+            sample_group_descriptions: Vec::new(),
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
@@ -3078,6 +3289,7 @@ mod tests {
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
             sample_to_groups: Vec::new(),
+            sample_group_descriptions: Vec::new(),
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
@@ -3126,6 +3338,7 @@ mod tests {
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
             sample_to_groups: Vec::new(),
+            sample_group_descriptions: Vec::new(),
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
@@ -3165,6 +3378,7 @@ mod tests {
             extra_stsd_atoms: Vec::new(),
             sample_aux: None,
             sample_to_groups: Vec::new(),
+            sample_group_descriptions: Vec::new(),
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
