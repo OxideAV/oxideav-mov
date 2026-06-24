@@ -58,6 +58,7 @@ use oxideav_core::{Error, Result};
 #[cfg(not(feature = "registry"))]
 use crate::standalone::{Error, Result};
 
+use crate::media_meta::Cslg;
 use std::io::Write;
 
 /// One sample destined for a track. The muxer copies `data` into the
@@ -261,6 +262,24 @@ impl SampleGroupDescriptionWrite {
         let b = (u8::from(dependent_flag) << 7) | (sap_type & 0x0F);
         vec![b]
     }
+}
+
+/// How a track's Composition to Decode Box (`cslg`, ISO/IEC 14496-12
+/// §8.6.1.4) is sourced when [`MovMuxer::set_cslg`] /
+/// [`MovMuxer::auto_cslg`] is used.
+///
+/// `cslg` summarises the composition-vs-decode timeline of a track that
+/// carries a `ctts` (B-frame reorder), letting a player derive the
+/// presentation-timeline bounds without scanning every `ctts` run
+/// (§8.6.1.4.1). It is written into the `stbl` right after the `ctts`
+/// box (§6.2.3 box order).
+#[derive(Clone, Copy, Debug)]
+enum CslgWrite {
+    /// Derive all five fields from the track's per-sample composition
+    /// offsets + durations at layout time (see [`derive_cslg`]).
+    Auto,
+    /// Use the caller-supplied bounds verbatim.
+    Explicit(Cslg),
 }
 
 /// One entry of a track's edit list, destined for an `edts > elst`
@@ -610,6 +629,12 @@ struct TrackWrite {
     /// containment order. Empty ⇒ no `sgpd` (a `csgp` then only carries
     /// the index mapping with the description supplied out-of-band).
     sample_group_descriptions: Vec<SampleGroupDescriptionWrite>,
+    /// Optional `stbl`-scope Composition to Decode Box (`cslg`, ISO/IEC
+    /// 14496-12 §8.6.1.4). When set the muxer emits a `cslg` after the
+    /// `ctts` box, either auto-derived from the track's per-sample
+    /// composition offsets + durations or carrying explicit bounds.
+    /// `None` ⇒ no `cslg`.
+    cslg: Option<CslgWrite>,
     /// Optional edit list (QTFF p. 47 / ISO/IEC 14496-12 §8.6.6). When
     /// non-empty, the muxer emits an `edts > elst` between `tkhd` and
     /// `mdia` inside the track's `trak`. Empty ⇒ no `edts` box (the
@@ -805,6 +830,7 @@ impl MovMuxer {
             sample_aux: None,
             sample_to_groups: Vec::new(),
             sample_group_descriptions: Vec::new(),
+            cslg: None,
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
@@ -994,6 +1020,63 @@ impl MovMuxer {
             self.tracks[idx].sample_group_descriptions.push(description);
         }
         Ok(())
+    }
+
+    /// Emit an auto-derived Composition to Decode Box (`cslg`, ISO/IEC
+    /// 14496-12 §8.6.1.4) inside a previously-added track's `stbl`.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// The five `cslg` fields are computed from the track's per-sample
+    /// composition offsets (`MuxSample.composition_offset`) and
+    /// durations at layout time:
+    ///
+    /// * `composition_to_dts_shift` — `max(0, -min_offset)`, the shift
+    ///   that keeps every shifted CTS at or above its DTS (§8.6.1.4.3).
+    /// * `least` / `greatest_decode_to_display_delta` — the min / max
+    ///   composition offset across the track.
+    /// * `composition_start_time` — the earliest composition time
+    ///   (`min(DTS_i + offset_i)`).
+    /// * `composition_end_time` — the latest composition time plus its
+    ///   sample duration (`max(DTS_i + offset_i + duration_i)`).
+    ///
+    /// `cslg` only makes sense alongside a `ctts`; calling this on a
+    /// track whose samples all have `composition_offset == 0` is a
+    /// no-op-shaped box (all-zero deltas) but is still emitted so a
+    /// caller that opts in always gets one. The box auto-promotes from
+    /// version 0 (`int(32)`) to version 1 (`int(64)`) the moment any
+    /// field leaves the signed-32-bit range. Round-trips through
+    /// [`crate::media_meta::parse_cslg`].
+    pub fn auto_cslg(&mut self, track_id: u32) -> Result<()> {
+        let idx = self.track_index(track_id, "auto_cslg")?;
+        self.tracks[idx].cslg = Some(CslgWrite::Auto);
+        Ok(())
+    }
+
+    /// Emit a Composition to Decode Box (`cslg`, ISO/IEC 14496-12
+    /// §8.6.1.4) with caller-supplied bounds inside a previously-added
+    /// track's `stbl`.
+    ///
+    /// Use this when the bounds are already known (e.g. carried over
+    /// from a source file) rather than re-derived from the samples; see
+    /// [`MovMuxer::auto_cslg`] for the derive-from-samples path. The box
+    /// auto-promotes to version 1 when any field leaves the signed
+    /// 32-bit range. Round-trips through
+    /// [`crate::media_meta::parse_cslg`].
+    pub fn set_cslg(&mut self, track_id: u32, cslg: Cslg) -> Result<()> {
+        let idx = self.track_index(track_id, "set_cslg")?;
+        self.tracks[idx].cslg = Some(CslgWrite::Explicit(cslg));
+        Ok(())
+    }
+
+    /// Resolve a 1-based `track_id` to a `self.tracks` index, or an
+    /// error naming the calling method.
+    fn track_index(&self, track_id: u32, method: &str) -> Result<usize> {
+        (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!("MOV muxer: {method} unknown track id {track_id}"))
+            })
     }
 
     /// Attach an edit list to a previously-added track, emitted as an
@@ -1887,6 +1970,13 @@ fn build_stbl(
     if let Some(ctts_atom) = build_ctts(t) {
         push_atom(&mut stbl, *b"ctts", &ctts_atom);
     }
+    // Composition to Decode Box (§8.6.1.4) — summarises the
+    // composition-vs-decode timeline. §6.2.3 orders it right after
+    // `ctts`. Emitted only when the caller opted in via auto_cslg /
+    // set_cslg.
+    if let Some(cslg_atom) = build_cslg(t) {
+        push_atom(&mut stbl, *b"cslg", &cslg_atom);
+    }
     if let Some(stss_atom) = build_stss(t) {
         push_atom(&mut stbl, *b"stss", &stss_atom);
     }
@@ -2297,6 +2387,78 @@ fn build_ctts(t: &TrackWrite) -> Option<Vec<u8>> {
         // of a non-negative `i32` equal its unsigned encoding, so the
         // same write is correct for both versions.
         p.extend_from_slice(&offset.to_be_bytes());
+    }
+    Some(p)
+}
+
+/// Derive a [`Cslg`] from a track's per-sample composition offsets and
+/// durations (ISO/IEC 14496-12 §8.6.1.4.3). DTS is the running sum of
+/// the preceding sample durations; CT_i = DTS_i + offset_i. Returns the
+/// all-zero `Cslg` for an empty track.
+fn derive_cslg(t: &TrackWrite) -> Cslg {
+    if t.samples.is_empty() {
+        return Cslg::default();
+    }
+    let mut dts: i64 = 0;
+    let mut least = i64::MAX;
+    let mut greatest = i64::MIN;
+    let mut start = i64::MAX;
+    let mut end = i64::MIN;
+    for s in &t.samples {
+        let offset = s.composition_offset as i64;
+        let ct = dts + offset;
+        least = least.min(offset);
+        greatest = greatest.max(offset);
+        start = start.min(ct);
+        end = end.max(ct + s.duration as i64);
+        dts += s.duration as i64;
+    }
+    // compositionToDTSShift keeps every shifted CTS at or above its DTS:
+    // CTS_i + shift >= DTS_i  ⇔  shift >= -offset_i for all i  ⇔
+    // shift >= -least. A non-negative shift is only needed when some
+    // offset is negative; otherwise 0 (§8.6.1.4.3 — the value is 0 when
+    // no reordering pulls a CTS below its DTS).
+    let composition_to_dts_shift = (-least).max(0);
+    Cslg {
+        composition_to_dts_shift,
+        least_decode_to_display_delta: least,
+        greatest_decode_to_display_delta: greatest,
+        composition_start_time: start,
+        composition_end_time: end,
+    }
+}
+
+/// Build a `cslg` (Composition to Decode Box) payload — ISO/IEC
+/// 14496-12 §8.6.1.4.2. Five signed fields, version 0 (`int(32)`) when
+/// every value fits the signed-32-bit range, else version 1
+/// (`int(64)`). `None` when the track opted out (`t.cslg == None`).
+/// Round-trips through [`parse_cslg`].
+///
+/// [`parse_cslg`]: crate::media_meta::parse_cslg
+fn build_cslg(t: &TrackWrite) -> Option<Vec<u8>> {
+    let cslg = match t.cslg? {
+        CslgWrite::Auto => derive_cslg(t),
+        CslgWrite::Explicit(c) => c,
+    };
+    let fields = [
+        cslg.composition_to_dts_shift,
+        cslg.least_decode_to_display_delta,
+        cslg.greatest_decode_to_display_delta,
+        cslg.composition_start_time,
+        cslg.composition_end_time,
+    ];
+    let need_v1 = fields
+        .iter()
+        .any(|&v| v < i32::MIN as i64 || v > i32::MAX as i64);
+    let mut p = Vec::with_capacity(4 + if need_v1 { 40 } else { 20 });
+    p.push(if need_v1 { 1 } else { 0 }); // version
+    p.extend_from_slice(&[0, 0, 0]); // flags
+    for v in fields {
+        if need_v1 {
+            p.extend_from_slice(&v.to_be_bytes());
+        } else {
+            p.extend_from_slice(&(v as i32).to_be_bytes());
+        }
     }
     Some(p)
 }
@@ -2946,6 +3108,7 @@ mod tests {
             sample_aux: None,
             sample_to_groups: Vec::new(),
             sample_group_descriptions: Vec::new(),
+            cslg: None,
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
@@ -2986,6 +3149,7 @@ mod tests {
             sample_aux: None,
             sample_to_groups: Vec::new(),
             sample_group_descriptions: Vec::new(),
+            cslg: None,
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
@@ -3269,6 +3433,7 @@ mod tests {
             sample_aux: None,
             sample_to_groups: Vec::new(),
             sample_group_descriptions: Vec::new(),
+            cslg: None,
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
@@ -3290,6 +3455,7 @@ mod tests {
             sample_aux: None,
             sample_to_groups: Vec::new(),
             sample_group_descriptions: Vec::new(),
+            cslg: None,
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
@@ -3339,6 +3505,7 @@ mod tests {
             sample_aux: None,
             sample_to_groups: Vec::new(),
             sample_group_descriptions: Vec::new(),
+            cslg: None,
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
@@ -3379,6 +3546,7 @@ mod tests {
             sample_aux: None,
             sample_to_groups: Vec::new(),
             sample_group_descriptions: Vec::new(),
+            cslg: None,
             edits: Vec::new(),
             metadata: Vec::new(),
             apple_metadata: Vec::new(),

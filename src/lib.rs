@@ -118,9 +118,9 @@ pub use kind::{find_kinds_in_udta, parse_kind, KindEntry};
 pub use leva::{parse_leva, AssignmentType, Leva, LevaLevel};
 pub use matte::{parse_kmat, parse_matt, CompressedMatte, Matte, MIN_IMAGE_DESCRIPTION_SIZE};
 pub use media_meta::{
-    channel_mask_for_layout_tag, parse_fiel, parse_mjht, parse_mjqt, Chan, ChanDescription, Clap,
-    ColorParameters, ColorParametersKind, Cslg, Fiel, FieldOrdering, MetaKeyValue, Mjht, Mjqt,
-    Pasp, Tapt, FIEL_BODY_LEN,
+    channel_mask_for_layout_tag, parse_cslg, parse_fiel, parse_mjht, parse_mjqt, Chan,
+    ChanDescription, Clap, ColorParameters, ColorParametersKind, Cslg, Fiel, FieldOrdering,
+    MetaKeyValue, Mjht, Mjqt, Pasp, Tapt, FIEL_BODY_LEN,
 };
 pub use metadata_sample::{
     parse_btrt, parse_metadata_sample_entry, parse_mett, parse_metx, parse_sbtt, parse_stpp,
