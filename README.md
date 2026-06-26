@@ -240,6 +240,12 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   (self-references allowed). Round-trips through `parse_tref` onto
   `Track::references` and the typed `chapter_track_ref` /
   `timecode_track_ref` / `timecode_track_index` accessors.
+- `set_track_aperture(track_id, Tapt)` emits a `tapt` (Track Aperture
+  Modes box) on a video track, carrying whichever of `clef` (Clean
+  Aperture) / `prof` (Production Aperture) / `enof` (Encoded Pixels)
+  rectangles are populated (`TaptDims::from_pixels` / `to_body_bytes`,
+  16.16 fixed-point). Round-trips through `parse_tapt` onto
+  `Track::tapt`; non-video tracks and an empty `Tapt` are rejected.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.

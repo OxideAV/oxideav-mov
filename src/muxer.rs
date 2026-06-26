@@ -58,7 +58,7 @@ use oxideav_core::{Error, Result};
 #[cfg(not(feature = "registry"))]
 use crate::standalone::{Error, Result};
 
-use crate::media_meta::{Clap, ColorParameters, Cslg, Fiel, Pasp};
+use crate::media_meta::{Clap, ColorParameters, Cslg, Fiel, Pasp, Tapt};
 use std::io::Write;
 
 /// One sample destined for a track. The muxer copies `data` into the
@@ -758,6 +758,11 @@ struct TrackWrite {
     /// one child atom per [`TrackReference`] (FourCC = reference type,
     /// body = packed `u32` referenced track ids). Empty ⇒ no `tref`.
     track_references: Vec<TrackReference>,
+    /// Optional Track Aperture Modes box (`tapt`, Apple "Movie Atoms").
+    /// When `Some` the muxer emits a `tapt` (with whichever of `clef` /
+    /// `prof` / `enof` children are populated) as a `trak` child. Only
+    /// meaningful for a video track. `None` ⇒ no `tapt`.
+    tapt: Option<Tapt>,
 }
 
 /// One track-reference declaration written by
@@ -984,6 +989,7 @@ impl MovMuxer {
             apple_metadata: Vec::new(),
             visual_extensions: VisualExtensions::default(),
             track_references: Vec::new(),
+            tapt: None,
         });
         self.tracks.len() as u32
     }
@@ -1353,6 +1359,45 @@ impl MovMuxer {
             }
         }
         self.tracks[idx].track_references = references.to_vec();
+        Ok(())
+    }
+
+    /// Attach a Track Aperture Modes box (`tapt`) to a previously-added
+    /// video track, emitted as a `trak` child.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// The [`Tapt`] carries up to three aperture rectangles in 16.16
+    /// fixed-point pixels — `clef` (Clean Aperture), `prof` (Production
+    /// Aperture), `enof` (Encoded Pixels) — each emitted as a child sub-
+    /// atom (`[ver+flags][width_fp][height_fp]`) only when present.
+    /// Use [`TaptDims::from_pixels`] to build a rectangle from integer
+    /// dimensions.
+    ///
+    /// Rejects an unknown `track_id`, a non-video track (aperture modes
+    /// only apply to a visual track), and an all-`None` [`Tapt`] (no
+    /// rectangle to write). The box round-trips through the read-side
+    /// `parse_tapt` onto [`crate::track::Track::tapt`]. Replaces any
+    /// aperture previously attached to the same track.
+    pub fn set_track_aperture(&mut self, track_id: u32, tapt: Tapt) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_track_aperture unknown track id {track_id}"
+                ))
+            })?;
+        if !matches!(self.tracks[idx].kind, MuxTrackKind::Video { .. }) {
+            return Err(Error::invalid(format!(
+                "MOV muxer: set_track_aperture track id {track_id} is not a video track (aperture modes apply only to a visual track)"
+            )));
+        }
+        if tapt.clef.is_none() && tapt.prof.is_none() && tapt.enof.is_none() {
+            return Err(Error::invalid(
+                "MOV muxer: set_track_aperture given an empty Tapt (no clef/prof/enof rectangle)",
+            ));
+        }
+        self.tracks[idx].tapt = Some(tapt);
         Ok(())
     }
 
@@ -1957,6 +2002,12 @@ fn build_trak(
 ) -> Vec<u8> {
     let mut trak = Vec::new();
     push_atom(&mut trak, *b"tkhd", &build_tkhd(t, track_id, movie_ts));
+    // Track Aperture Modes box (`tapt`) — an early `trak` child (Apple
+    // "Movie Atoms"). Carries the clean / production / encoded aperture
+    // rectangles; only the populated children are emitted.
+    if let Some(tapt) = &t.tapt {
+        push_atom(&mut trak, *b"tapt", &build_tapt(tapt));
+    }
     // edts > elst between tkhd and mdia (QTFF p. 46, Figure 2-8: the
     // edit atom precedes the media atom inside a track atom).
     if !t.edits.is_empty() {
@@ -2041,6 +2092,23 @@ fn build_udta(items: &[MovMetadata]) -> Vec<u8> {
         }
     }
     udta
+}
+
+/// Build a `tapt` (Track Aperture Modes Box) payload — one child sub-
+/// atom (`clef` / `prof` / `enof`) per populated aperture rectangle
+/// (Apple "Movie Atoms"). Inverse of the read-side `parse_tapt`.
+fn build_tapt(tapt: &Tapt) -> Vec<u8> {
+    let mut out = Vec::new();
+    if let Some(d) = &tapt.clef {
+        push_atom(&mut out, *b"clef", &d.to_body_bytes());
+    }
+    if let Some(d) = &tapt.prof {
+        push_atom(&mut out, *b"prof", &d.to_body_bytes());
+    }
+    if let Some(d) = &tapt.enof {
+        push_atom(&mut out, *b"enof", &d.to_body_bytes());
+    }
+    out
 }
 
 /// Build a `tref` (Track Reference Box) payload — one child atom per
@@ -3442,6 +3510,7 @@ mod tests {
             apple_metadata: Vec::new(),
             visual_extensions: VisualExtensions::default(),
             track_references: Vec::new(),
+            tapt: None,
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -3485,6 +3554,7 @@ mod tests {
             apple_metadata: Vec::new(),
             visual_extensions: VisualExtensions::default(),
             track_references: Vec::new(),
+            tapt: None,
         }
     }
 
@@ -3927,6 +3997,7 @@ mod tests {
             apple_metadata: Vec::new(),
             visual_extensions: VisualExtensions::default(),
             track_references: Vec::new(),
+            tapt: None,
         };
         assert!(build_stss(&t).is_none());
     }
@@ -3951,6 +4022,7 @@ mod tests {
             apple_metadata: Vec::new(),
             visual_extensions: VisualExtensions::default(),
             track_references: Vec::new(),
+            tapt: None,
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -4003,6 +4075,7 @@ mod tests {
             apple_metadata: Vec::new(),
             visual_extensions: VisualExtensions::default(),
             track_references: Vec::new(),
+            tapt: None,
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -4046,6 +4119,7 @@ mod tests {
             apple_metadata: Vec::new(),
             visual_extensions: VisualExtensions::default(),
             track_references: Vec::new(),
+            tapt: None,
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

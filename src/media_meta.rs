@@ -510,6 +510,26 @@ impl TaptDims {
     pub fn height(&self) -> u32 {
         self.height_fp >> 16
     }
+
+    /// Construct from integer pixel dimensions (converts to 16.16
+    /// fixed-point — the on-disk representation). The fractional part
+    /// is zero, which is the conventional case for aperture dimensions.
+    pub fn from_pixels(width: u16, height: u16) -> Self {
+        Self {
+            width_fp: (width as u32) << 16,
+            height_fp: (height as u32) << 16,
+        }
+    }
+
+    /// Serialise the 12-byte sub-atom body — `[ver+flags=4][width_fp=4]
+    /// [height_fp=4]`. Exact inverse of [`parse_tapt_dims`].
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut p = Vec::with_capacity(12);
+        p.extend_from_slice(&0u32.to_be_bytes()); // version 0 + flags 0
+        p.extend_from_slice(&self.width_fp.to_be_bytes());
+        p.extend_from_slice(&self.height_fp.to_be_bytes());
+        p
+    }
 }
 
 /// Parse a `tapt` sub-atom (clef/prof/enof) payload — `[ver+flags=4]
