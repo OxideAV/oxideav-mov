@@ -285,6 +285,17 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   `btrt` child boxes. Round-trips onto `SampleDescription::subtitle` on
   the non-fragmented and fragmented paths. Distinct from the QuickTime
   `MuxTrackKind::Text` chapter/overlay track.
+- `MuxTrackKind::SimpleText { description }` writes an ISO BMFF timed-
+  text track (ISO/IEC 14496-12 §12.5): a `text`-subtype `hdlr`, an
+  `nmhd` Null Media Header Box (§12.5.2 — timed-text tracks use a null
+  media header, *not* the QuickTime `gmhd`), and a `stsd` whose single
+  entry is a `stxt` `SimpleTextSampleEntry`. New
+  `SimpleTextSampleEntry::to_body_bytes` is the exact inverse of
+  `parse_stxt` (`content_encoding` / `mime_format` strings + `txtC` /
+  `btrt` child boxes). Round-trips onto `SampleDescription::simple_text`
+  on the non-fragmented and fragmented paths; the `stxt`/`nmhd` shape
+  distinguishes it from the QuickTime `MuxTrackKind::Text` track
+  (`text`/`gmhd`) — the demuxer disambiguates by the `stsd` FourCC.
 - `set_track_language(track_id, packed)` sets `mdhd.language` (pack a
   three-letter ISO-639-2 code with `MovMetadata::iso_language`; default
   `MDHD_LANGUAGE_UND` = `"und"`), and `set_track_extended_language(

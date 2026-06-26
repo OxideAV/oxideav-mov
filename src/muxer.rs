@@ -60,7 +60,7 @@ use crate::standalone::{Error, Result};
 
 use crate::gmhd::{Gmin, Tcmi};
 use crate::media_meta::{Clap, ColorParameters, Cslg, Fiel, Pasp, Tapt};
-use crate::metadata_sample::{MetadataSampleEntry, SubtitleSampleEntry};
+use crate::metadata_sample::{MetadataSampleEntry, SimpleTextSampleEntry, SubtitleSampleEntry};
 use crate::text_sample::TextSampleDescription;
 use crate::timecode::Tmcd;
 use std::io::Write;
@@ -684,6 +684,21 @@ pub enum MuxTrackKind {
         /// [`SubtitleSampleEntry::to_body_bytes`]; its `format()` selects
         /// the `stsd` entry FourCC.
         description: SubtitleSampleEntry,
+    },
+    /// ISO BMFF **timed-text** track (ISO/IEC 14496-12 §12.5). Emits
+    /// `hdlr.component_subtype = text`, a `nmhd` Null Media Header Box
+    /// (§12.5.2 — timed-text tracks use a null media header, *not* the
+    /// QuickTime `gmhd` of [`MuxTrackKind::Text`]), and a `stsd` whose
+    /// single entry is a `stxt` [`SimpleTextSampleEntry`]. Each sample's
+    /// `mdat` payload is the opaque per-sample text document. The
+    /// `stxt`/`nmhd` shape distinguishes it from the QuickTime `text`
+    /// chapter/overlay track (which carries `gmhd` + a `text`
+    /// description) — the demuxer disambiguates the two by the `stsd`
+    /// FourCC (`stxt` vs `text`).
+    SimpleText {
+        /// The `stxt` sample entry. Serialised via
+        /// [`SimpleTextSampleEntry::to_body_bytes`].
+        description: SimpleTextSampleEntry,
     },
 }
 
@@ -2506,7 +2521,8 @@ fn build_tkhd(t: &TrackWrite, track_id: u32, movie_ts: u32) -> Vec<u8> {
         | MuxTrackKind::Timecode { .. }
         | MuxTrackKind::Text { .. }
         | MuxTrackKind::Metadata { .. }
-        | MuxTrackKind::Subtitle { .. } => (0, 0),
+        | MuxTrackKind::Subtitle { .. }
+        | MuxTrackKind::SimpleText { .. } => (0, 0),
     };
     p[76..80].copy_from_slice(&w_fp.to_be_bytes());
     p[80..84].copy_from_slice(&h_fp.to_be_bytes());
@@ -2573,6 +2589,7 @@ fn build_hdlr(t: &TrackWrite) -> Vec<u8> {
         MuxTrackKind::Text { .. } => b"text",
         MuxTrackKind::Metadata { .. } => b"meta",
         MuxTrackKind::Subtitle { .. } => b"subt",
+        MuxTrackKind::SimpleText { .. } => b"text",
     };
     let mut p = Vec::with_capacity(25);
     p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
@@ -2614,6 +2631,12 @@ fn build_minf(
             // Subtitle Media Header Box (ISO/IEC 14496-12 §12.6.2): an
             // empty FullBox(version=0, flags=0).
             push_atom(&mut minf, *b"sthd", &0u32.to_be_bytes());
+        }
+        MuxTrackKind::SimpleText { .. } => {
+            // Timed-text tracks use a Null Media Header Box (ISO/IEC
+            // 14496-12 §12.5.2), distinct from the QuickTime text track's
+            // `gmhd`.
+            push_atom(&mut minf, *b"nmhd", &0u32.to_be_bytes());
         }
     }
     push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
@@ -3162,6 +3185,13 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
             e.extend_from_slice(&t.extra_stsd_atoms);
             wrap_stsd_entry(&description.format(), &e, dri)
         }
+        MuxTrackKind::SimpleText { description } => {
+            // ISO BMFF SimpleTextSampleEntry (stxt, ISO/IEC 14496-12
+            // §12.5.3) after the universal 16-byte header.
+            let mut e = description.to_body_bytes();
+            e.extend_from_slice(&t.extra_stsd_atoms);
+            wrap_stsd_entry(b"stxt", &e, dri)
+        }
     };
     let mut stsd = Vec::with_capacity(8 + entry_body.len());
     stsd.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
@@ -3668,7 +3698,8 @@ fn build_init_tkhd(t: &TrackWrite, track_id: u32) -> Vec<u8> {
         | MuxTrackKind::Timecode { .. }
         | MuxTrackKind::Text { .. }
         | MuxTrackKind::Metadata { .. }
-        | MuxTrackKind::Subtitle { .. } => (0, 0),
+        | MuxTrackKind::Subtitle { .. }
+        | MuxTrackKind::SimpleText { .. } => (0, 0),
     };
     p[76..80].copy_from_slice(&w_fp.to_be_bytes());
     p[80..84].copy_from_slice(&h_fp.to_be_bytes());
@@ -3720,6 +3751,12 @@ fn build_init_minf(t: &TrackWrite) -> Vec<u8> {
             // Subtitle Media Header Box (ISO/IEC 14496-12 §12.6.2): an
             // empty FullBox(version=0, flags=0).
             push_atom(&mut minf, *b"sthd", &0u32.to_be_bytes());
+        }
+        MuxTrackKind::SimpleText { .. } => {
+            // Timed-text tracks use a Null Media Header Box (ISO/IEC
+            // 14496-12 §12.5.2), distinct from the QuickTime text track's
+            // `gmhd`.
+            push_atom(&mut minf, *b"nmhd", &0u32.to_be_bytes());
         }
     }
     push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
@@ -3791,7 +3828,8 @@ fn build_trex(t: &TrackWrite, track_id: u32) -> Vec<u8> {
         | MuxTrackKind::Timecode { .. }
         | MuxTrackKind::Text { .. }
         | MuxTrackKind::Metadata { .. }
-        | MuxTrackKind::Subtitle { .. } => 0u32,
+        | MuxTrackKind::Subtitle { .. }
+        | MuxTrackKind::SimpleText { .. } => 0u32,
     };
     p.extend_from_slice(&default_flags.to_be_bytes());
     p

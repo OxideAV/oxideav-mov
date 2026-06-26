@@ -379,6 +379,30 @@ impl TextSubtitleSampleEntry {
     }
 }
 
+impl SimpleTextSampleEntry {
+    /// Serialise the `stxt` body (after the 16-byte SampleEntry header).
+    /// Exact inverse of [`parse_stxt`]: `content_encoding`? /
+    /// `mime_format` NUL-terminated strings, then an optional `txtC` and
+    /// `btrt`. Same shape as the `mett` / `sbtt` text entries (ISO/IEC
+    /// 14496-12 §12.5.3.2).
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !self.content_encoding.is_empty() {
+            push_c_string(&mut out, &self.content_encoding);
+        }
+        push_c_string(&mut out, &self.mime_format);
+        if let Some(b) = &self.bitrate {
+            push_child_box(&mut out, b"btrt", &b.to_body_bytes());
+        }
+        if let Some(tc) = &self.text_config {
+            let mut tbody = vec![0u8; 4];
+            push_c_string(&mut tbody, tc);
+            push_child_box(&mut out, b"txtC", &tbody);
+        }
+        out
+    }
+}
+
 /// `stpp` — XMLSubtitleSampleEntry (ISO/IEC 14496-12 §12.6.3.2).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct XmlSubtitleSampleEntry {
@@ -1188,6 +1212,29 @@ mod tests {
                 buffer_size_db: 9,
                 max_bitrate: 8,
                 avg_bitrate: 7,
+            }),
+        });
+    }
+
+    fn assert_stxt_roundtrip(e: &SimpleTextSampleEntry) {
+        let body = e.to_body_bytes();
+        assert_eq!(&parse_stxt(&body).unwrap(), e);
+    }
+
+    #[test]
+    fn stxt_serialiser_roundtrips_all_shapes() {
+        assert_stxt_roundtrip(&SimpleTextSampleEntry {
+            mime_format: "text/plain".into(),
+            ..Default::default()
+        });
+        assert_stxt_roundtrip(&SimpleTextSampleEntry {
+            content_encoding: "application/gzip".into(),
+            mime_format: "text/html".into(),
+            text_config: Some("preamble".into()),
+            bitrate: Some(BitRate {
+                buffer_size_db: 11,
+                max_bitrate: 22,
+                avg_bitrate: 33,
             }),
         });
     }
