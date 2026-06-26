@@ -273,6 +273,18 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   `SampleDescription::metadata` on the non-fragmented and fragmented
   paths; a media track's `tref/cdsc` to it resolves through
   `Track::references`.
+- `MuxTrackKind::Subtitle { description }` writes an ISO BMFF subtitle
+  track (ISO/IEC 14496-12 §12.6): a `subt`-subtype `hdlr`, an `sthd`
+  Subtitle Media Header Box (§12.6.2), and a `stsd` whose single entry
+  is a `stpp` (XML, e.g. TTML) or `sbtt` (text) `SubtitleSampleEntry`.
+  New `SubtitleSampleEntry::to_body_bytes` / `format` (+ per-variant
+  `XmlSubtitleSampleEntry` / `TextSubtitleSampleEntry` serialisers) are
+  the exact inverses of `parse_stpp` / `parse_sbtt`, framing the
+  `namespace` / `schema_location` / `auxiliary_mime_types` (stpp) or
+  `content_encoding` / `mime_format` (sbtt) strings and the `txtC` /
+  `btrt` child boxes. Round-trips onto `SampleDescription::subtitle` on
+  the non-fragmented and fragmented paths. Distinct from the QuickTime
+  `MuxTrackKind::Text` chapter/overlay track.
 - `set_track_language(track_id, packed)` sets `mdhd.language` (pack a
   three-letter ISO-639-2 code with `MovMetadata::iso_language`; default
   `MDHD_LANGUAGE_UND` = `"und"`), and `set_track_extended_language(

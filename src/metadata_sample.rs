@@ -310,6 +310,73 @@ impl SubtitleSampleEntry {
             SubtitleSampleEntry::Text(e) => e.bitrate,
         }
     }
+
+    /// The `stsd` entry FourCC selecting this variant (`stpp` / `sbtt`).
+    pub fn format(&self) -> [u8; 4] {
+        match self {
+            SubtitleSampleEntry::Xml(_) => *b"stpp",
+            SubtitleSampleEntry::Text(_) => *b"sbtt",
+        }
+    }
+
+    /// Serialise the subclass-specific body of this subtitle sample entry
+    /// — the bytes after the universal 16-byte SampleEntry header. Exact
+    /// inverse of [`parse_subtitle_sample_entry`] for this variant.
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        match self {
+            SubtitleSampleEntry::Xml(e) => e.to_body_bytes(),
+            SubtitleSampleEntry::Text(e) => e.to_body_bytes(),
+        }
+    }
+}
+
+impl XmlSubtitleSampleEntry {
+    /// Serialise the `stpp` body (after the 16-byte SampleEntry header).
+    /// Exact inverse of [`parse_stpp`]: `namespace` /
+    /// `schema_location`? / `auxiliary_mime_types`? NUL-terminated
+    /// strings then an optional `btrt`.
+    ///
+    /// Trailing optional strings are emitted only as far as needed: all
+    /// three when `auxiliary_mime_types` is non-empty, two when only
+    /// `schema_location` is non-empty, else `namespace` alone — so the
+    /// read side's positional assignment reconstructs the same fields.
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_c_string(&mut out, &self.namespace);
+        if !self.auxiliary_mime_types.is_empty() {
+            push_c_string(&mut out, &self.schema_location);
+            push_c_string(&mut out, &self.auxiliary_mime_types);
+        } else if !self.schema_location.is_empty() {
+            push_c_string(&mut out, &self.schema_location);
+        }
+        if let Some(b) = &self.bitrate {
+            push_child_box(&mut out, b"btrt", &b.to_body_bytes());
+        }
+        out
+    }
+}
+
+impl TextSubtitleSampleEntry {
+    /// Serialise the `sbtt` body (after the 16-byte SampleEntry header).
+    /// Exact inverse of [`parse_sbtt`]: `content_encoding`? /
+    /// `mime_format` NUL-terminated strings, then an optional `txtC` and
+    /// `btrt`. Same shape as the `mett` text-metadata entry.
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !self.content_encoding.is_empty() {
+            push_c_string(&mut out, &self.content_encoding);
+        }
+        push_c_string(&mut out, &self.mime_format);
+        if let Some(b) = &self.bitrate {
+            push_child_box(&mut out, b"btrt", &b.to_body_bytes());
+        }
+        if let Some(tc) = &self.text_config {
+            let mut tbody = vec![0u8; 4];
+            push_c_string(&mut tbody, tc);
+            push_child_box(&mut out, b"txtC", &tbody);
+        }
+        out
+    }
 }
 
 /// `stpp` — XMLSubtitleSampleEntry (ISO/IEC 14496-12 §12.6.3.2).
@@ -1060,5 +1127,68 @@ mod tests {
             avg_bitrate: 456,
         };
         assert_eq!(parse_btrt(&b.to_body_bytes()).unwrap(), b);
+    }
+
+    fn assert_stpp_roundtrip(e: &XmlSubtitleSampleEntry) {
+        let body = e.to_body_bytes();
+        assert_eq!(&parse_stpp(&body).unwrap(), e);
+        let wrapped = SubtitleSampleEntry::Xml(e.clone());
+        assert_eq!(wrapped.format(), *b"stpp");
+        assert_eq!(
+            parse_subtitle_sample_entry(b"stpp", &wrapped.to_body_bytes()).unwrap(),
+            Some(wrapped)
+        );
+    }
+
+    #[test]
+    fn stpp_serialiser_roundtrips_all_shapes() {
+        assert_stpp_roundtrip(&XmlSubtitleSampleEntry {
+            namespace: "urn:ns".into(),
+            ..Default::default()
+        });
+        assert_stpp_roundtrip(&XmlSubtitleSampleEntry {
+            namespace: "urn:ns".into(),
+            schema_location: "urn:schema".into(),
+            ..Default::default()
+        });
+        assert_stpp_roundtrip(&XmlSubtitleSampleEntry {
+            namespace: "urn:ns".into(),
+            schema_location: "urn:schema".into(),
+            auxiliary_mime_types: "image/png".into(),
+            bitrate: Some(BitRate {
+                buffer_size_db: 1,
+                max_bitrate: 2,
+                avg_bitrate: 3,
+            }),
+        });
+    }
+
+    fn assert_sbtt_roundtrip(e: &TextSubtitleSampleEntry) {
+        let body = e.to_body_bytes();
+        assert_eq!(&parse_sbtt(&body).unwrap(), e);
+        let wrapped = SubtitleSampleEntry::Text(e.clone());
+        assert_eq!(wrapped.format(), *b"sbtt");
+        assert_eq!(
+            parse_subtitle_sample_entry(b"sbtt", &wrapped.to_body_bytes()).unwrap(),
+            Some(wrapped)
+        );
+    }
+
+    #[test]
+    fn sbtt_serialiser_roundtrips_all_shapes() {
+        assert_sbtt_roundtrip(&TextSubtitleSampleEntry {
+            mime_format: "text/vtt".into(),
+            ..Default::default()
+        });
+        assert_sbtt_roundtrip(&TextSubtitleSampleEntry {
+            content_encoding: "gzip".into(),
+            mime_format: "text/plain".into(),
+            text_config: Some("style".into()),
+            bitrate: Some(BitRate {
+                buffer_size_db: 9,
+                max_bitrate: 8,
+                avg_bitrate: 7,
+            }),
+        });
     }
 }

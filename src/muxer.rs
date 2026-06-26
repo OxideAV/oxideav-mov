@@ -60,7 +60,7 @@ use crate::standalone::{Error, Result};
 
 use crate::gmhd::{Gmin, Tcmi};
 use crate::media_meta::{Clap, ColorParameters, Cslg, Fiel, Pasp, Tapt};
-use crate::metadata_sample::MetadataSampleEntry;
+use crate::metadata_sample::{MetadataSampleEntry, SubtitleSampleEntry};
 use crate::text_sample::TextSampleDescription;
 use crate::timecode::Tmcd;
 use std::io::Write;
@@ -671,6 +671,19 @@ pub enum MuxTrackKind {
         /// [`MetadataSampleEntry::to_body_bytes`]; its `format()` selects
         /// the `stsd` entry FourCC.
         description: MetadataSampleEntry,
+    },
+    /// ISO BMFF **subtitle** track (ISO/IEC 14496-12 §12.6). Emits
+    /// `hdlr.component_subtype = subt`, a `sthd` Subtitle Media Header Box
+    /// (§12.6.2), and a `stsd` whose single entry is a `stpp` (XML, e.g.
+    /// TTML) or `sbtt` (text) [`SubtitleSampleEntry`] (the FourCC is taken
+    /// from the variant). Each sample's `mdat` payload is the opaque
+    /// per-sample subtitle document. Distinct from the QuickTime
+    /// [`MuxTrackKind::Text`] chapter / overlay track.
+    Subtitle {
+        /// The `stpp` / `sbtt` sample entry. Serialised via
+        /// [`SubtitleSampleEntry::to_body_bytes`]; its `format()` selects
+        /// the `stsd` entry FourCC.
+        description: SubtitleSampleEntry,
     },
 }
 
@@ -2492,7 +2505,8 @@ fn build_tkhd(t: &TrackWrite, track_id: u32, movie_ts: u32) -> Vec<u8> {
         MuxTrackKind::Audio { .. }
         | MuxTrackKind::Timecode { .. }
         | MuxTrackKind::Text { .. }
-        | MuxTrackKind::Metadata { .. } => (0, 0),
+        | MuxTrackKind::Metadata { .. }
+        | MuxTrackKind::Subtitle { .. } => (0, 0),
     };
     p[76..80].copy_from_slice(&w_fp.to_be_bytes());
     p[80..84].copy_from_slice(&h_fp.to_be_bytes());
@@ -2558,6 +2572,7 @@ fn build_hdlr(t: &TrackWrite) -> Vec<u8> {
         MuxTrackKind::Timecode { .. } => b"tmcd",
         MuxTrackKind::Text { .. } => b"text",
         MuxTrackKind::Metadata { .. } => b"meta",
+        MuxTrackKind::Subtitle { .. } => b"subt",
     };
     let mut p = Vec::with_capacity(25);
     p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
@@ -2594,6 +2609,11 @@ fn build_minf(
             // FullBox(version=0, flags=0). Metadata tracks carry no
             // specific media header.
             push_atom(&mut minf, *b"nmhd", &0u32.to_be_bytes());
+        }
+        MuxTrackKind::Subtitle { .. } => {
+            // Subtitle Media Header Box (ISO/IEC 14496-12 §12.6.2): an
+            // empty FullBox(version=0, flags=0).
+            push_atom(&mut minf, *b"sthd", &0u32.to_be_bytes());
         }
     }
     push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
@@ -3134,6 +3154,14 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
             e.extend_from_slice(&t.extra_stsd_atoms);
             wrap_stsd_entry(&description.format(), &e, dri)
         }
+        MuxTrackKind::Subtitle { description } => {
+            // ISO BMFF subtitle sample entry (stpp / sbtt, ISO/IEC
+            // 14496-12 §12.6.3) after the universal 16-byte header; the
+            // FourCC is taken from the variant.
+            let mut e = description.to_body_bytes();
+            e.extend_from_slice(&t.extra_stsd_atoms);
+            wrap_stsd_entry(&description.format(), &e, dri)
+        }
     };
     let mut stsd = Vec::with_capacity(8 + entry_body.len());
     stsd.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
@@ -3639,7 +3667,8 @@ fn build_init_tkhd(t: &TrackWrite, track_id: u32) -> Vec<u8> {
         MuxTrackKind::Audio { .. }
         | MuxTrackKind::Timecode { .. }
         | MuxTrackKind::Text { .. }
-        | MuxTrackKind::Metadata { .. } => (0, 0),
+        | MuxTrackKind::Metadata { .. }
+        | MuxTrackKind::Subtitle { .. } => (0, 0),
     };
     p[76..80].copy_from_slice(&w_fp.to_be_bytes());
     p[80..84].copy_from_slice(&h_fp.to_be_bytes());
@@ -3686,6 +3715,11 @@ fn build_init_minf(t: &TrackWrite) -> Vec<u8> {
             // FullBox(version=0, flags=0). Metadata tracks carry no
             // specific media header.
             push_atom(&mut minf, *b"nmhd", &0u32.to_be_bytes());
+        }
+        MuxTrackKind::Subtitle { .. } => {
+            // Subtitle Media Header Box (ISO/IEC 14496-12 §12.6.2): an
+            // empty FullBox(version=0, flags=0).
+            push_atom(&mut minf, *b"sthd", &0u32.to_be_bytes());
         }
     }
     push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
@@ -3756,7 +3790,8 @@ fn build_trex(t: &TrackWrite, track_id: u32) -> Vec<u8> {
         MuxTrackKind::Audio { .. }
         | MuxTrackKind::Timecode { .. }
         | MuxTrackKind::Text { .. }
-        | MuxTrackKind::Metadata { .. } => 0u32,
+        | MuxTrackKind::Metadata { .. }
+        | MuxTrackKind::Subtitle { .. } => 0u32,
     };
     p.extend_from_slice(&default_flags.to_be_bytes());
     p
