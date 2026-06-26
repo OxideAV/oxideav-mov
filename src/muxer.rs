@@ -60,6 +60,7 @@ use crate::standalone::{Error, Result};
 
 use crate::gmhd::{Gmin, Tcmi};
 use crate::media_meta::{Clap, ColorParameters, Cslg, Fiel, Pasp, Tapt};
+use crate::text_sample::TextSampleDescription;
 use crate::timecode::Tmcd;
 use std::io::Write;
 
@@ -640,6 +641,20 @@ pub enum MuxTrackKind {
         /// (text-overlay font / colours / name). Serialised via
         /// [`Tcmi::to_body_bytes`].
         tcmi: Tcmi,
+    },
+    /// QuickTime **text** track (QTFF pp. 108–110), the carrier for
+    /// chapter tracks. Emits `hdlr.component_subtype = text`, a `gmhd`
+    /// base-media header with an identity-matrix `text` media-
+    /// information atom, and a `stsd` whose single `text` entry carries
+    /// the [`TextSampleDescription`] (display flags / justification /
+    /// colours / font). Each sample's `mdat` payload is a `[length:u16]
+    /// [UTF-8 text]` record (build it with
+    /// [`crate::chapter::encode_text_sample`]). A chapter track is one
+    /// of these referenced by a media track's `tref/chap`.
+    Text {
+        /// The `text` sample description (display config). Serialised via
+        /// [`TextSampleDescription::to_body_bytes`].
+        description: TextSampleDescription,
     },
 }
 
@@ -2309,7 +2324,9 @@ fn build_tkhd(t: &TrackWrite, track_id: u32, movie_ts: u32) -> Vec<u8> {
             ((*width as u32) << 16, (*height as u32) << 16)
         }
         // Audio and time-code tracks carry no visual dimensions.
-        MuxTrackKind::Audio { .. } | MuxTrackKind::Timecode { .. } => (0, 0),
+        MuxTrackKind::Audio { .. } | MuxTrackKind::Timecode { .. } | MuxTrackKind::Text { .. } => {
+            (0, 0)
+        }
     };
     p[76..80].copy_from_slice(&w_fp.to_be_bytes());
     p[80..84].copy_from_slice(&h_fp.to_be_bytes());
@@ -2357,6 +2374,7 @@ fn build_hdlr(t: &TrackWrite) -> Vec<u8> {
         MuxTrackKind::Video { .. } => b"vide",
         MuxTrackKind::Audio { .. } => b"soun",
         MuxTrackKind::Timecode { .. } => b"tmcd",
+        MuxTrackKind::Text { .. } => b"text",
     };
     let mut p = Vec::with_capacity(25);
     p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
@@ -2380,6 +2398,9 @@ fn build_minf(
         MuxTrackKind::Audio { .. } => push_atom(&mut minf, *b"smhd", &build_smhd()),
         MuxTrackKind::Timecode { tcmi, .. } => {
             push_atom(&mut minf, *b"gmhd", &build_gmhd_tmcd(tcmi));
+        }
+        MuxTrackKind::Text { .. } => {
+            push_atom(&mut minf, *b"gmhd", &build_gmhd_text());
         }
     }
     push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
@@ -2420,6 +2441,24 @@ fn build_gmhd_tmcd(tcmi: &Tcmi) -> Vec<u8> {
     let mut tmcd_box = Vec::new();
     push_atom(&mut tmcd_box, *b"tcmi", &tcmi.to_body_bytes());
     push_atom(&mut gmhd, *b"tmcd", &tmcd_box);
+    gmhd
+}
+
+/// Build a `gmhd` payload for a QuickTime **text** track (QTFF p. 65):
+/// a `gmin` Generic Media Information header plus a `text` media-
+/// information atom carrying a 9-element identity transformation matrix
+/// (36 bytes, no FullBox prefix). Round-trips through the demuxer's
+/// `parse_gmhd` onto `Track::gmhd` (`gmin` + `text`).
+fn build_gmhd_text() -> Vec<u8> {
+    let mut gmhd = Vec::new();
+    push_atom(&mut gmhd, *b"gmin", &Gmin::default().to_body_bytes());
+    // 3×3 identity matrix in 16.16 / 2.30 fixed-point (a=d=1.0, w=1.0),
+    // the same convention as `tkhd`/`text` header matrices.
+    let mut text = vec![0u8; 36];
+    text[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // a
+    text[16..20].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // d
+    text[32..36].copy_from_slice(&0x4000_0000u32.to_be_bytes()); // w (2.30)
+    push_atom(&mut gmhd, *b"text", &text);
     gmhd
 }
 
@@ -2879,6 +2918,13 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
             let mut e = description.to_sample_description_body();
             e.extend_from_slice(&t.extra_stsd_atoms);
             wrap_stsd_entry(b"tmcd", &e, dri)
+        }
+        MuxTrackKind::Text { description } => {
+            // QuickTime `text` sample-description body after the
+            // universal 16-byte header (QTFF pp. 108–110).
+            let mut e = description.to_body_bytes();
+            e.extend_from_slice(&t.extra_stsd_atoms);
+            wrap_stsd_entry(b"text", &e, dri)
         }
     };
     let mut stsd = Vec::with_capacity(8 + entry_body.len());
@@ -3382,7 +3428,9 @@ fn build_init_tkhd(t: &TrackWrite, track_id: u32) -> Vec<u8> {
         MuxTrackKind::Video { width, height, .. } => {
             ((*width as u32) << 16, (*height as u32) << 16)
         }
-        MuxTrackKind::Audio { .. } | MuxTrackKind::Timecode { .. } => (0, 0),
+        MuxTrackKind::Audio { .. } | MuxTrackKind::Timecode { .. } | MuxTrackKind::Text { .. } => {
+            (0, 0)
+        }
     };
     p[76..80].copy_from_slice(&w_fp.to_be_bytes());
     p[80..84].copy_from_slice(&h_fp.to_be_bytes());
@@ -3413,6 +3461,9 @@ fn build_init_minf(t: &TrackWrite) -> Vec<u8> {
         MuxTrackKind::Audio { .. } => push_atom(&mut minf, *b"smhd", &build_smhd()),
         MuxTrackKind::Timecode { tcmi, .. } => {
             push_atom(&mut minf, *b"gmhd", &build_gmhd_tmcd(tcmi));
+        }
+        MuxTrackKind::Text { .. } => {
+            push_atom(&mut minf, *b"gmhd", &build_gmhd_text());
         }
     }
     push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
@@ -3477,8 +3528,11 @@ fn build_trex(t: &TrackWrite, track_id: u32) -> Vec<u8> {
     p.extend_from_slice(&0u32.to_be_bytes()); // default_sample_size (per-sample)
     let default_flags = match &t.kind {
         MuxTrackKind::Video { .. } => 0x0001_0000u32, // non-sync default
-        // Audio and time-code samples are each independently decodable.
-        MuxTrackKind::Audio { .. } | MuxTrackKind::Timecode { .. } => 0u32,
+        // Audio, time-code, and text samples are each independently
+        // decodable.
+        MuxTrackKind::Audio { .. } | MuxTrackKind::Timecode { .. } | MuxTrackKind::Text { .. } => {
+            0u32
+        }
     };
     p.extend_from_slice(&default_flags.to_be_bytes());
     p

@@ -265,6 +265,44 @@ pub fn parse_text_sample_description(body: &[u8]) -> Result<TextSampleDescriptio
     })
 }
 
+impl TextSampleDescription {
+    /// Serialise the QuickTime Text Sample Description **body** —
+    /// everything after the universal 16-byte sample-description header
+    /// (QTFF pp. 108–110). Exact inverse of
+    /// [`parse_text_sample_description`]: 43 fixed bytes
+    /// (`display_flags`, `text_justification`, background RGB48, the
+    /// default-text-box rectangle, reserved fields, `font_number`,
+    /// `font_face`, foreground RGB48) followed by the trailing Pascal
+    /// `text_name` (1-byte length + raw UTF-8, truncated to 255 bytes;
+    /// omitted when empty).
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut b = vec![0u8; TEXT_SAMPLE_DESC_FIXED_LEN];
+        b[0..4].copy_from_slice(&self.display_flags.to_be_bytes());
+        b[4..8].copy_from_slice(&self.text_justification.to_raw().to_be_bytes());
+        write_rgb48(&mut b, 8, self.background_color);
+        b[14..16].copy_from_slice(&self.default_text_box.top.to_be_bytes());
+        b[16..18].copy_from_slice(&self.default_text_box.left.to_be_bytes());
+        b[18..20].copy_from_slice(&self.default_text_box.bottom.to_be_bytes());
+        b[20..22].copy_from_slice(&self.default_text_box.right.to_be_bytes());
+        // b[22..30] reserved (u64) left zero.
+        b[30..32].copy_from_slice(&self.font_number.to_be_bytes());
+        b[32..34].copy_from_slice(&self.font_face.to_be_bytes());
+        // b[34] / b[35..37] reserved left zero.
+        write_rgb48(&mut b, 37, self.foreground_color);
+        let name = self.text_name.as_bytes();
+        let n = name.len().min(255);
+        b.push(n as u8);
+        b.extend_from_slice(&name[..n]);
+        b
+    }
+}
+
+fn write_rgb48(buf: &mut [u8], off: usize, c: Rgb48) {
+    buf[off..off + 2].copy_from_slice(&c.red.to_be_bytes());
+    buf[off + 2..off + 4].copy_from_slice(&c.green.to_be_bytes());
+    buf[off + 4..off + 6].copy_from_slice(&c.blue.to_be_bytes());
+}
+
 /// Decode a trailing Pascal string (1-byte length prefix + that many
 /// bytes). Returns an empty string when `buf` is empty. When the declared
 /// length runs past `buf`, the available bytes are taken (lenient). Text

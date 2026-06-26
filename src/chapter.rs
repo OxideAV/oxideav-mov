@@ -317,6 +317,30 @@ fn parse_ftab(body: &[u8]) -> Vec<FontTableEntry> {
     out
 }
 
+/// Encode a chapter / text-track sample payload — `[length:u16][UTF-8
+/// text]`, optionally followed by an `encd` text-encoding-override atom
+/// (`[size:u32]['encd'][encoding_id:u32]`) when `encoding` is `Some`.
+///
+/// This is the write-side inverse of [`decode_text_sample_full`]: the
+/// `length` is the byte length of the UTF-8 text (capped at
+/// `u16::MAX`), the text follows verbatim, and a present `encoding`
+/// emits the 12-byte `encd` trailer the read side's `scan_for_encd`
+/// lifts back onto a chapter entry's `text_encoding`.
+pub fn encode_text_sample(text: &str, encoding: Option<u32>) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let n = bytes.len().min(u16::MAX as usize);
+    let mut out = Vec::with_capacity(2 + n + encoding.map_or(0, |_| 12));
+    out.extend_from_slice(&(n as u16).to_be_bytes());
+    out.extend_from_slice(&bytes[..n]);
+    if let Some(enc) = encoding {
+        // `encd` atom: [size:u32 = 12]['encd'][encoding_id:u32].
+        out.extend_from_slice(&12u32.to_be_bytes());
+        out.extend_from_slice(b"encd");
+        out.extend_from_slice(&enc.to_be_bytes());
+    }
+    out
+}
+
 /// Decode a single Apple text sample into a chapter title plus the
 /// Mac `TextEncoding` constant lifted from a trailing `encd` extension
 /// atom when present.

@@ -68,9 +68,9 @@ pub use bmff_meta::{
     ItemLocation, ItemProtection, ItemReference, ItemReferenceType, ProtectionScheme,
 };
 pub use chapter::{
-    decode_text_sample, decode_text_sample_full, parse_text_sample_styles, ChapterEntry,
-    ChapterList, ColorRgba, FontTableEntry, HighlightColor, HighlightRange, StyleRecord,
-    TextSampleStyles,
+    decode_text_sample, decode_text_sample_full, encode_text_sample, parse_text_sample_styles,
+    ChapterEntry, ChapterList, ColorRgba, FontTableEntry, HighlightColor, HighlightRange,
+    StyleRecord, TextSampleStyles,
 };
 pub use clip::{parse_clip, parse_crgn, Clipping, ClippingRegion, QdRect};
 pub use cmov::{
