@@ -892,6 +892,15 @@ struct TrackWrite {
     /// [`MovMuxer::set_text_header_matrix`]. Only meaningful for a
     /// [`MuxTrackKind::Text`] track.
     text_header_matrix: Option<[i32; 9]>,
+    /// When `true`, the muxer emits the sample-size table as a Compact
+    /// Sample Size Box (`stz2`, ISO/IEC 14496-12 §8.7.3.3) using the
+    /// narrowest 4 / 8 / 16-bit `field_size` that fits every sample,
+    /// instead of the default `stsz`. Set via
+    /// [`MovMuxer::set_compact_sample_size`]. Ignored when the track's
+    /// sizes are all equal (a uniform `stsz` is already the most compact
+    /// form) or when any size exceeds 16 bits (`stz2` cannot represent
+    /// it). Defaults to `false`.
+    compact_sample_size: bool,
 }
 
 /// The packed `mdhd.language` value for `"und"` (undetermined) — the
@@ -1168,6 +1177,7 @@ impl MovMuxer {
             extended_language: None,
             gmin: None,
             text_header_matrix: None,
+            compact_sample_size: false,
         });
         self.tracks.len() as u32
     }
@@ -1737,6 +1747,33 @@ impl MovMuxer {
             )));
         }
         self.tracks[idx].text_header_matrix = Some(matrix);
+        Ok(())
+    }
+
+    /// Opt a previously-added track into emitting its sample-size table as
+    /// a Compact Sample Size Box (`stz2`, ISO/IEC 14496-12 §8.7.3.3)
+    /// rather than the default Sample Size Box (`stsz`, §8.7.3.2).
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// When `enable` is `true` the muxer writes `stz2` with the narrowest
+    /// 4 / 8-bit `field_size` that fits every sample whenever that is
+    /// genuinely smaller than `stsz` — i.e. the per-sample sizes are not
+    /// all equal (a uniform `stsz` already carries no table) and the
+    /// largest size fits in 8 bits. Otherwise the muxer transparently
+    /// falls back to `stsz`, so enabling this is always safe. Both forms
+    /// round-trip onto the same per-sample sizes through the demuxer
+    /// (`SampleTable`), and `MovDemuxer::sample_size_source` reports which
+    /// box carried them. Rejects an unknown `track_id`.
+    pub fn set_compact_sample_size(&mut self, track_id: u32, enable: bool) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_compact_sample_size unknown track id {track_id}"
+                ))
+            })?;
+        self.tracks[idx].compact_sample_size = enable;
         Ok(())
     }
 
@@ -2806,7 +2843,7 @@ fn build_stbl(
         push_atom(&mut stbl, *b"stss", &stss_atom);
     }
     push_atom(&mut stbl, *b"stsc", &build_stsc(t));
-    push_atom(&mut stbl, *b"stsz", &build_stsz(t));
+    push_sample_size_atom(&mut stbl, t);
     if need_co64 {
         push_atom(&mut stbl, *b"co64", &build_co64(chunk_offset));
     } else {
@@ -3445,6 +3482,81 @@ fn build_stsc(t: &TrackWrite) -> Vec<u8> {
     p.extend_from_slice(&(t.samples.len() as u32).to_be_bytes()); // samples_per_chunk
     p.extend_from_slice(&1u32.to_be_bytes()); // sample_description_id
     p
+}
+
+/// Push the per-track sample-size box into `stbl`. Emits the Compact
+/// Sample Size Box (`stz2`, ISO/IEC 14496-12 §8.7.3.3) when the track
+/// opted in via `compact_sample_size` AND it would be smaller than the
+/// default Sample Size Box (`stsz`, §8.7.3.2) — i.e. the sizes are not
+/// uniform (a uniform `stsz` carries no table at all) and every size
+/// fits in 4 or 8 bits. Otherwise emits `stsz`.
+fn push_sample_size_atom(stbl: &mut Vec<u8>, t: &TrackWrite) {
+    if let Some(body) = build_stz2(t) {
+        push_atom(stbl, *b"stz2", &body);
+    } else {
+        push_atom(stbl, *b"stsz", &build_stsz(t));
+    }
+}
+
+/// Build a `stz2` Compact Sample Size Box body (ISO/IEC 14496-12
+/// §8.7.3.3) — `[ver+flags=4][reserved:24][field_size:8][count:u32]
+/// [packed entries]`. Returns `None` (so the caller falls back to
+/// `stsz`) when the track did not opt in, when the sizes are uniform (a
+/// table-less `stsz` is already smaller), or when any size exceeds the
+/// 8-bit field the narrow forms allow — the 16-bit `stz2` form is never
+/// smaller than `stsz`'s 32-bit table by enough to matter here, so we
+/// only emit the 4- and 8-bit narrow forms that genuinely save space.
+fn build_stz2(t: &TrackWrite) -> Option<Vec<u8>> {
+    if !t.compact_sample_size {
+        return None;
+    }
+    let first = t.samples[0].data.len();
+    if t.samples.iter().all(|s| s.data.len() == first) {
+        // Uniform ⇒ `stsz` carries a single sample_size and no table,
+        // strictly smaller than any `stz2`.
+        return None;
+    }
+    let max = t.samples.iter().map(|s| s.data.len()).max().unwrap_or(0);
+    // Narrowest field that fits every size. 4-bit fits 0..=15, 8-bit
+    // 0..=255; larger sizes fall back to the 32-bit `stsz` table.
+    let field_size: u8 = if max <= 0x0F {
+        4
+    } else if max <= 0xFF {
+        8
+    } else {
+        return None;
+    };
+    let count = t.samples.len() as u32;
+    let mut p = Vec::with_capacity(12 + t.samples.len());
+    p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+    p.push(0); // reserved high byte (part of the 24-bit reserved)
+    p.extend_from_slice(&0u16.to_be_bytes()); // reserved low 16 bits
+    p.push(field_size);
+    p.extend_from_slice(&count.to_be_bytes());
+    match field_size {
+        4 => {
+            // Two values per byte, MSB-first; odd count zero-pads the
+            // final low nibble (§8.7.3.3.2).
+            let mut i = 0;
+            while i < t.samples.len() {
+                let hi = (t.samples[i].data.len() as u8) & 0x0F;
+                let lo = if i + 1 < t.samples.len() {
+                    (t.samples[i + 1].data.len() as u8) & 0x0F
+                } else {
+                    0
+                };
+                p.push((hi << 4) | lo);
+                i += 2;
+            }
+        }
+        8 => {
+            for s in &t.samples {
+                p.push(s.data.len() as u8);
+            }
+        }
+        _ => unreachable!(),
+    }
+    Some(p)
 }
 
 fn build_stsz(t: &TrackWrite) -> Vec<u8> {
@@ -4112,6 +4224,7 @@ mod tests {
             extended_language: None,
             gmin: None,
             text_header_matrix: None,
+            compact_sample_size: false,
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -4161,6 +4274,7 @@ mod tests {
             extended_language: None,
             gmin: None,
             text_header_matrix: None,
+            compact_sample_size: false,
         }
     }
 
@@ -4609,6 +4723,7 @@ mod tests {
             extended_language: None,
             gmin: None,
             text_header_matrix: None,
+            compact_sample_size: false,
         };
         assert!(build_stss(&t).is_none());
     }
@@ -4639,6 +4754,7 @@ mod tests {
             extended_language: None,
             gmin: None,
             text_header_matrix: None,
+            compact_sample_size: false,
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -4697,6 +4813,7 @@ mod tests {
             extended_language: None,
             gmin: None,
             text_header_matrix: None,
+            compact_sample_size: false,
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -4746,6 +4863,7 @@ mod tests {
             extended_language: None,
             gmin: None,
             text_header_matrix: None,
+            compact_sample_size: false,
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

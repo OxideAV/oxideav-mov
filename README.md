@@ -337,6 +337,15 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   round-trip through `parse_gmin` / `parse_text_header` onto
   `Track::gmhd`. Rejected on a video / audio track (no `gmhd`) and, for
   the matrix, on a non-text track.
+- `set_compact_sample_size(track_id, true)` opts a track into emitting
+  its sample-size table as a Compact Sample Size Box (`stz2`, ISO/IEC
+  14496-12 §8.7.3.3) with the narrowest 4 / 8-bit `field_size` that fits
+  every sample, instead of the default 32-bit `stsz`. Transparently
+  falls back to `stsz` when that would be smaller (uniform sizes — a
+  table-less `stsz` — or any size above 8 bits), so enabling it is always
+  safe. Both forms round-trip onto the same per-sample sizes; the
+  read-side `MovDemuxer::sample_size_source` reports which box (and the
+  `stz2` `field_size`) carried them.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.
