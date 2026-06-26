@@ -763,6 +763,13 @@ struct TrackWrite {
     /// `prof` / `enof` children are populated) as a `trak` child. Only
     /// meaningful for a video track. `None` ⇒ no `tapt`.
     tapt: Option<Tapt>,
+    /// Optional custom data-reference table (QTFF p. 65 / ISO/IEC
+    /// 14496-12 §8.7.2). When empty the muxer writes the default single
+    /// self-referencing `url ` entry (`flags=1`). When non-empty it
+    /// writes exactly these entries (one of which must be the self-ref
+    /// the sample entries point at). Set via
+    /// [`MovMuxer::set_data_references`].
+    data_references: Vec<DataReferenceWrite>,
 }
 
 /// One track-reference declaration written by
@@ -802,6 +809,44 @@ impl TrackReference {
     pub fn timecode(timecode_track_id: u32) -> Self {
         Self::to(*b"tmcd", timecode_track_id)
     }
+}
+
+/// One data-reference entry in a track's `dref` (Data Reference Box,
+/// QTFF p. 65 / ISO/IEC 14496-12 §8.7.2), written by
+/// [`MovMuxer::set_data_references`].
+///
+/// A `dref` lists the storage locations a track's media may live in;
+/// each sample's chunk offset is interpreted relative to the location
+/// its sample entry's `data_reference_index` selects. This type is the
+/// write-side mirror of the read-side [`crate::reference::DataReference`].
+///
+/// Because [`MovMuxer`] always writes the track's sample bytes into the
+/// file's own `mdat`, exactly one entry must be the [`SelfRef`] (the
+/// "media is in this file" entry, `flags & 0x01 == 1`) — the muxer
+/// points every sample entry's `data_reference_index` at it. Additional
+/// [`Url`] / [`Urn`] entries are declared for readers / reference-movie
+/// tooling but carry no in-file samples.
+///
+/// [`SelfRef`]: DataReferenceWrite::SelfRef
+/// [`Url`]: DataReferenceWrite::Url
+/// [`Urn`]: DataReferenceWrite::Urn
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DataReferenceWrite {
+    /// `url ` self-reference (`flags = 1`): the media bytes are in this
+    /// file. Written with an empty data slot per §8.7.2.
+    SelfRef,
+    /// `url ` external reference (`flags = 0`): a NUL-terminated UTF-8
+    /// URL naming the file the media lives in.
+    Url(String),
+    /// `urn ` external reference (`flags = 0`): a NUL-terminated UTF-8
+    /// `name` followed by an optional NUL-terminated `location`
+    /// (ISO/IEC 14496-12 §8.7.2).
+    Urn {
+        /// Required URN name.
+        name: String,
+        /// Optional URN location (empty ⇒ omitted second string).
+        location: String,
+    },
 }
 
 /// Fragmentation policy for [`MovMuxer::write_to_fragmented`].
@@ -990,6 +1035,7 @@ impl MovMuxer {
             visual_extensions: VisualExtensions::default(),
             track_references: Vec::new(),
             tapt: None,
+            data_references: Vec::new(),
         });
         self.tracks.len() as u32
     }
@@ -1398,6 +1444,51 @@ impl MovMuxer {
             ));
         }
         self.tracks[idx].tapt = Some(tapt);
+        Ok(())
+    }
+
+    /// Set a custom data-reference table (`dref`) for a previously-added
+    /// track (QTFF p. 65 / ISO/IEC 14496-12 §8.7.2).
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// By default a track's `dinf/dref` carries a single self-reference
+    /// `url ` entry (`flags=1`, "media is in this file"); this method
+    /// replaces that with the supplied list — e.g. to declare external
+    /// `url ` / `urn ` storage locations for a reference movie.
+    ///
+    /// Because the muxer always writes the track's sample bytes into the
+    /// file's own `mdat`, the list must contain **exactly one**
+    /// [`DataReferenceWrite::SelfRef`]; the muxer points every sample
+    /// entry's `data_reference_index` at it (1-based, in list order).
+    /// An empty list, or one with zero or several self-refs, is
+    /// rejected and the track is left unchanged.
+    ///
+    /// The table round-trips through the read-side `parse_dref` onto
+    /// [`crate::track::Track::data_references`]. Replaces any table
+    /// previously set on the same track.
+    pub fn set_data_references(
+        &mut self,
+        track_id: u32,
+        references: &[DataReferenceWrite],
+    ) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_data_references unknown track id {track_id}"
+                ))
+            })?;
+        let self_refs = references
+            .iter()
+            .filter(|r| matches!(r, DataReferenceWrite::SelfRef))
+            .count();
+        if self_refs != 1 {
+            return Err(Error::invalid(format!(
+                "MOV muxer: set_data_references requires exactly one SelfRef entry (the muxer writes samples in-file); got {self_refs}"
+            )));
+        }
+        self.tracks[idx].data_references = references.to_vec();
         Ok(())
     }
 
@@ -2266,7 +2357,7 @@ fn build_minf(
         MuxTrackKind::Video { .. } => push_atom(&mut minf, *b"vmhd", &build_vmhd()),
         MuxTrackKind::Audio { .. } => push_atom(&mut minf, *b"smhd", &build_smhd()),
     }
-    push_atom(&mut minf, *b"dinf", &build_dinf());
+    push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
     push_atom(
         &mut minf,
         *b"stbl",
@@ -2289,16 +2380,48 @@ fn build_smhd() -> Vec<u8> {
     vec![0u8; 8]
 }
 
-fn build_dinf() -> Vec<u8> {
+fn build_dinf(refs: &[DataReferenceWrite]) -> Vec<u8> {
     // ISO/IEC 14496-12 §8.7.1 — `dinf` wraps a single `dref`.
     let mut dref = Vec::new();
     // dref body: ver+flags(4) + entry_count(4) + N × entries.
     dref.extend_from_slice(&0u32.to_be_bytes());
-    dref.extend_from_slice(&1u32.to_be_bytes()); // 1 entry
-                                                 // One self-reference `url ` entry with flags=1 (data is in this file).
-    let mut url_body = Vec::with_capacity(4);
-    url_body.extend_from_slice(&0x0000_0001u32.to_be_bytes());
-    push_atom(&mut dref, *b"url ", &url_body);
+    if refs.is_empty() {
+        // Default: one self-reference `url ` entry, flags=1 (data is in
+        // this file). Each child is a FullBox: ver(1)+flags(3) body.
+        dref.extend_from_slice(&1u32.to_be_bytes());
+        push_atom(&mut dref, *b"url ", &0x0000_0001u32.to_be_bytes());
+    } else {
+        dref.extend_from_slice(&(refs.len() as u32).to_be_bytes());
+        for r in refs {
+            match r {
+                DataReferenceWrite::SelfRef => {
+                    // `url ` with flags=1, empty data slot (§8.7.2).
+                    push_atom(&mut dref, *b"url ", &0x0000_0001u32.to_be_bytes());
+                }
+                DataReferenceWrite::Url(url) => {
+                    // ver=0 flags=0 then NUL-terminated UTF-8 URL.
+                    let mut body = Vec::with_capacity(4 + url.len() + 1);
+                    body.extend_from_slice(&0u32.to_be_bytes());
+                    body.extend_from_slice(url.as_bytes());
+                    body.push(0);
+                    push_atom(&mut dref, *b"url ", &body);
+                }
+                DataReferenceWrite::Urn { name, location } => {
+                    // ver=0 flags=0; NUL-terminated `name`, then an
+                    // optional NUL-terminated `location` (§8.7.2).
+                    let mut body = Vec::with_capacity(4 + name.len() + location.len() + 2);
+                    body.extend_from_slice(&0u32.to_be_bytes());
+                    body.extend_from_slice(name.as_bytes());
+                    body.push(0);
+                    if !location.is_empty() {
+                        body.extend_from_slice(location.as_bytes());
+                        body.push(0);
+                    }
+                    push_atom(&mut dref, *b"urn ", &body);
+                }
+            }
+        }
+    }
     let mut dinf = Vec::new();
     push_atom(&mut dinf, *b"dref", &dref);
     dinf
@@ -2646,6 +2769,14 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
     // ISO/IEC 14496-12 §8.5.2 / QTFF p. 70.
     // [ver+flags:4][entry_count:4]([size:4][format:4][rsrv:6]
     //     [data_reference_index:2][per-mediatype body][optional extra atoms])+
+    //
+    // The sample entry's `data_reference_index` points (1-based) at the
+    // `dref` entry the sample chunk offsets are relative to. The muxer
+    // always lays samples into this file's own `mdat`, so the index is
+    // that of the self-reference entry: 1 for the default single-entry
+    // `dref`, else the 1-based position of the lone `SelfRef` in a
+    // custom table set via `set_data_references`.
+    let dri = self_ref_index(&t.data_references);
     let entry_body = match &t.kind {
         MuxTrackKind::Video {
             format,
@@ -2676,7 +2807,7 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
             // convention, then the typed visual extension boxes.
             e.extend_from_slice(&t.extra_stsd_atoms);
             e.extend_from_slice(&t.visual_extensions.to_framed_atoms());
-            wrap_stsd_entry(format, &e)
+            wrap_stsd_entry(format, &e, dri)
         }
         MuxTrackKind::Audio {
             format,
@@ -2696,7 +2827,7 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
             body[16..20].copy_from_slice(&(sr << 16).to_be_bytes());
             e.extend_from_slice(&body);
             e.extend_from_slice(&t.extra_stsd_atoms);
-            wrap_stsd_entry(format, &e)
+            wrap_stsd_entry(format, &e, dri)
         }
     };
     let mut stsd = Vec::with_capacity(8 + entry_body.len());
@@ -2706,15 +2837,28 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
     stsd
 }
 
+/// The 1-based `data_reference_index` a sample entry should carry —
+/// the position of the lone self-reference in the track's `dref` table.
+/// Defaults to 1 for the implicit single-entry table (empty list).
+fn self_ref_index(refs: &[DataReferenceWrite]) -> u16 {
+    if refs.is_empty() {
+        return 1;
+    }
+    refs.iter()
+        .position(|r| matches!(r, DataReferenceWrite::SelfRef))
+        .map(|i| (i + 1) as u16)
+        .unwrap_or(1)
+}
+
 /// Wrap a per-mediatype body in the universal 16-byte stsd entry
 /// header: `[size:4][format:4][reserved:6][data_reference_index:2]`.
-fn wrap_stsd_entry(format: &[u8; 4], body: &[u8]) -> Vec<u8> {
+fn wrap_stsd_entry(format: &[u8; 4], body: &[u8], data_reference_index: u16) -> Vec<u8> {
     let entry_size: u32 = (16 + body.len()) as u32;
     let mut out = Vec::with_capacity(entry_size as usize);
     out.extend_from_slice(&entry_size.to_be_bytes());
     out.extend_from_slice(format);
     out.extend_from_slice(&[0u8; 6]); // 6 bytes reserved
-    out.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index = 1
+    out.extend_from_slice(&data_reference_index.to_be_bytes());
     out.extend_from_slice(body);
     out
 }
@@ -3217,7 +3361,7 @@ fn build_init_minf(t: &TrackWrite) -> Vec<u8> {
         MuxTrackKind::Video { .. } => push_atom(&mut minf, *b"vmhd", &build_vmhd()),
         MuxTrackKind::Audio { .. } => push_atom(&mut minf, *b"smhd", &build_smhd()),
     }
-    push_atom(&mut minf, *b"dinf", &build_dinf());
+    push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
     push_atom(&mut minf, *b"stbl", &build_init_stbl(t));
     minf
 }
@@ -3511,6 +3655,7 @@ mod tests {
             visual_extensions: VisualExtensions::default(),
             track_references: Vec::new(),
             tapt: None,
+            data_references: Vec::new(),
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -3555,6 +3700,7 @@ mod tests {
             visual_extensions: VisualExtensions::default(),
             track_references: Vec::new(),
             tapt: None,
+            data_references: Vec::new(),
         }
     }
 
@@ -3998,6 +4144,7 @@ mod tests {
             visual_extensions: VisualExtensions::default(),
             track_references: Vec::new(),
             tapt: None,
+            data_references: Vec::new(),
         };
         assert!(build_stss(&t).is_none());
     }
@@ -4023,6 +4170,7 @@ mod tests {
             visual_extensions: VisualExtensions::default(),
             track_references: Vec::new(),
             tapt: None,
+            data_references: Vec::new(),
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -4076,6 +4224,7 @@ mod tests {
             visual_extensions: VisualExtensions::default(),
             track_references: Vec::new(),
             tapt: None,
+            data_references: Vec::new(),
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -4120,6 +4269,7 @@ mod tests {
             visual_extensions: VisualExtensions::default(),
             track_references: Vec::new(),
             tapt: None,
+            data_references: Vec::new(),
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

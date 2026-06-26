@@ -246,6 +246,13 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   rectangles are populated (`TaptDims::from_pixels` / `to_body_bytes`,
   16.16 fixed-point). Round-trips through `parse_tapt` onto
   `Track::tapt`; non-video tracks and an empty `Tapt` are rejected.
+- `set_data_references(track_id, &[DataReferenceWrite])` replaces a
+  track's default single self-referencing `dref` (`url ` flags=1) with
+  an explicit table — `DataReferenceWrite::{SelfRef, Url, Urn}` — to
+  declare external `url ` / `urn ` storage (reference movies). Must
+  contain exactly one `SelfRef`; the muxer points every sample entry's
+  `data_reference_index` at it. Round-trips through `parse_dref` onto
+  `Track::data_references`.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.
