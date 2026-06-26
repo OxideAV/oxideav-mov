@@ -139,8 +139,8 @@ Fragmented files use `tfra` when present.
 ## Muxer
 
 `MovMuxer` emits a non-fragmented MOV/MP4 (`ftyp` + `mdat` + `moov`)
-carrying one or more video / audio / time-code / text / timed-metadata
-tracks,
+carrying one or more video / audio / time-code / text / timed-metadata /
+subtitle / timed-text / hint tracks,
 round-tripping through `MovDemuxer` with sample count, sizes, payloads,
 and keyframe flags preserved. `stco` auto-promotes to `co64` when chunk offsets cross
 4 GiB. Per-sample composition offsets (`MuxSample.composition_offset`,
@@ -296,6 +296,17 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   on the non-fragmented and fragmented paths; the `stxt`/`nmhd` shape
   distinguishes it from the QuickTime `MuxTrackKind::Text` track
   (`text`/`gmhd`) — the demuxer disambiguates by the `stsd` FourCC.
+- `MuxTrackKind::Hint { protocol, description, hmhd }` writes an ISO BMFF
+  hint track (ISO/IEC 14496-12 §12.4), a streaming-server packetization
+  track: a `hint`-subtype `hdlr`, an `hmhd` Hint Media Header Box
+  (§12.4.2 — max/avg PDU size + bitrate, via the new
+  `Hmhd::to_body_bytes`), and a `stsd` whose single entry is a
+  protocol-named HintSampleEntry (§12.4.3 — FourCC = `protocol`
+  identifier such as `rtp `, body = opaque protocol declarative data).
+  The opaque `description` body round-trips onto `SampleDescription::extra`
+  and the header onto `Track::hmhd`; a `tref/hint` to the packetized
+  media track resolves through `Track::references`. Honoured on the
+  non-fragmented and fragmented paths.
 - `set_track_language(track_id, packed)` sets `mdhd.language` (pack a
   three-letter ISO-639-2 code with `MovMetadata::iso_language`; default
   `MDHD_LANGUAGE_UND` = `"und"`), and `set_track_extended_language(

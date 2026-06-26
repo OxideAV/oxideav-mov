@@ -59,6 +59,7 @@ use oxideav_core::{Error, Result};
 use crate::standalone::{Error, Result};
 
 use crate::gmhd::{Gmin, Tcmi};
+use crate::header::Hmhd;
 use crate::media_meta::{Clap, ColorParameters, Cslg, Fiel, Pasp, Tapt};
 use crate::metadata_sample::{MetadataSampleEntry, SimpleTextSampleEntry, SubtitleSampleEntry};
 use crate::text_sample::TextSampleDescription;
@@ -699,6 +700,26 @@ pub enum MuxTrackKind {
         /// The `stxt` sample entry. Serialised via
         /// [`SimpleTextSampleEntry::to_body_bytes`].
         description: SimpleTextSampleEntry,
+    },
+    /// ISO BMFF **hint** track (ISO/IEC 14496-12 §12.4), a streaming-
+    /// server packetization track. Emits `hdlr.component_subtype = hint`,
+    /// an `hmhd` Hint Media Header Box (§12.4.2 — protocol-independent PDU
+    /// buffering metadata), and a `stsd` whose single entry is a
+    /// protocol-named HintSampleEntry (§12.4.3 — the FourCC is the
+    /// `protocol` identifier such as `rtp ` / `srtp`, body is opaque
+    /// protocol-specific declarative data). Each sample's `mdat` payload
+    /// is the opaque per-packet hint record. A hint track references the
+    /// media track it packetizes via `tref/hint`.
+    Hint {
+        /// The hint sample entry's protocol FourCC (e.g. `*b"rtp "`).
+        protocol: [u8; 4],
+        /// Opaque protocol-specific sample-description body (already
+        /// framed boxes or raw bytes), placed after the universal 16-byte
+        /// SampleEntry header. Empty for a bare entry.
+        description: Vec<u8>,
+        /// The Hint Media Header Box fields (max/avg PDU size + bitrate).
+        /// Serialised via [`Hmhd::to_body_bytes`].
+        hmhd: Hmhd,
     },
 }
 
@@ -2522,7 +2543,8 @@ fn build_tkhd(t: &TrackWrite, track_id: u32, movie_ts: u32) -> Vec<u8> {
         | MuxTrackKind::Text { .. }
         | MuxTrackKind::Metadata { .. }
         | MuxTrackKind::Subtitle { .. }
-        | MuxTrackKind::SimpleText { .. } => (0, 0),
+        | MuxTrackKind::SimpleText { .. }
+        | MuxTrackKind::Hint { .. } => (0, 0),
     };
     p[76..80].copy_from_slice(&w_fp.to_be_bytes());
     p[80..84].copy_from_slice(&h_fp.to_be_bytes());
@@ -2590,6 +2612,7 @@ fn build_hdlr(t: &TrackWrite) -> Vec<u8> {
         MuxTrackKind::Metadata { .. } => b"meta",
         MuxTrackKind::Subtitle { .. } => b"subt",
         MuxTrackKind::SimpleText { .. } => b"text",
+        MuxTrackKind::Hint { .. } => b"hint",
     };
     let mut p = Vec::with_capacity(25);
     p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
@@ -2637,6 +2660,10 @@ fn build_minf(
             // 14496-12 §12.5.2), distinct from the QuickTime text track's
             // `gmhd`.
             push_atom(&mut minf, *b"nmhd", &0u32.to_be_bytes());
+        }
+        MuxTrackKind::Hint { hmhd, .. } => {
+            // Hint Media Header Box (ISO/IEC 14496-12 §12.4.2).
+            push_atom(&mut minf, *b"hmhd", &hmhd.to_body_bytes());
         }
     }
     push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
@@ -3192,6 +3219,19 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
             e.extend_from_slice(&t.extra_stsd_atoms);
             wrap_stsd_entry(b"stxt", &e, dri)
         }
+        MuxTrackKind::Hint {
+            protocol,
+            description,
+            ..
+        } => {
+            // ISO BMFF HintSampleEntry (ISO/IEC 14496-12 §12.4.3): the
+            // entry FourCC is the protocol identifier, the body is opaque
+            // protocol-specific declarative data after the universal
+            // 16-byte header.
+            let mut e = description.clone();
+            e.extend_from_slice(&t.extra_stsd_atoms);
+            wrap_stsd_entry(protocol, &e, dri)
+        }
     };
     let mut stsd = Vec::with_capacity(8 + entry_body.len());
     stsd.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
@@ -3699,7 +3739,8 @@ fn build_init_tkhd(t: &TrackWrite, track_id: u32) -> Vec<u8> {
         | MuxTrackKind::Text { .. }
         | MuxTrackKind::Metadata { .. }
         | MuxTrackKind::Subtitle { .. }
-        | MuxTrackKind::SimpleText { .. } => (0, 0),
+        | MuxTrackKind::SimpleText { .. }
+        | MuxTrackKind::Hint { .. } => (0, 0),
     };
     p[76..80].copy_from_slice(&w_fp.to_be_bytes());
     p[80..84].copy_from_slice(&h_fp.to_be_bytes());
@@ -3757,6 +3798,10 @@ fn build_init_minf(t: &TrackWrite) -> Vec<u8> {
             // 14496-12 §12.5.2), distinct from the QuickTime text track's
             // `gmhd`.
             push_atom(&mut minf, *b"nmhd", &0u32.to_be_bytes());
+        }
+        MuxTrackKind::Hint { hmhd, .. } => {
+            // Hint Media Header Box (ISO/IEC 14496-12 §12.4.2).
+            push_atom(&mut minf, *b"hmhd", &hmhd.to_body_bytes());
         }
     }
     push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
@@ -3829,7 +3874,8 @@ fn build_trex(t: &TrackWrite, track_id: u32) -> Vec<u8> {
         | MuxTrackKind::Text { .. }
         | MuxTrackKind::Metadata { .. }
         | MuxTrackKind::Subtitle { .. }
-        | MuxTrackKind::SimpleText { .. } => 0u32,
+        | MuxTrackKind::SimpleText { .. }
+        | MuxTrackKind::Hint { .. } => 0u32,
     };
     p.extend_from_slice(&default_flags.to_be_bytes());
     p

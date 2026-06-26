@@ -679,6 +679,22 @@ pub struct Hmhd {
     pub avg_bitrate: u32,
 }
 
+impl Hmhd {
+    /// Serialise the 20-byte `hmhd` body — `[ver+flags=4][maxPDUsize:u16]
+    /// [avgPDUsize:u16][maxbitrate:u32][avgbitrate:u32][reserved:u32]`
+    /// (ISO/IEC 14496-12 §12.4.2.2). Exact inverse of [`parse_hmhd`].
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut p = Vec::with_capacity(20);
+        p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+        p.extend_from_slice(&self.max_pdu_size.to_be_bytes());
+        p.extend_from_slice(&self.avg_pdu_size.to_be_bytes());
+        p.extend_from_slice(&self.max_bitrate.to_be_bytes());
+        p.extend_from_slice(&self.avg_bitrate.to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes()); // reserved
+        p
+    }
+}
+
 /// Parse an `hmhd` payload (ISO/IEC 14496-12 §12.4.2.2). The body after
 /// the 4-byte FullBox header is `maxPDUsize:u16 avgPDUsize:u16
 /// maxbitrate:u32 avgbitrate:u32 reserved:u32` — 16 bytes total.
@@ -785,6 +801,19 @@ mod tests {
     #[test]
     fn hmhd_too_short_errors() {
         assert!(parse_hmhd(&[0u8; 8]).is_err());
+    }
+
+    #[test]
+    fn hmhd_serialiser_roundtrips() {
+        let h = Hmhd {
+            max_pdu_size: 1500,
+            avg_pdu_size: 1200,
+            max_bitrate: 5_000_000,
+            avg_bitrate: 3_000_000,
+        };
+        let body = h.to_body_bytes();
+        assert_eq!(body.len(), 20);
+        assert_eq!(parse_hmhd(&body).unwrap(), h);
     }
 
     #[test]
