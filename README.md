@@ -258,6 +258,12 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   `encode_text_sample`. With a media track's `tref/chap` the titles
   resolve through `MovDemuxer::chapters_for` (DTS-keyed start + duration,
   Unicode and `encd` encoding preserved).
+- `set_track_language(track_id, packed)` sets `mdhd.language` (pack a
+  three-letter ISO-639-2 code with `MovMetadata::iso_language`; default
+  `MDHD_LANGUAGE_UND` = `"und"`), and `set_track_extended_language(
+  track_id, "en-US")` emits an `elng` Extended Language Tag Box (BCP 47;
+  empty string clears it). Both round-trip onto `Track::mdhd.language` /
+  `Track::extended_language`.
 - `set_track_aperture(track_id, Tapt)` emits a `tapt` (Track Aperture
   Modes box) on a video track, carrying whichever of `clef` (Clean
   Aperture) / `prof` (Production Aperture) / `enof` (Encoded Pixels)

@@ -805,7 +805,22 @@ struct TrackWrite {
     /// the sample entries point at). Set via
     /// [`MovMuxer::set_data_references`].
     data_references: Vec<DataReferenceWrite>,
+    /// Packed ISO-639-2/T media language for `mdhd.language` (QTFF
+    /// p. 197 / ISO/IEC 14496-12 §8.4.2.3). Defaults to
+    /// [`MDHD_LANGUAGE_UND`] (`"und"`). Set via
+    /// [`MovMuxer::set_track_language`].
+    media_language: u16,
+    /// Optional RFC 4646 / BCP 47 extended language tag emitted as an
+    /// `elng` box in `mdia` (§8.4.6) — e.g. `"en-US"`. `None` ⇒ no
+    /// `elng`. Set via [`MovMuxer::set_track_extended_language`].
+    extended_language: Option<String>,
 }
+
+/// The packed `mdhd.language` value for `"und"` (undetermined) — the
+/// default emitted when a track's language isn't set
+/// (ISO/IEC 14496-12 §8.4.2.3: five-bit ISO-639-2/T codes biased by
+/// `0x60`, packed `0_uuuuu_nnnnn_ddddd`).
+pub const MDHD_LANGUAGE_UND: u16 = 0x55C4;
 
 /// One track-reference declaration written by
 /// [`MovMuxer::set_track_references`] (QTFF p. 50 / ISO/IEC 14496-12
@@ -1071,6 +1086,8 @@ impl MovMuxer {
             track_references: Vec::new(),
             tapt: None,
             data_references: Vec::new(),
+            media_language: MDHD_LANGUAGE_UND,
+            extended_language: None,
         });
         self.tracks.len() as u32
     }
@@ -1524,6 +1541,57 @@ impl MovMuxer {
             )));
         }
         self.tracks[idx].data_references = references.to_vec();
+        Ok(())
+    }
+
+    /// Set a previously-added track's media language — the packed
+    /// ISO-639-2/T code written to `mdhd.language` (QTFF p. 197 / ISO/IEC
+    /// 14496-12 §8.4.2.3).
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// Pack a three-letter code with [`MovMetadata::iso_language`] (e.g.
+    /// `MovMetadata::iso_language(*b"eng")`); the default when unset is
+    /// [`MDHD_LANGUAGE_UND`] (`"und"`). Round-trips through the read side
+    /// onto `mdhd.language` (decodable via `iso_language_tag`). Rejects
+    /// an unknown `track_id`.
+    pub fn set_track_language(&mut self, track_id: u32, packed_language: u16) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_track_language unknown track id {track_id}"
+                ))
+            })?;
+        self.tracks[idx].media_language = packed_language;
+        Ok(())
+    }
+
+    /// Set a previously-added track's extended language tag, emitted as
+    /// an `elng` (Extended Language Tag Box) in `mdia` (ISO/IEC
+    /// 14496-12 §8.4.6).
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// `tag` is an RFC 4646 / BCP 47 tag such as `"en-US"` or
+    /// `"zh-Hant"`; it overrides the packed `mdhd.language` when a reader
+    /// honours it. Passing an empty string clears the `elng` (no box is
+    /// written). Round-trips through `parse_elng` onto
+    /// [`crate::track::Track::extended_language`]. Rejects an unknown
+    /// `track_id`.
+    pub fn set_track_extended_language(&mut self, track_id: u32, tag: &str) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_track_extended_language unknown track id {track_id}"
+                ))
+            })?;
+        self.tracks[idx].extended_language = if tag.is_empty() {
+            None
+        } else {
+            Some(tag.to_string())
+        };
         Ok(())
     }
 
@@ -2342,6 +2410,11 @@ fn build_mdia(
     let mut mdia = Vec::new();
     push_atom(&mut mdia, *b"mdhd", &build_mdhd(t));
     push_atom(&mut mdia, *b"hdlr", &build_hdlr(t));
+    // Extended Language Tag Box after `hdlr`, before `minf` (ISO/IEC
+    // 14496-12 §8.4.6 places `elng` among the `mdia` children).
+    if let Some(tag) = &t.extended_language {
+        push_atom(&mut mdia, *b"elng", &build_elng(tag));
+    }
     push_atom(
         &mut mdia,
         *b"minf",
@@ -2350,17 +2423,28 @@ fn build_mdia(
     mdia
 }
 
+/// Build an `elng` (Extended Language Tag Box) payload — `[ver+flags=4]
+/// [NUL-terminated RFC 4646 / BCP 47 UTF-8 tag]` (ISO/IEC 14496-12
+/// §8.4.6). Inverse of the read-side `parse_elng`.
+fn build_elng(tag: &str) -> Vec<u8> {
+    let bytes = tag.as_bytes();
+    let mut p = Vec::with_capacity(4 + bytes.len() + 1);
+    p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+    p.extend_from_slice(bytes);
+    p.push(0); // NUL terminator
+    p
+}
+
 fn build_mdhd(t: &TrackWrite) -> Vec<u8> {
     // ISO/IEC 14496-12 §8.4.2 — version 0. 24 bytes payload.
     let mut p = vec![0u8; 24];
     p[12..16].copy_from_slice(&t.media_timescale.to_be_bytes());
     let dur = track_media_duration(t).min(u32::MAX as u64) as u32;
     p[16..20].copy_from_slice(&dur.to_be_bytes());
-    // language @ 20..22 = 0x55C4 (= 0b10101 01110 00100 = "und",
-    // QTFF p. 197 / ISO BMFF §8.4.2.3: ASCII "und" packed five-bit
-    // chars + 0x60 base ⇒ ('u'-0x60)=0x15, ('n'-0x60)=0xE, ('d'-
-    // 0x60)=0x4 ⇒ 0b0_10101_01110_00100 = 0x55C4).
-    p[20..22].copy_from_slice(&0x55C4u16.to_be_bytes());
+    // language @ 20..22 — packed ISO-639-2/T (QTFF p. 197 / ISO BMFF
+    // §8.4.2.3). Defaults to MDHD_LANGUAGE_UND ("und"); overridable via
+    // set_track_language.
+    p[20..22].copy_from_slice(&t.media_language.to_be_bytes());
     // quality @ 22..24 = 0.
     p
 }
@@ -3441,6 +3525,9 @@ fn build_init_mdia(t: &TrackWrite) -> Vec<u8> {
     let mut mdia = Vec::new();
     push_atom(&mut mdia, *b"mdhd", &build_init_mdhd(t));
     push_atom(&mut mdia, *b"hdlr", &build_hdlr(t));
+    if let Some(tag) = &t.extended_language {
+        push_atom(&mut mdia, *b"elng", &build_elng(tag));
+    }
     push_atom(&mut mdia, *b"minf", &build_init_minf(t));
     mdia
 }
@@ -3450,7 +3537,7 @@ fn build_init_mdhd(t: &TrackWrite) -> Vec<u8> {
     p[12..16].copy_from_slice(&t.media_timescale.to_be_bytes());
     // duration = 0 for fragmented init segments.
     p[16..20].copy_from_slice(&0u32.to_be_bytes());
-    p[20..22].copy_from_slice(&0x55C4u16.to_be_bytes());
+    p[20..22].copy_from_slice(&t.media_language.to_be_bytes());
     p
 }
 
@@ -3765,6 +3852,8 @@ mod tests {
             track_references: Vec::new(),
             tapt: None,
             data_references: Vec::new(),
+            media_language: MDHD_LANGUAGE_UND,
+            extended_language: None,
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -3810,6 +3899,8 @@ mod tests {
             track_references: Vec::new(),
             tapt: None,
             data_references: Vec::new(),
+            media_language: MDHD_LANGUAGE_UND,
+            extended_language: None,
         }
     }
 
@@ -4254,6 +4345,8 @@ mod tests {
             track_references: Vec::new(),
             tapt: None,
             data_references: Vec::new(),
+            media_language: MDHD_LANGUAGE_UND,
+            extended_language: None,
         };
         assert!(build_stss(&t).is_none());
     }
@@ -4280,6 +4373,8 @@ mod tests {
             track_references: Vec::new(),
             tapt: None,
             data_references: Vec::new(),
+            media_language: MDHD_LANGUAGE_UND,
+            extended_language: None,
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -4334,6 +4429,8 @@ mod tests {
             track_references: Vec::new(),
             tapt: None,
             data_references: Vec::new(),
+            media_language: MDHD_LANGUAGE_UND,
+            extended_language: None,
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -4379,6 +4476,8 @@ mod tests {
             track_references: Vec::new(),
             tapt: None,
             data_references: Vec::new(),
+            media_language: MDHD_LANGUAGE_UND,
+            extended_language: None,
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows
