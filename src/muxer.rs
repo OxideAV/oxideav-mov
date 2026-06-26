@@ -814,6 +814,19 @@ struct TrackWrite {
     /// `elng` box in `mdia` (§8.4.6) — e.g. `"en-US"`. `None` ⇒ no
     /// `elng`. Set via [`MovMuxer::set_track_extended_language`].
     extended_language: Option<String>,
+    /// Optional override of the `gmhd/gmin` Generic Media Information
+    /// header (QTFF p. 65) for a track whose `minf` carries a `gmhd`
+    /// (time-code / text / generic media). `None` ⇒ the muxer writes a
+    /// default `gmin` (copy graphics mode, no opcolor, centred balance).
+    /// Set via [`MovMuxer::set_track_gmin`]. Ignored on `vmhd`/`smhd`
+    /// tracks (video/audio carry no `gmhd`).
+    gmin: Option<Gmin>,
+    /// Optional override of the `gmhd/text` media-information header
+    /// matrix (QTFF p. 144) for a text track. `None` ⇒ the muxer writes
+    /// the identity transformation matrix. Set via
+    /// [`MovMuxer::set_text_header_matrix`]. Only meaningful for a
+    /// [`MuxTrackKind::Text`] track.
+    text_header_matrix: Option<[i32; 9]>,
 }
 
 /// The packed `mdhd.language` value for `"und"` (undetermined) — the
@@ -1088,6 +1101,8 @@ impl MovMuxer {
             data_references: Vec::new(),
             media_language: MDHD_LANGUAGE_UND,
             extended_language: None,
+            gmin: None,
+            text_header_matrix: None,
         });
         self.tracks.len() as u32
     }
@@ -1592,6 +1607,71 @@ impl MovMuxer {
         } else {
             Some(tag.to_string())
         };
+        Ok(())
+    }
+
+    /// Override the `gmhd/gmin` Generic Media Information header
+    /// (QTFF p. 65) of a previously-added time-code or text track.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// The [`Gmin`] carries the compositing `graphics_mode` (Table 4-2),
+    /// the `opcolor` RGB triple consulted by the blend/transparent modes,
+    /// and the stereo `balance`. When this is not set, the muxer writes a
+    /// default `gmin` (copy graphics mode, no opcolor, centred balance).
+    /// Round-trips through `parse_gmin` onto
+    /// [`crate::track::Track::gmhd`]'s `gmin` slot.
+    ///
+    /// Rejects an unknown `track_id` and a video/audio track (those carry
+    /// a `vmhd`/`smhd` media header, not a `gmhd`).
+    pub fn set_track_gmin(&mut self, track_id: u32, gmin: Gmin) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_track_gmin unknown track id {track_id}"
+                ))
+            })?;
+        if !matches!(
+            self.tracks[idx].kind,
+            MuxTrackKind::Timecode { .. } | MuxTrackKind::Text { .. }
+        ) {
+            return Err(Error::invalid(format!(
+                "MOV muxer: set_track_gmin on track {track_id} which carries no gmhd (only a time-code or text track has a Generic Media Information header)"
+            )));
+        }
+        self.tracks[idx].gmin = Some(gmin);
+        Ok(())
+    }
+
+    /// Override the `gmhd/text` media-information header transformation
+    /// matrix (QTFF p. 144) of a previously-added text track.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// `matrix` is a 9-element 3×3 row-major matrix in the `tkhd`/`text`
+    /// fixed-point convention (16.16 for the six scale/skew/translate
+    /// entries, 2.30 for the three right-hand-column entries) that maps
+    /// each text sample's local coordinates onto the movie canvas. When
+    /// this is not set, the muxer writes the identity matrix. Round-trips
+    /// through `parse_text_header` onto
+    /// [`crate::track::Track::gmhd`]'s `text` slot.
+    ///
+    /// Rejects an unknown `track_id` and a non-text track.
+    pub fn set_text_header_matrix(&mut self, track_id: u32, matrix: [i32; 9]) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_text_header_matrix unknown track id {track_id}"
+                ))
+            })?;
+        if !matches!(self.tracks[idx].kind, MuxTrackKind::Text { .. }) {
+            return Err(Error::invalid(format!(
+                "MOV muxer: set_text_header_matrix on track {track_id} which is not a text track (the gmhd/text header is defined only for a QuickTime text track)"
+            )));
+        }
+        self.tracks[idx].text_header_matrix = Some(matrix);
         Ok(())
     }
 
@@ -2481,10 +2561,14 @@ fn build_minf(
         MuxTrackKind::Video { .. } => push_atom(&mut minf, *b"vmhd", &build_vmhd()),
         MuxTrackKind::Audio { .. } => push_atom(&mut minf, *b"smhd", &build_smhd()),
         MuxTrackKind::Timecode { tcmi, .. } => {
-            push_atom(&mut minf, *b"gmhd", &build_gmhd_tmcd(tcmi));
+            push_atom(&mut minf, *b"gmhd", &build_gmhd_tmcd(tcmi, t.gmin.as_ref()));
         }
         MuxTrackKind::Text { .. } => {
-            push_atom(&mut minf, *b"gmhd", &build_gmhd_text());
+            push_atom(
+                &mut minf,
+                *b"gmhd",
+                &build_gmhd_text(t.gmin.as_ref(), t.text_header_matrix.as_ref()),
+            );
         }
     }
     push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
@@ -2516,11 +2600,13 @@ fn build_smhd() -> Vec<u8> {
 /// Time-Code Media Information atom. The parsed shape round-trips
 /// through the demuxer's `parse_gmhd` onto `Track::gmhd`
 /// (`gmin` + `tcmi`).
-fn build_gmhd_tmcd(tcmi: &Tcmi) -> Vec<u8> {
+fn build_gmhd_tmcd(tcmi: &Tcmi, gmin: Option<&Gmin>) -> Vec<u8> {
     let mut gmhd = Vec::new();
-    // Default `gmin`: copy graphics mode, no opcolor, centred balance —
-    // the conventional choice for a non-visual generic track.
-    push_atom(&mut gmhd, *b"gmin", &Gmin::default().to_body_bytes());
+    // `gmin`: caller-supplied override, else the conventional default
+    // (copy graphics mode, no opcolor, centred balance) for a non-visual
+    // generic track.
+    let gmin_body = gmin.copied().unwrap_or_default().to_body_bytes();
+    push_atom(&mut gmhd, *b"gmin", &gmin_body);
     // `tmcd` container with a single `tcmi` child.
     let mut tmcd_box = Vec::new();
     push_atom(&mut tmcd_box, *b"tcmi", &tcmi.to_body_bytes());
@@ -2533,15 +2619,20 @@ fn build_gmhd_tmcd(tcmi: &Tcmi) -> Vec<u8> {
 /// information atom carrying a 9-element identity transformation matrix
 /// (36 bytes, no FullBox prefix). Round-trips through the demuxer's
 /// `parse_gmhd` onto `Track::gmhd` (`gmin` + `text`).
-fn build_gmhd_text() -> Vec<u8> {
+fn build_gmhd_text(gmin: Option<&Gmin>, matrix: Option<&[i32; 9]>) -> Vec<u8> {
     let mut gmhd = Vec::new();
-    push_atom(&mut gmhd, *b"gmin", &Gmin::default().to_body_bytes());
-    // 3×3 identity matrix in 16.16 / 2.30 fixed-point (a=d=1.0, w=1.0),
-    // the same convention as `tkhd`/`text` header matrices.
+    let gmin_body = gmin.copied().unwrap_or_default().to_body_bytes();
+    push_atom(&mut gmhd, *b"gmin", &gmin_body);
+    // 9-element transformation matrix (36 bytes, no FullBox prefix). The
+    // caller may override; the default is the 3×3 identity in 16.16 /
+    // 2.30 fixed-point (a=d=1.0, w=1.0), the same convention as
+    // `tkhd`/`text` header matrices.
     let mut text = vec![0u8; 36];
-    text[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // a
-    text[16..20].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // d
-    text[32..36].copy_from_slice(&0x4000_0000u32.to_be_bytes()); // w (2.30)
+    let default_matrix: [i32; 9] = [0x0001_0000, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000];
+    let m = matrix.unwrap_or(&default_matrix);
+    for (i, &v) in m.iter().enumerate() {
+        text[i * 4..i * 4 + 4].copy_from_slice(&v.to_be_bytes());
+    }
     push_atom(&mut gmhd, *b"text", &text);
     gmhd
 }
@@ -3547,10 +3638,14 @@ fn build_init_minf(t: &TrackWrite) -> Vec<u8> {
         MuxTrackKind::Video { .. } => push_atom(&mut minf, *b"vmhd", &build_vmhd()),
         MuxTrackKind::Audio { .. } => push_atom(&mut minf, *b"smhd", &build_smhd()),
         MuxTrackKind::Timecode { tcmi, .. } => {
-            push_atom(&mut minf, *b"gmhd", &build_gmhd_tmcd(tcmi));
+            push_atom(&mut minf, *b"gmhd", &build_gmhd_tmcd(tcmi, t.gmin.as_ref()));
         }
         MuxTrackKind::Text { .. } => {
-            push_atom(&mut minf, *b"gmhd", &build_gmhd_text());
+            push_atom(
+                &mut minf,
+                *b"gmhd",
+                &build_gmhd_text(t.gmin.as_ref(), t.text_header_matrix.as_ref()),
+            );
         }
     }
     push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
@@ -3854,6 +3949,8 @@ mod tests {
             data_references: Vec::new(),
             media_language: MDHD_LANGUAGE_UND,
             extended_language: None,
+            gmin: None,
+            text_header_matrix: None,
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -3901,6 +3998,8 @@ mod tests {
             data_references: Vec::new(),
             media_language: MDHD_LANGUAGE_UND,
             extended_language: None,
+            gmin: None,
+            text_header_matrix: None,
         }
     }
 
@@ -4347,6 +4446,8 @@ mod tests {
             data_references: Vec::new(),
             media_language: MDHD_LANGUAGE_UND,
             extended_language: None,
+            gmin: None,
+            text_header_matrix: None,
         };
         assert!(build_stss(&t).is_none());
     }
@@ -4375,6 +4476,8 @@ mod tests {
             data_references: Vec::new(),
             media_language: MDHD_LANGUAGE_UND,
             extended_language: None,
+            gmin: None,
+            text_header_matrix: None,
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -4431,6 +4534,8 @@ mod tests {
             data_references: Vec::new(),
             media_language: MDHD_LANGUAGE_UND,
             extended_language: None,
+            gmin: None,
+            text_header_matrix: None,
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -4478,6 +4583,8 @@ mod tests {
             data_references: Vec::new(),
             media_language: MDHD_LANGUAGE_UND,
             extended_language: None,
+            gmin: None,
+            text_header_matrix: None,
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

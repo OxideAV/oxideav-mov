@@ -277,6 +277,17 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   contain exactly one `SelfRef`; the muxer points every sample entry's
   `data_reference_index` at it. Round-trips through `parse_dref` onto
   `Track::data_references`.
+- `set_track_gmin(track_id, Gmin)` overrides the `gmhd/gmin` Generic
+  Media Information header (QTFF p. 65) of a time-code / text track —
+  the compositing `graphics_mode` (Table 4-2), the `opcolor` triple the
+  blend / transparent modes consult, and the stereo `balance` (8.8
+  fixed-point). `set_text_header_matrix(track_id, [i32; 9])` overrides
+  the `gmhd/text` transformation matrix (QTFF p. 144) of a text track
+  (`tkhd`-convention 16.16 / 2.30 fixed-point). Defaults stay the copy
+  graphics mode + centred balance + identity matrix; both overrides
+  round-trip through `parse_gmin` / `parse_text_header` onto
+  `Track::gmhd`. Rejected on a video / audio track (no `gmhd`) and, for
+  the matrix, on a non-text track.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.
