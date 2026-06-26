@@ -60,6 +60,7 @@ use crate::standalone::{Error, Result};
 
 use crate::gmhd::{Gmin, Tcmi};
 use crate::media_meta::{Clap, ColorParameters, Cslg, Fiel, Pasp, Tapt};
+use crate::metadata_sample::MetadataSampleEntry;
 use crate::text_sample::TextSampleDescription;
 use crate::timecode::Tmcd;
 use std::io::Write;
@@ -655,6 +656,21 @@ pub enum MuxTrackKind {
         /// The `text` sample description (display config). Serialised via
         /// [`TextSampleDescription::to_body_bytes`].
         description: TextSampleDescription,
+    },
+    /// ISO BMFF **timed-metadata** track (ISO/IEC 14496-12 §12.3). Emits
+    /// `hdlr.component_subtype = meta`, a `nmhd` Null Media Header Box
+    /// (§8.4.5.2 — metadata tracks carry no specific media header), and a
+    /// `stsd` whose single entry is a `metx` / `mett` / `urim`
+    /// [`MetadataSampleEntry`] (the FourCC is taken from the variant).
+    /// Each sample's `mdat` payload is the opaque per-sample metadata
+    /// record (an "I-frame" carrying the complete metadata for its time
+    /// interval, §12.3.3.1). A media track typically references it via
+    /// `tref/cdsc`.
+    Metadata {
+        /// The `metx` / `mett` / `urim` sample entry. Serialised via
+        /// [`MetadataSampleEntry::to_body_bytes`]; its `format()` selects
+        /// the `stsd` entry FourCC.
+        description: MetadataSampleEntry,
     },
 }
 
@@ -2471,10 +2487,12 @@ fn build_tkhd(t: &TrackWrite, track_id: u32, movie_ts: u32) -> Vec<u8> {
         MuxTrackKind::Video { width, height, .. } => {
             ((*width as u32) << 16, (*height as u32) << 16)
         }
-        // Audio and time-code tracks carry no visual dimensions.
-        MuxTrackKind::Audio { .. } | MuxTrackKind::Timecode { .. } | MuxTrackKind::Text { .. } => {
-            (0, 0)
-        }
+        // Audio, time-code, text, and metadata tracks carry no visual
+        // dimensions.
+        MuxTrackKind::Audio { .. }
+        | MuxTrackKind::Timecode { .. }
+        | MuxTrackKind::Text { .. }
+        | MuxTrackKind::Metadata { .. } => (0, 0),
     };
     p[76..80].copy_from_slice(&w_fp.to_be_bytes());
     p[80..84].copy_from_slice(&h_fp.to_be_bytes());
@@ -2539,6 +2557,7 @@ fn build_hdlr(t: &TrackWrite) -> Vec<u8> {
         MuxTrackKind::Audio { .. } => b"soun",
         MuxTrackKind::Timecode { .. } => b"tmcd",
         MuxTrackKind::Text { .. } => b"text",
+        MuxTrackKind::Metadata { .. } => b"meta",
     };
     let mut p = Vec::with_capacity(25);
     p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
@@ -2569,6 +2588,12 @@ fn build_minf(
                 *b"gmhd",
                 &build_gmhd_text(t.gmin.as_ref(), t.text_header_matrix.as_ref()),
             );
+        }
+        MuxTrackKind::Metadata { .. } => {
+            // Null Media Header Box (ISO/IEC 14496-12 §8.4.5.2): an empty
+            // FullBox(version=0, flags=0). Metadata tracks carry no
+            // specific media header.
+            push_atom(&mut minf, *b"nmhd", &0u32.to_be_bytes());
         }
     }
     push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
@@ -3101,6 +3126,14 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
             e.extend_from_slice(&t.extra_stsd_atoms);
             wrap_stsd_entry(b"text", &e, dri)
         }
+        MuxTrackKind::Metadata { description } => {
+            // ISO BMFF timed-metadata sample entry (metx / mett / urim,
+            // ISO/IEC 14496-12 §12.3.3) after the universal 16-byte
+            // header; the FourCC is taken from the variant.
+            let mut e = description.to_body_bytes();
+            e.extend_from_slice(&t.extra_stsd_atoms);
+            wrap_stsd_entry(&description.format(), &e, dri)
+        }
     };
     let mut stsd = Vec::with_capacity(8 + entry_body.len());
     stsd.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
@@ -3603,9 +3636,10 @@ fn build_init_tkhd(t: &TrackWrite, track_id: u32) -> Vec<u8> {
         MuxTrackKind::Video { width, height, .. } => {
             ((*width as u32) << 16, (*height as u32) << 16)
         }
-        MuxTrackKind::Audio { .. } | MuxTrackKind::Timecode { .. } | MuxTrackKind::Text { .. } => {
-            (0, 0)
-        }
+        MuxTrackKind::Audio { .. }
+        | MuxTrackKind::Timecode { .. }
+        | MuxTrackKind::Text { .. }
+        | MuxTrackKind::Metadata { .. } => (0, 0),
     };
     p[76..80].copy_from_slice(&w_fp.to_be_bytes());
     p[80..84].copy_from_slice(&h_fp.to_be_bytes());
@@ -3646,6 +3680,12 @@ fn build_init_minf(t: &TrackWrite) -> Vec<u8> {
                 *b"gmhd",
                 &build_gmhd_text(t.gmin.as_ref(), t.text_header_matrix.as_ref()),
             );
+        }
+        MuxTrackKind::Metadata { .. } => {
+            // Null Media Header Box (ISO/IEC 14496-12 §8.4.5.2): an empty
+            // FullBox(version=0, flags=0). Metadata tracks carry no
+            // specific media header.
+            push_atom(&mut minf, *b"nmhd", &0u32.to_be_bytes());
         }
     }
     push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
@@ -3710,11 +3750,13 @@ fn build_trex(t: &TrackWrite, track_id: u32) -> Vec<u8> {
     p.extend_from_slice(&0u32.to_be_bytes()); // default_sample_size (per-sample)
     let default_flags = match &t.kind {
         MuxTrackKind::Video { .. } => 0x0001_0000u32, // non-sync default
-        // Audio, time-code, and text samples are each independently
-        // decodable.
-        MuxTrackKind::Audio { .. } | MuxTrackKind::Timecode { .. } | MuxTrackKind::Text { .. } => {
-            0u32
-        }
+        // Audio, time-code, text, and timed-metadata samples are each
+        // independently decodable (a metadata sample is an "I-frame"
+        // carrying the complete metadata for its interval, §12.3.3.1).
+        MuxTrackKind::Audio { .. }
+        | MuxTrackKind::Timecode { .. }
+        | MuxTrackKind::Text { .. }
+        | MuxTrackKind::Metadata { .. } => 0u32,
     };
     p.extend_from_slice(&default_flags.to_be_bytes());
     p

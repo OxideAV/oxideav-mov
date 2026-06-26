@@ -114,6 +114,140 @@ impl MetadataSampleEntry {
             MetadataSampleEntry::Uri(e) => e.bitrate,
         }
     }
+
+    /// The `stsd` entry FourCC selecting this variant (`metx` / `mett` /
+    /// `urim`).
+    pub fn format(&self) -> [u8; 4] {
+        match self {
+            MetadataSampleEntry::Xml(_) => *b"metx",
+            MetadataSampleEntry::Text(_) => *b"mett",
+            MetadataSampleEntry::Uri(_) => *b"urim",
+        }
+    }
+
+    /// Serialise the subclass-specific body of this sample entry — the
+    /// bytes *after* the universal 16-byte SampleEntry header
+    /// (`size`/`format`/6 reserved/`data_reference_index`). The exact
+    /// inverse of [`parse_metadata_sample_entry`] for this variant; the
+    /// owning [`crate::muxer::MovMuxer`] frames the SampleEntry header
+    /// around it.
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        match self {
+            MetadataSampleEntry::Xml(e) => e.to_body_bytes(),
+            MetadataSampleEntry::Text(e) => e.to_body_bytes(),
+            MetadataSampleEntry::Uri(e) => e.to_body_bytes(),
+        }
+    }
+}
+
+/// Append a NUL-terminated UTF-8 string (the inverse of
+/// [`read_c_string`]).
+fn push_c_string(out: &mut Vec<u8>, s: &str) {
+    out.extend_from_slice(s.as_bytes());
+    out.push(0);
+}
+
+/// Frame a child box `[size:u32 BE][fourcc][body]` into `out`.
+fn push_child_box(out: &mut Vec<u8>, fourcc: &[u8; 4], body: &[u8]) {
+    let size = (8 + body.len()) as u32;
+    out.extend_from_slice(&size.to_be_bytes());
+    out.extend_from_slice(fourcc);
+    out.extend_from_slice(body);
+}
+
+impl BitRate {
+    /// Serialise the 12-byte `btrt` BitRateBox body (three big-endian
+    /// 32-bit fields, no FullBox prefix — `btrt` is a plain `Box`). The
+    /// exact inverse of [`parse_btrt`].
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut p = Vec::with_capacity(12);
+        p.extend_from_slice(&self.buffer_size_db.to_be_bytes());
+        p.extend_from_slice(&self.max_bitrate.to_be_bytes());
+        p.extend_from_slice(&self.avg_bitrate.to_be_bytes());
+        p
+    }
+}
+
+impl XmlMetadataSampleEntry {
+    /// Serialise the `metx` body (after the 16-byte SampleEntry header).
+    /// Exact inverse of [`parse_metx`]: the leading
+    /// `content_encoding`?/`namespace`/`schema_location`? NUL-terminated
+    /// strings followed by an optional `btrt`.
+    ///
+    /// The string count is chosen so the read side's positional
+    /// assignment reconstructs the same fields: all three strings are
+    /// emitted whenever `schema_location` is non-empty (so the empty
+    /// `content_encoding` keeps `namespace` in the middle slot); otherwise
+    /// `content_encoding` is emitted only when non-empty.
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !self.schema_location.is_empty() {
+            push_c_string(&mut out, &self.content_encoding);
+            push_c_string(&mut out, &self.namespace);
+            push_c_string(&mut out, &self.schema_location);
+        } else if !self.content_encoding.is_empty() {
+            push_c_string(&mut out, &self.content_encoding);
+            push_c_string(&mut out, &self.namespace);
+        } else {
+            push_c_string(&mut out, &self.namespace);
+        }
+        if let Some(b) = &self.bitrate {
+            push_child_box(&mut out, b"btrt", &b.to_body_bytes());
+        }
+        out
+    }
+}
+
+impl TextMetadataSampleEntry {
+    /// Serialise the `mett` body (after the 16-byte SampleEntry header).
+    /// Exact inverse of [`parse_mett`]: `content_encoding`?/`mime_format`
+    /// NUL-terminated strings, then an optional `txtC` and `btrt`.
+    ///
+    /// `content_encoding` is emitted (even if empty) whenever it is
+    /// non-empty; the read side's two-string case maps to
+    /// `content_encoding` + `mime_format`, the one-string case to
+    /// `mime_format` alone.
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !self.content_encoding.is_empty() {
+            push_c_string(&mut out, &self.content_encoding);
+        }
+        push_c_string(&mut out, &self.mime_format);
+        if let Some(b) = &self.bitrate {
+            push_child_box(&mut out, b"btrt", &b.to_body_bytes());
+        }
+        if let Some(tc) = &self.text_config {
+            // txtC TextConfigBox: FullBox(version=0, flags=0) then the
+            // NUL-terminated text_config string.
+            let mut tbody = vec![0u8; 4];
+            push_c_string(&mut tbody, tc);
+            push_child_box(&mut out, b"txtC", &tbody);
+        }
+        out
+    }
+}
+
+impl UriMetadataSampleEntry {
+    /// Serialise the `urim` body (after the 16-byte SampleEntry header).
+    /// Exact inverse of [`parse_urim`]: a `uri ` FullBox-string, an
+    /// optional `uriI` URIInitBox, and an optional `btrt`.
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        // uri : FullBox(version=0, flags=0) then NUL-terminated theURI.
+        let mut uri_body = vec![0u8; 4];
+        push_c_string(&mut uri_body, &self.the_uri);
+        push_child_box(&mut out, b"uri ", &uri_body);
+        if let Some(data) = &self.init {
+            // uriI URIInitBox: FullBox(version=0, flags=0) then opaque data.
+            let mut ibody = vec![0u8; 4];
+            ibody.extend_from_slice(data);
+            push_child_box(&mut out, b"uriI", &ibody);
+        }
+        if let Some(b) = &self.bitrate {
+            push_child_box(&mut out, b"btrt", &b.to_body_bytes());
+        }
+        out
+    }
 }
 
 /// `metx` — XMLMetaDataSampleEntry (ISO/IEC 14496-12 §12.3.3.2).
@@ -821,5 +955,110 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(e.bitrate().unwrap().avg_bitrate, 7);
+    }
+
+    // ─────────────── serialiser round-trips (round 375) ───────────────
+
+    fn assert_metx_roundtrip(e: &XmlMetadataSampleEntry) {
+        let body = e.to_body_bytes();
+        assert_eq!(&parse_metx(&body).unwrap(), e);
+        // Dispatch path round-trips too.
+        let wrapped = MetadataSampleEntry::Xml(e.clone());
+        assert_eq!(wrapped.format(), *b"metx");
+        assert_eq!(
+            parse_metadata_sample_entry(b"metx", &wrapped.to_body_bytes()).unwrap(),
+            Some(wrapped)
+        );
+    }
+
+    #[test]
+    fn metx_serialiser_roundtrips_all_shapes() {
+        assert_metx_roundtrip(&XmlMetadataSampleEntry {
+            namespace: "urn:ns".into(),
+            ..Default::default()
+        });
+        assert_metx_roundtrip(&XmlMetadataSampleEntry {
+            content_encoding: "gzip".into(),
+            namespace: "urn:ns".into(),
+            ..Default::default()
+        });
+        assert_metx_roundtrip(&XmlMetadataSampleEntry {
+            content_encoding: "gzip".into(),
+            namespace: "urn:a urn:b".into(),
+            schema_location: "http://s/x.xsd".into(),
+            bitrate: Some(BitRate {
+                buffer_size_db: 4096,
+                max_bitrate: 1_000_000,
+                avg_bitrate: 800_000,
+            }),
+        });
+        // Empty content_encoding but non-empty schema must still emit all
+        // three strings so the namespace stays in the middle slot.
+        assert_metx_roundtrip(&XmlMetadataSampleEntry {
+            namespace: "urn:ns".into(),
+            schema_location: "http://s/x.xsd".into(),
+            ..Default::default()
+        });
+    }
+
+    fn assert_mett_roundtrip(e: &TextMetadataSampleEntry) {
+        let body = e.to_body_bytes();
+        assert_eq!(&parse_mett(&body).unwrap(), e);
+    }
+
+    #[test]
+    fn mett_serialiser_roundtrips_all_shapes() {
+        assert_mett_roundtrip(&TextMetadataSampleEntry {
+            mime_format: "text/plain".into(),
+            ..Default::default()
+        });
+        assert_mett_roundtrip(&TextMetadataSampleEntry {
+            content_encoding: "gzip".into(),
+            mime_format: "text/html".into(),
+            text_config: Some("preamble".into()),
+            bitrate: Some(BitRate {
+                buffer_size_db: 1,
+                max_bitrate: 2,
+                avg_bitrate: 3,
+            }),
+        });
+    }
+
+    fn assert_urim_roundtrip(e: &UriMetadataSampleEntry) {
+        let body = e.to_body_bytes();
+        assert_eq!(&parse_urim(&body).unwrap(), e);
+    }
+
+    #[test]
+    fn urim_serialiser_roundtrips_all_shapes() {
+        assert_urim_roundtrip(&UriMetadataSampleEntry {
+            the_uri: "urn:x".into(),
+            ..Default::default()
+        });
+        assert_urim_roundtrip(&UriMetadataSampleEntry {
+            the_uri: "urn:x".into(),
+            init: Some(vec![1, 2, 3, 4, 5]),
+            bitrate: Some(BitRate {
+                buffer_size_db: 7,
+                max_bitrate: 8,
+                avg_bitrate: 9,
+            }),
+        });
+        // Empty init data is distinct from absent init.
+        assert_urim_roundtrip(&UriMetadataSampleEntry {
+            the_uri: "urn:x".into(),
+            init: Some(Vec::new()),
+            bitrate: None,
+        });
+    }
+
+    #[test]
+    fn btrt_serialiser_roundtrips() {
+        let b = BitRate {
+            buffer_size_db: 0xDEAD_BEEF,
+            max_bitrate: 123,
+            avg_bitrate: 456,
+        };
+        assert_eq!(parse_btrt(&b.to_body_bytes()).unwrap(), b);
     }
 }

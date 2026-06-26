@@ -139,7 +139,8 @@ Fragmented files use `tfra` when present.
 ## Muxer
 
 `MovMuxer` emits a non-fragmented MOV/MP4 (`ftyp` + `mdat` + `moov`)
-carrying one or more video / audio / time-code / text tracks,
+carrying one or more video / audio / time-code / text / timed-metadata
+tracks,
 round-tripping through `MovDemuxer` with sample count, sizes, payloads,
 and keyframe flags preserved. `stco` auto-promotes to `co64` when chunk offsets cross
 4 GiB. Per-sample composition offsets (`MuxSample.composition_offset`,
@@ -258,6 +259,20 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   `encode_text_sample`. With a media track's `tref/chap` the titles
   resolve through `MovDemuxer::chapters_for` (DTS-keyed start + duration,
   Unicode and `encd` encoding preserved).
+- `MuxTrackKind::Metadata { description }` writes an ISO BMFF timed-
+  metadata track (ISO/IEC 14496-12 §12.3): a `meta`-subtype `hdlr`, an
+  `nmhd` Null Media Header Box (§8.4.5.2), and a `stsd` whose single
+  entry is a `metx` / `mett` / `urim` `MetadataSampleEntry` (the FourCC
+  comes from the variant). New `MetadataSampleEntry::to_body_bytes` (+
+  per-variant `XmlMetadataSampleEntry` / `TextMetadataSampleEntry` /
+  `UriMetadataSampleEntry` / `BitRate` serialisers) are the exact
+  inverses of `parse_metx` / `parse_mett` / `parse_urim` / `parse_btrt`,
+  framing the `content_encoding` / `namespace` / `schema_location`
+  strings, the `txtC` / `uri ` / `uriI` / `btrt` child boxes. Each
+  `MuxSample` is the opaque per-sample metadata record. Round-trips onto
+  `SampleDescription::metadata` on the non-fragmented and fragmented
+  paths; a media track's `tref/cdsc` to it resolves through
+  `Track::references`.
 - `set_track_language(track_id, packed)` sets `mdhd.language` (pack a
   three-letter ISO-639-2 code with `MovMetadata::iso_language`; default
   `MDHD_LANGUAGE_UND` = `"und"`), and `set_track_extended_language(
