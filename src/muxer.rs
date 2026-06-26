@@ -752,6 +752,51 @@ struct TrackWrite {
     /// §12.1.4 / §12.1.5, QTFF p. 94). Only meaningful for a video
     /// track; ignored on audio. Empty ⇒ no extension boxes.
     visual_extensions: VisualExtensions,
+    /// Optional track-reference declarations (QTFF p. 50 / ISO/IEC
+    /// 14496-12 §8.3.3 — Track Reference Box). When non-empty the muxer
+    /// emits a `tref` between this track's `tkhd`/`edts` and its `mdia`,
+    /// one child atom per [`TrackReference`] (FourCC = reference type,
+    /// body = packed `u32` referenced track ids). Empty ⇒ no `tref`.
+    track_references: Vec<TrackReference>,
+}
+
+/// One track-reference declaration written by
+/// [`MovMuxer::set_track_references`] (QTFF p. 50 / ISO/IEC 14496-12
+/// §8.3.3 — Track Reference Type Box).
+///
+/// A `tref` carries one child atom per reference *type*; the child's
+/// FourCC names the relationship (`chap` chapter list, `tmcd` time-code
+/// track, `sync`, `scpt`, `hint`, `cdsc`, …) and its body is a tightly
+/// packed list of `u32` referenced track ids. This type is the
+/// write-side mirror of the read-side [`crate::track::TrackRef`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackReference {
+    /// Reference-type FourCC (e.g. `*b"chap"`, `*b"tmcd"`).
+    pub reference_type: [u8; 4],
+    /// 1-based ids of the referenced tracks (the values returned by
+    /// [`MovMuxer::add_track`]). At least one id should be present; an
+    /// empty list emits an empty child atom (legal but inert).
+    pub track_ids: Vec<u32>,
+}
+
+impl TrackReference {
+    /// Build a reference of the given type to a single track.
+    pub fn to(reference_type: [u8; 4], track_id: u32) -> Self {
+        Self {
+            reference_type,
+            track_ids: vec![track_id],
+        }
+    }
+
+    /// Build a `chap` (chapter-list) reference to a single text track.
+    pub fn chapter(text_track_id: u32) -> Self {
+        Self::to(*b"chap", text_track_id)
+    }
+
+    /// Build a `tmcd` (time-code) reference to a single time-code track.
+    pub fn timecode(timecode_track_id: u32) -> Self {
+        Self::to(*b"tmcd", timecode_track_id)
+    }
 }
 
 /// Fragmentation policy for [`MovMuxer::write_to_fragmented`].
@@ -938,6 +983,7 @@ impl MovMuxer {
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
             visual_extensions: VisualExtensions::default(),
+            track_references: Vec::new(),
         });
         self.tracks.len() as u32
     }
@@ -1255,6 +1301,58 @@ impl MovMuxer {
             )));
         }
         self.tracks[idx].edits = edits.to_vec();
+        Ok(())
+    }
+
+    /// Attach track-reference declarations to a previously-added track,
+    /// emitted as a `tref` (Track Reference Box, QTFF p. 50 / ISO/IEC
+    /// 14496-12 §8.3.3) between the track's `tkhd`/`edts` and its
+    /// `mdia`.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// Each [`TrackReference`] becomes one child atom whose FourCC is
+    /// the reference type (`chap`, `tmcd`, `sync`, …) and whose body is
+    /// the packed list of referenced track ids. A track may carry
+    /// several references of distinct types; pass them all in one call.
+    ///
+    /// Every referenced id is validated against the set of tracks added
+    /// so far — a reference to an unknown or out-of-range track id is
+    /// rejected and the track is left unchanged. (Self-references are
+    /// permitted; some reference types legitimately point at the
+    /// declaring track.) Referenced ids must therefore be added before
+    /// this call; add the chapter / time-code track first, then declare
+    /// the reference on the media track.
+    ///
+    /// Replaces any references previously attached to the same track.
+    /// The references round-trip through the read-side `parse_tref` onto
+    /// [`crate::track::Track::references`]. Honoured on the
+    /// non-fragmented write path; the fragmented init `moov` ignores
+    /// it.
+    pub fn set_track_references(
+        &mut self,
+        track_id: u32,
+        references: &[TrackReference],
+    ) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_track_references unknown track id {track_id}"
+                ))
+            })?;
+        let track_count = self.tracks.len() as u32;
+        for r in references {
+            for &id in &r.track_ids {
+                if id == 0 || id > track_count {
+                    return Err(Error::invalid(format!(
+                        "MOV muxer: set_track_references type {:?} references unknown track id {id} (1..={track_count} valid)",
+                        core::str::from_utf8(&r.reference_type).unwrap_or("????")
+                    )));
+                }
+            }
+        }
+        self.tracks[idx].track_references = references.to_vec();
         Ok(())
     }
 
@@ -1864,6 +1962,13 @@ fn build_trak(
     if !t.edits.is_empty() {
         push_atom(&mut trak, *b"edts", &build_edts(&t.edits));
     }
+    // Track Reference Box after `edts`, before `mdia` (QTFF p. 41,
+    // Figure 2-3: `tref` follows the edit atom and precedes the media
+    // atom inside a track atom; ISO/IEC 14496-12 §8.3.3 places `tref`
+    // among the optional `trak` children before `mdia`).
+    if !t.track_references.is_empty() {
+        push_atom(&mut trak, *b"tref", &build_tref(&t.track_references));
+    }
     push_atom(
         &mut trak,
         *b"mdia",
@@ -1936,6 +2041,24 @@ fn build_udta(items: &[MovMetadata]) -> Vec<u8> {
         }
     }
     udta
+}
+
+/// Build a `tref` (Track Reference Box) payload — one child atom per
+/// [`TrackReference`] (QTFF p. 50 / ISO/IEC 14496-12 §8.3.3).
+///
+/// Each child is `[size:4][reference_type:4][track_id:4]*` — a plain
+/// (non-Full) box whose body is the tightly-packed list of big-endian
+/// `u32` referenced track ids. Inverse of the read-side `parse_tref`.
+fn build_tref(references: &[TrackReference]) -> Vec<u8> {
+    let mut tref = Vec::new();
+    for r in references {
+        let mut body = Vec::with_capacity(r.track_ids.len() * 4);
+        for &id in &r.track_ids {
+            body.extend_from_slice(&id.to_be_bytes());
+        }
+        push_atom(&mut tref, r.reference_type, &body);
+    }
+    tref
 }
 
 /// Build the `edts` (Edit Box) payload — a single child `elst`.
@@ -3318,6 +3441,7 @@ mod tests {
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
             visual_extensions: VisualExtensions::default(),
+            track_references: Vec::new(),
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -3360,6 +3484,7 @@ mod tests {
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
             visual_extensions: VisualExtensions::default(),
+            track_references: Vec::new(),
         }
     }
 
@@ -3801,6 +3926,7 @@ mod tests {
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
             visual_extensions: VisualExtensions::default(),
+            track_references: Vec::new(),
         };
         assert!(build_stss(&t).is_none());
     }
@@ -3824,6 +3950,7 @@ mod tests {
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
             visual_extensions: VisualExtensions::default(),
+            track_references: Vec::new(),
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -3875,6 +4002,7 @@ mod tests {
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
             visual_extensions: VisualExtensions::default(),
+            track_references: Vec::new(),
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -3917,6 +4045,7 @@ mod tests {
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
             visual_extensions: VisualExtensions::default(),
+            track_references: Vec::new(),
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

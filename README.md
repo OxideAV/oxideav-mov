@@ -230,6 +230,16 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   `SampleDescription`'s `pasp` / `colr` / `clap` / `fiel` / `gamma`. An
   empty set writes nothing; a non-video track or unknown `track_id` is
   rejected.
+- `set_track_references(track_id, &[TrackReference])` emits a `tref`
+  (Track Reference Box, QTFF p. 50 / §8.3.3) between a track's
+  `tkhd`/`edts` and its `mdia`, one child atom per reference type
+  (FourCC = relationship, body = packed `u32` referenced track ids).
+  `TrackReference::chapter(id)` / `::timecode(id)` / `::to(type, id)`
+  cover the common cases (`chap`, `tmcd`, `sync`, `scpt`, `cdsc`, …);
+  every referenced id is validated against the tracks added so far
+  (self-references allowed). Round-trips through `parse_tref` onto
+  `Track::references` and the typed `chapter_track_ref` /
+  `timecode_track_ref` / `timecode_track_index` accessors.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.
