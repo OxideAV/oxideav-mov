@@ -120,6 +120,55 @@ impl Tmcd {
             }))
         }
     }
+
+    /// Serialise the `tmcd` **sample-description body** — everything
+    /// after the universal 16-byte sample-description header (QTFF
+    /// p. 106). Exact inverse of [`parse_tmcd_sample_description`]:
+    ///
+    /// ```text
+    /// [reserved:u32=0][flags:u32][time_scale:u32][frame_duration:u32]
+    /// [number_of_frames:u8][reserved:3 bytes=0]
+    /// [optional source-reference 'name' atom]
+    /// ```
+    ///
+    /// When `source_name` is `Some`, a trailing `name` user-data atom
+    /// (`[size:u32]['name'][text]`) carrying the UTF-8 source-tape name
+    /// is appended; the read side's `scan_source_reference` lifts it
+    /// back onto [`Tmcd::source_name`].
+    pub fn to_sample_description_body(&self) -> Vec<u8> {
+        let mut p = Vec::with_capacity(20);
+        p.extend_from_slice(&0u32.to_be_bytes()); // reserved
+        p.extend_from_slice(&self.flags.to_be_bytes());
+        p.extend_from_slice(&self.time_scale.to_be_bytes());
+        p.extend_from_slice(&self.frame_duration.to_be_bytes());
+        p.push(self.number_of_frames);
+        p.extend_from_slice(&[0u8; 3]); // 24-bit reserved
+        if let Some(name) = &self.source_name {
+            let bytes = name.as_bytes();
+            let size = (8 + bytes.len()) as u32;
+            p.extend_from_slice(&size.to_be_bytes());
+            p.extend_from_slice(b"name");
+            p.extend_from_slice(bytes);
+        }
+        p
+    }
+
+    /// Encode one timecode value into its 4-byte `mdat` sample payload
+    /// (QTFF p. 108) — the inverse of [`Tmcd::decode_sample`]. A
+    /// [`TimecodeSample::Counter`] is a big-endian 32-bit counter; a
+    /// [`TimecodeSample::Record`] packs `[Hours][sign|Minutes][Seconds]
+    /// [Frames]` with the 1-bit sign in the high bit of the minutes
+    /// byte. (The variant should match this description's Counter flag;
+    /// the bytes are emitted as-given.)
+    pub fn encode_sample(sample: &TimecodeSample) -> [u8; 4] {
+        match sample {
+            TimecodeSample::Counter(raw) => raw.to_be_bytes(),
+            TimecodeSample::Record(r) => {
+                let min_byte = (r.minutes & 0x7f) | if r.negative { 0x80 } else { 0 };
+                [r.hours, min_byte, r.seconds, r.frames]
+            }
+        }
+    }
 }
 
 /// One decoded timecode-track sample payload (QTFF p. 108).

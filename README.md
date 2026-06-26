@@ -139,9 +139,9 @@ Fragmented files use `tfra` when present.
 ## Muxer
 
 `MovMuxer` emits a non-fragmented MOV/MP4 (`ftyp` + `mdat` + `moov`)
-carrying one or more video/audio tracks, round-tripping through
-`MovDemuxer` with sample count, sizes, payloads, and keyframe flags
-preserved. `stco` auto-promotes to `co64` when chunk offsets cross
+carrying one or more video / audio / time-code tracks, round-tripping
+through `MovDemuxer` with sample count, sizes, payloads, and keyframe
+flags preserved. `stco` auto-promotes to `co64` when chunk offsets cross
 4 GiB. Per-sample composition offsets (`MuxSample.composition_offset`,
 PTS − DTS) emit a `ctts` Composition Time to Sample Box (§8.6.1.3):
 omitted when every offset is zero, version 0 for an all-non-negative
@@ -240,6 +240,16 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   (self-references allowed). Round-trips through `parse_tref` onto
   `Track::references` and the typed `chapter_track_ref` /
   `timecode_track_ref` / `timecode_track_index` accessors.
+- `MuxTrackKind::Timecode { description, tcmi }` writes a full QTFF
+  time-code track (QTFF pp. 106–116): a `tmcd`-subtype `hdlr`, a `gmhd`
+  base-media header (`gmin` + `tmcd > tcmi`), and a `tmcd` `stsd`
+  carrying the timing fields. Each `MuxSample` is a 4-byte packed
+  timecode payload built with `Tmcd::encode_sample` (counter or
+  `[H:M:S:F]` record). Round-trips onto `Track::gmhd` / the `tmcd`
+  sample description / `timecode_sample`; with a media track's
+  `tref/tmcd` it resolves via `start_timecode`. (Serialisers
+  `Tmcd::to_sample_description_body` / `Tcmi::to_body_bytes` /
+  `Gmin::to_body_bytes` are the read-side inverses.)
 - `set_track_aperture(track_id, Tapt)` emits a `tapt` (Track Aperture
   Modes box) on a video track, carrying whichever of `clef` (Clean
   Aperture) / `prof` (Production Aperture) / `enof` (Encoded Pixels)

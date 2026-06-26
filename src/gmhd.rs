@@ -187,6 +187,50 @@ pub struct Gmhd {
     pub tcmi: Option<Tcmi>,
 }
 
+impl Gmin {
+    /// Serialise the 16-byte `gmin` body — `[ver+flags=4]
+    /// [graphics_mode:u16][opcolor:3×u16][balance:i16][reserved:u16]`.
+    /// Exact inverse of [`parse_gmin`].
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut p = Vec::with_capacity(16);
+        p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+        p.extend_from_slice(&self.graphics_mode.to_be_bytes());
+        for c in self.opcolor {
+            p.extend_from_slice(&c.to_be_bytes());
+        }
+        p.extend_from_slice(&self.balance.to_be_bytes());
+        p.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        p
+    }
+}
+
+impl Tcmi {
+    /// Serialise the `tcmi` body — `[ver+flags=4][text_font:u16]
+    /// [text_face:u16][text_size:u16][reserved:u16][bg_color:3×u16]
+    /// [fg_color:3×u16][pascal font_name]`. Exact inverse of
+    /// [`parse_tcmi`]. The font name is truncated to 255 bytes (the
+    /// Pascal length is a single byte) and emitted as raw UTF-8.
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let name = self.font_name.as_bytes();
+        let n = name.len().min(255);
+        let mut p = Vec::with_capacity(25 + n);
+        p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+        p.extend_from_slice(&self.text_font.to_be_bytes());
+        p.extend_from_slice(&self.text_face.to_be_bytes());
+        p.extend_from_slice(&self.text_size.to_be_bytes());
+        p.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        for c in self.bg_color {
+            p.extend_from_slice(&c.to_be_bytes());
+        }
+        for c in self.fg_color {
+            p.extend_from_slice(&c.to_be_bytes());
+        }
+        p.push(n as u8);
+        p.extend_from_slice(&name[..n]);
+        p
+    }
+}
+
 /// Parse a `gmhd/gmin` payload. The leading `[ver+flags=4]` is the
 /// FullBox prefix; the 12 bytes that follow carry the actual fields.
 pub fn parse_gmin(payload: &[u8]) -> Result<Gmin> {

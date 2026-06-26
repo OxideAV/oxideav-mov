@@ -58,7 +58,9 @@ use oxideav_core::{Error, Result};
 #[cfg(not(feature = "registry"))]
 use crate::standalone::{Error, Result};
 
+use crate::gmhd::{Gmin, Tcmi};
 use crate::media_meta::{Clap, ColorParameters, Cslg, Fiel, Pasp, Tapt};
+use crate::timecode::Tmcd;
 use std::io::Write;
 
 /// One sample destined for a track. The muxer copies `data` into the
@@ -620,6 +622,24 @@ pub enum MuxTrackKind {
         channels: u16,
         bits_per_sample: u16,
         sample_rate: u32,
+    },
+    /// Time-code track (QTFF pp. 106–116). Emits `hdlr.component_subtype
+    /// = tmcd`, a `gmhd` base-media-information header (a `gmin` plus a
+    /// `tmcd > tcmi` time-code media-information atom), and a `stsd`
+    /// whose single `tmcd` entry carries the timing fields (`time_scale`
+    /// / `frame_duration` / `number_of_frames` / flags). Each sample's
+    /// `mdat` payload is a 4-byte packed timecode value (counter or
+    /// `[H:M:S:F]` record). Typically referenced by a media track's
+    /// `tref/tmcd`.
+    Timecode {
+        /// The `tmcd` sample description (timing fields + flags +
+        /// optional source-tape name). Serialised via
+        /// [`Tmcd::to_sample_description_body`].
+        description: Tmcd,
+        /// The `gmhd/tmcd/tcmi` time-code media-information atom
+        /// (text-overlay font / colours / name). Serialised via
+        /// [`Tcmi::to_body_bytes`].
+        tcmi: Tcmi,
     },
 }
 
@@ -2288,7 +2308,8 @@ fn build_tkhd(t: &TrackWrite, track_id: u32, movie_ts: u32) -> Vec<u8> {
         MuxTrackKind::Video { width, height, .. } => {
             ((*width as u32) << 16, (*height as u32) << 16)
         }
-        MuxTrackKind::Audio { .. } => (0, 0),
+        // Audio and time-code tracks carry no visual dimensions.
+        MuxTrackKind::Audio { .. } | MuxTrackKind::Timecode { .. } => (0, 0),
     };
     p[76..80].copy_from_slice(&w_fp.to_be_bytes());
     p[80..84].copy_from_slice(&h_fp.to_be_bytes());
@@ -2335,6 +2356,7 @@ fn build_hdlr(t: &TrackWrite) -> Vec<u8> {
     let subtype: &[u8; 4] = match &t.kind {
         MuxTrackKind::Video { .. } => b"vide",
         MuxTrackKind::Audio { .. } => b"soun",
+        MuxTrackKind::Timecode { .. } => b"tmcd",
     };
     let mut p = Vec::with_capacity(25);
     p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
@@ -2356,6 +2378,9 @@ fn build_minf(
     match &t.kind {
         MuxTrackKind::Video { .. } => push_atom(&mut minf, *b"vmhd", &build_vmhd()),
         MuxTrackKind::Audio { .. } => push_atom(&mut minf, *b"smhd", &build_smhd()),
+        MuxTrackKind::Timecode { tcmi, .. } => {
+            push_atom(&mut minf, *b"gmhd", &build_gmhd_tmcd(tcmi));
+        }
     }
     push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
     push_atom(
@@ -2378,6 +2403,24 @@ fn build_smhd() -> Vec<u8> {
     // ISO/IEC 14496-12 §12.2.2. 8 bytes payload: ver+flags(4) +
     // balance(2) + reserved(2). balance = 0 (centre).
     vec![0u8; 8]
+}
+
+/// Build a `gmhd` (Base Media Information Header) payload for a time-
+/// code track (QTFF pp. 64–65, 116): a `gmin` Generic Media Information
+/// header followed by a `tmcd` container wrapping the supplied `tcmi`
+/// Time-Code Media Information atom. The parsed shape round-trips
+/// through the demuxer's `parse_gmhd` onto `Track::gmhd`
+/// (`gmin` + `tcmi`).
+fn build_gmhd_tmcd(tcmi: &Tcmi) -> Vec<u8> {
+    let mut gmhd = Vec::new();
+    // Default `gmin`: copy graphics mode, no opcolor, centred balance —
+    // the conventional choice for a non-visual generic track.
+    push_atom(&mut gmhd, *b"gmin", &Gmin::default().to_body_bytes());
+    // `tmcd` container with a single `tcmi` child.
+    let mut tmcd_box = Vec::new();
+    push_atom(&mut tmcd_box, *b"tcmi", &tcmi.to_body_bytes());
+    push_atom(&mut gmhd, *b"tmcd", &tmcd_box);
+    gmhd
 }
 
 fn build_dinf(refs: &[DataReferenceWrite]) -> Vec<u8> {
@@ -2828,6 +2871,14 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
             e.extend_from_slice(&body);
             e.extend_from_slice(&t.extra_stsd_atoms);
             wrap_stsd_entry(format, &e, dri)
+        }
+        MuxTrackKind::Timecode { description, .. } => {
+            // `tmcd` sample-description body after the universal 16-byte
+            // header (QTFF p. 106); the source-tape `name` atom (if any)
+            // is appended by `to_sample_description_body`.
+            let mut e = description.to_sample_description_body();
+            e.extend_from_slice(&t.extra_stsd_atoms);
+            wrap_stsd_entry(b"tmcd", &e, dri)
         }
     };
     let mut stsd = Vec::with_capacity(8 + entry_body.len());
@@ -3331,7 +3382,7 @@ fn build_init_tkhd(t: &TrackWrite, track_id: u32) -> Vec<u8> {
         MuxTrackKind::Video { width, height, .. } => {
             ((*width as u32) << 16, (*height as u32) << 16)
         }
-        MuxTrackKind::Audio { .. } => (0, 0),
+        MuxTrackKind::Audio { .. } | MuxTrackKind::Timecode { .. } => (0, 0),
     };
     p[76..80].copy_from_slice(&w_fp.to_be_bytes());
     p[80..84].copy_from_slice(&h_fp.to_be_bytes());
@@ -3360,6 +3411,9 @@ fn build_init_minf(t: &TrackWrite) -> Vec<u8> {
     match &t.kind {
         MuxTrackKind::Video { .. } => push_atom(&mut minf, *b"vmhd", &build_vmhd()),
         MuxTrackKind::Audio { .. } => push_atom(&mut minf, *b"smhd", &build_smhd()),
+        MuxTrackKind::Timecode { tcmi, .. } => {
+            push_atom(&mut minf, *b"gmhd", &build_gmhd_tmcd(tcmi));
+        }
     }
     push_atom(&mut minf, *b"dinf", &build_dinf(&t.data_references));
     push_atom(&mut minf, *b"stbl", &build_init_stbl(t));
@@ -3423,7 +3477,8 @@ fn build_trex(t: &TrackWrite, track_id: u32) -> Vec<u8> {
     p.extend_from_slice(&0u32.to_be_bytes()); // default_sample_size (per-sample)
     let default_flags = match &t.kind {
         MuxTrackKind::Video { .. } => 0x0001_0000u32, // non-sync default
-        MuxTrackKind::Audio { .. } => 0u32,           // sync default
+        // Audio and time-code samples are each independently decodable.
+        MuxTrackKind::Audio { .. } | MuxTrackKind::Timecode { .. } => 0u32,
     };
     p.extend_from_slice(&default_flags.to_be_bytes());
     p
