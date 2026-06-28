@@ -114,6 +114,51 @@ impl TrackGroupTypeEntry {
     pub fn key(&self) -> ([u8; 4], u32) {
         (self.track_group_type, self.track_group_id)
     }
+
+    /// Construct a base-spec `'msrc'` (multi-source-presentation)
+    /// membership entry — the only `track_group_type` the base spec
+    /// defines (§8.3.4.3). Tracks sharing `track_group_id` originate from
+    /// the same source.
+    pub fn msrc(track_group_id: u32) -> Self {
+        Self {
+            track_group_type: TRACK_GROUP_TYPE_MSRC,
+            track_group_id,
+            version: 0,
+            flags: 0,
+            payload: Vec::new(),
+        }
+    }
+
+    /// Serialise into the `TrackGroupTypeBox` FullBox body — the bytes
+    /// that follow the box's `[size][type]` header. The inverse of
+    /// [`parse_track_group_type`]: `[version:1][flags:3]
+    /// [track_group_id:4][type_specific payload]`. The `track_group_type`
+    /// FourCC is *not* part of the body (it is the box's `type`); the
+    /// muxer frames it via [`TrackGroupTypeEntry::to_framed_atom`].
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut p = Vec::with_capacity(8 + self.payload.len());
+        p.push(self.version);
+        p.push(((self.flags >> 16) & 0xFF) as u8);
+        p.push(((self.flags >> 8) & 0xFF) as u8);
+        p.push((self.flags & 0xFF) as u8);
+        p.extend_from_slice(&self.track_group_id.to_be_bytes());
+        p.extend_from_slice(&self.payload);
+        p
+    }
+
+    /// Serialise into a complete framed child atom for a `trgr`
+    /// container: `[size:u32][track_group_type:4][FullBox body]`. The
+    /// box `type` is the `track_group_type` FourCC, matching the read
+    /// side where [`parse_trgr`] derives the type from each child's
+    /// FourCC.
+    pub fn to_framed_atom(&self) -> Vec<u8> {
+        let body = self.to_body_bytes();
+        let mut p = Vec::with_capacity(8 + body.len());
+        p.extend_from_slice(&((8 + body.len()) as u32).to_be_bytes());
+        p.extend_from_slice(&self.track_group_type);
+        p.extend_from_slice(&body);
+        p
+    }
 }
 
 /// Parse one `TrackGroupTypeBox` FullBox payload.
@@ -376,5 +421,46 @@ mod tests {
         let entries = parse_trgr(&mut r, &hdr).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].key(), entries[1].key());
+    }
+
+    #[test]
+    fn to_body_bytes_is_parse_track_group_type_inverse() {
+        let entry = TrackGroupTypeEntry {
+            track_group_type: *b"msrc",
+            track_group_id: 0x1234_5678,
+            version: 0,
+            flags: 0,
+            payload: vec![0xDE, 0xAD],
+        };
+        let body = entry.to_body_bytes();
+        let reparsed = parse_track_group_type(*b"msrc", &body).unwrap();
+        assert_eq!(reparsed, entry);
+    }
+
+    #[test]
+    fn msrc_constructor_round_trips() {
+        let entry = TrackGroupTypeEntry::msrc(42);
+        assert!(entry.is_msrc());
+        let body = entry.to_body_bytes();
+        assert_eq!(body.len(), 8); // no type-specific payload
+        assert_eq!(parse_track_group_type(*b"msrc", &body).unwrap(), entry);
+    }
+
+    #[test]
+    fn to_framed_atom_round_trips_through_parse_trgr() {
+        let e0 = TrackGroupTypeEntry::msrc(7);
+        let e1 = TrackGroupTypeEntry {
+            track_group_type: *b"ster",
+            track_group_id: 9,
+            version: 0,
+            flags: 0,
+            payload: Vec::new(),
+        };
+        // Frame both children, wrap into a trgr container, re-parse.
+        let trgr = build_trgr(&[e0.to_framed_atom(), e1.to_framed_atom()]);
+        let hdr = header_at_offset_zero(&trgr);
+        let mut r = Cursor::new(&trgr);
+        let entries = parse_trgr(&mut r, &hdr).unwrap();
+        assert_eq!(entries, vec![e0, e1]);
     }
 }

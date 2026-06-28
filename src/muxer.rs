@@ -68,6 +68,7 @@ use crate::metadata_sample::{MetadataSampleEntry, SimpleTextSampleEntry, Subtitl
 use crate::sample_table::{SdtpEntry, StshEntry, SubSampleInfo};
 use crate::text_sample::TextSampleDescription;
 use crate::timecode::Tmcd;
+use crate::track_group::TrackGroupTypeEntry;
 use crate::track_load::Load;
 use crate::track_selection::TrackSelection;
 use std::io::Write;
@@ -972,6 +973,13 @@ struct TrackWrite {
     /// one`. `None` ⇒ no `tsel`. ISO BMFF-only. Set via
     /// [`MovMuxer::set_track_selection`].
     track_selection: Option<TrackSelection>,
+    /// Optional ISO BMFF Track Group box (`trgr`, §8.3.4) emitted as a
+    /// `trak` child. Each [`TrackGroupTypeEntry`] is one membership
+    /// declaration (a FullBox whose FourCC is the `track_group_type`);
+    /// tracks sharing a `(track_group_type, track_group_id)` pair belong
+    /// to the same group. Empty ⇒ no `trgr`. ISO BMFF-only. Set via
+    /// [`MovMuxer::set_track_groups`].
+    track_groups: Vec<TrackGroupTypeEntry>,
 }
 
 /// The packed `mdhd.language` value for `"und"` (undetermined) — the
@@ -1259,6 +1267,7 @@ impl MovMuxer {
             matte: None,
             track_kinds: Vec::new(),
             track_selection: None,
+            track_groups: Vec::new(),
         });
         self.tracks.len() as u32
     }
@@ -2202,6 +2211,39 @@ impl MovMuxer {
         Ok(())
     }
 
+    /// Attach ISO BMFF Track Group membership declarations (`trgr`,
+    /// §8.3.4) to a previously-added track.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// Each [`TrackGroupTypeEntry`] declares this track's membership of
+    /// one group: a `(track_group_type, track_group_id)` pair shared by
+    /// every track in the group (use [`TrackGroupTypeEntry::msrc`] for
+    /// the base-spec multi-source-presentation group, §8.3.4.3). A track
+    /// may belong to several groups, so the slice may carry more than one
+    /// entry. Passing an empty slice removes any previously-attached
+    /// groups.
+    ///
+    /// On the next non-fragmented [`MovMuxer::encode_to_vec`] /
+    /// [`write_to`](MovMuxer::write_to), the muxer emits a `trgr`
+    /// (TrackGroupBox) as a `trak` child — one framed `TrackGroupTypeBox`
+    /// FullBox child per entry, via
+    /// [`TrackGroupTypeEntry::to_framed_atom`] — placed after `tref` and
+    /// before `mdia`. The bodies are the exact inverses of the read-side
+    /// [`crate::track_group::parse_trgr`] /
+    /// [`crate::track_group::parse_track_group_type`], so the file
+    /// round-trips onto `Track::track_groups`
+    /// (`MovDemuxer::track_groups_for`). `trgr` is ISO BMFF-only (QTFF
+    /// does not define it).
+    pub fn set_track_groups(
+        &mut self,
+        track_id: u32,
+        groups: &[TrackGroupTypeEntry],
+    ) -> Result<()> {
+        let idx = self.track_index(track_id, "set_track_groups")?;
+        self.tracks[idx].track_groups = groups.to_vec();
+        Ok(())
+    }
+
     /// Attach movie-level user-data metadata, emitted as a `moov/udta`
     /// after the last `trak` (QTFF pp. 36–38 / ISO/IEC 14496-12
     /// §8.10.1).
@@ -2839,6 +2881,17 @@ fn build_trak(
     // among the optional `trak` children before `mdia`).
     if !t.track_references.is_empty() {
         push_atom(&mut trak, *b"tref", &build_tref(&t.track_references));
+    }
+    // Track Group box (`trgr`, ISO/IEC 14496-12 §8.3.4) — a `trak`
+    // child after `tref`, before `mdia`. One framed TrackGroupTypeBox
+    // FullBox child per membership entry. Emitted only when the caller
+    // attached groups via set_track_groups.
+    if !t.track_groups.is_empty() {
+        let mut trgr = Vec::new();
+        for entry in &t.track_groups {
+            trgr.extend_from_slice(&entry.to_framed_atom());
+        }
+        push_atom(&mut trak, *b"trgr", &trgr);
     }
     push_atom(
         &mut trak,
@@ -4827,6 +4880,7 @@ mod tests {
             matte: None,
             track_kinds: Vec::new(),
             track_selection: None,
+            track_groups: Vec::new(),
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -4887,6 +4941,7 @@ mod tests {
             matte: None,
             track_kinds: Vec::new(),
             track_selection: None,
+            track_groups: Vec::new(),
         }
     }
 
@@ -5346,6 +5401,7 @@ mod tests {
             matte: None,
             track_kinds: Vec::new(),
             track_selection: None,
+            track_groups: Vec::new(),
         };
         assert!(build_stss(&t).is_none());
     }
@@ -5387,6 +5443,7 @@ mod tests {
             matte: None,
             track_kinds: Vec::new(),
             track_selection: None,
+            track_groups: Vec::new(),
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -5456,6 +5513,7 @@ mod tests {
             matte: None,
             track_kinds: Vec::new(),
             track_selection: None,
+            track_groups: Vec::new(),
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -5516,6 +5574,7 @@ mod tests {
             matte: None,
             track_kinds: Vec::new(),
             track_selection: None,
+            track_groups: Vec::new(),
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

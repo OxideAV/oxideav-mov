@@ -399,6 +399,13 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   `TrackSelection::to_body_bytes` is the inverse of `parse_tsel`;
   coexists with metadata + `kind` in one `udta`; round-trips onto
   `Track::track_selection`.
+- `set_track_groups(track_id, &[TrackGroupTypeEntry])` emits an ISO BMFF
+  Track Group box (`trgr`, §8.3.4) as a `trak` child — one framed
+  `TrackGroupTypeBox` per membership entry; tracks sharing a
+  `(track_group_type, track_group_id)` pair are one group
+  (`TrackGroupTypeEntry::msrc(id)` for the base-spec source group).
+  `to_body_bytes` / `to_framed_atom` invert `parse_track_group_type` /
+  `parse_trgr`; round-trips onto `Track::track_groups`.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.
