@@ -386,6 +386,12 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   codec, and the compressed matte data. `Matte::to_body_bytes` /
   `CompressedMatte::to_body_bytes` are the inverses of `parse_matt` /
   `parse_kmat`. QuickTime-only; round-trips onto `Track::matte`.
+- `set_track_kinds(track_id, &[KindEntry])` emits ISO BMFF Track Kind
+  boxes (`kind`, §8.10.4) into the track-level `udta` — one per
+  `(schemeURI, value)` role pair (WebVTT / DASH subtitle roles), `Zero
+  or more` per track. `KindEntry::to_body_bytes` is the inverse of
+  `parse_kind`. The track `udta` carries metadata + kinds together;
+  round-trips onto `Track::kinds`.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.

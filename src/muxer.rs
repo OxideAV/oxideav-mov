@@ -61,6 +61,7 @@ use crate::standalone::{Error, Result};
 use crate::clip::Clipping;
 use crate::gmhd::{Gmin, Tcmi};
 use crate::header::Hmhd;
+use crate::kind::KindEntry;
 use crate::matte::Matte;
 use crate::media_meta::{Clap, ColorParameters, Cslg, Fiel, Pasp, Tapt};
 use crate::metadata_sample::{MetadataSampleEntry, SimpleTextSampleEntry, SubtitleSampleEntry};
@@ -956,6 +957,13 @@ struct TrackWrite {
     /// no `matt`. QuickTime-only (ISO BMFF does not define it). Set via
     /// [`MovMuxer::set_track_matte`].
     matte: Option<Matte>,
+    /// Optional ISO BMFF Track Kind boxes (`kind`, §8.10.4) emitted into
+    /// the track-level `udta`. Each [`KindEntry`] labels the track with a
+    /// `(schemeURI, value)` role pair (e.g. WebVTT / DASH subtitle
+    /// roles); `Quantity: Zero or more`. Empty ⇒ no `kind` boxes. ISO
+    /// BMFF-only (QTFF does not define it). Set via
+    /// [`MovMuxer::set_track_kinds`].
+    track_kinds: Vec<KindEntry>,
 }
 
 /// The packed `mdhd.language` value for `"und"` (undetermined) — the
@@ -1241,6 +1249,7 @@ impl MovMuxer {
             load: None,
             clipping: None,
             matte: None,
+            track_kinds: Vec::new(),
         });
         self.tracks.len() as u32
     }
@@ -2128,6 +2137,30 @@ impl MovMuxer {
         Ok(())
     }
 
+    /// Attach ISO BMFF Track Kind boxes (`kind`, §8.10.4) to a
+    /// previously-added track.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// Each [`KindEntry`] labels the track with a `(schemeURI, value)`
+    /// role pair — the canonical use is signalling a subtitle / caption
+    /// track's intent ("captions" / "subtitles" / "descriptions" / …)
+    /// against a WebVTT or DASH role scheme. §8.10.4.1 allows more than
+    /// one per track (`Quantity: Zero or more`), so the slice may carry
+    /// several. Passing an empty slice removes any previously-attached
+    /// kinds.
+    ///
+    /// The boxes are emitted into the track-level `udta` (the same
+    /// container as track metadata), after any metadata items, via
+    /// [`KindEntry::to_body_bytes`] — the exact inverse of the read-side
+    /// [`crate::kind::parse_kind`]. A file written this way round-trips
+    /// onto `Track::kinds` (`MovDemuxer::track_kinds`). `kind` is ISO
+    /// BMFF-only (QTFF does not define it).
+    pub fn set_track_kinds(&mut self, track_id: u32, kinds: &[KindEntry]) -> Result<()> {
+        let idx = self.track_index(track_id, "set_track_kinds")?;
+        self.tracks[idx].track_kinds = kinds.to_vec();
+        Ok(())
+    }
+
     /// Attach movie-level user-data metadata, emitted as a `moov/udta`
     /// after the last `trak` (QTFF pp. 36–38 / ISO/IEC 14496-12
     /// §8.10.1).
@@ -2772,9 +2805,19 @@ fn build_trak(
         &build_mdia(t, chunk_offset, need_co64, aux_offset),
     );
     // Track-level user-data box as a trailing child of `trak` (QTFF
-    // p. 41, Figure 2-3: `udta` is the trailing track-atom child).
-    if !t.metadata.is_empty() {
-        push_atom(&mut trak, *b"udta", &build_udta(&t.metadata));
+    // p. 41, Figure 2-3: `udta` is the trailing track-atom child). The
+    // payload carries the QTFF metadata items plus any ISO BMFF §8.10.4
+    // `kind` (Track Kind) boxes — both share the track-level `udta`
+    // container, so they're emitted into one box. No `udta` when neither
+    // is present.
+    if !t.metadata.is_empty() || !t.track_kinds.is_empty() {
+        let mut udta = build_udta(&t.metadata);
+        // Append each `kind` child after the metadata items; the read
+        // side (find_kinds_in_udta) walks the flat udta atom list.
+        for k in &t.track_kinds {
+            push_atom(&mut udta, *b"kind", &k.to_body_bytes());
+        }
+        push_atom(&mut trak, *b"udta", &udta);
     }
     // Track-level Apple QuickTime Metadata box, after `udta`. Read side
     // dispatches a `trak`-scope `meta` to the same Apple parser.
@@ -4736,6 +4779,7 @@ mod tests {
             load: None,
             clipping: None,
             matte: None,
+            track_kinds: Vec::new(),
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -4794,6 +4838,7 @@ mod tests {
             load: None,
             clipping: None,
             matte: None,
+            track_kinds: Vec::new(),
         }
     }
 
@@ -5251,6 +5296,7 @@ mod tests {
             load: None,
             clipping: None,
             matte: None,
+            track_kinds: Vec::new(),
         };
         assert!(build_stss(&t).is_none());
     }
@@ -5290,6 +5336,7 @@ mod tests {
             load: None,
             clipping: None,
             matte: None,
+            track_kinds: Vec::new(),
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -5357,6 +5404,7 @@ mod tests {
             load: None,
             clipping: None,
             matte: None,
+            track_kinds: Vec::new(),
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -5415,6 +5463,7 @@ mod tests {
             load: None,
             clipping: None,
             matte: None,
+            track_kinds: Vec::new(),
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

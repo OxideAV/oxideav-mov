@@ -86,6 +86,26 @@ impl KindEntry {
     pub fn has_value(&self) -> bool {
         self.value.as_ref().is_some_and(|v| !v.is_empty())
     }
+
+    /// Serialise into the `kind` FullBox body (ISO/IEC 14496-12
+    /// §8.10.4.2) — the inverse of [`parse_kind`]. Layout:
+    /// `[version=0:1][flags=0:3][schemeURI\0][value\0]`. Both strings are
+    /// NUL-terminated; a `None` / empty `value` emits a bare terminator
+    /// (`[uri]\0\0`), which `parse_kind` reads back as `value == None`.
+    ///
+    /// The `schemeURI` must not contain an embedded NUL (it would split
+    /// the field on read); callers building a `KindEntry` from a role-tag
+    /// string never introduce one.
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let value = self.value.as_deref().unwrap_or("");
+        let mut p = Vec::with_capacity(4 + self.scheme_uri.len() + value.len() + 2);
+        p.extend_from_slice(&[0, 0, 0, 0]); // version 0 + flags 0
+        p.extend_from_slice(self.scheme_uri.as_bytes());
+        p.push(0);
+        p.extend_from_slice(value.as_bytes());
+        p.push(0);
+        p
+    }
 }
 
 /// Parse a `kind` Track Kind box payload (ISO/IEC 14496-12 §8.10.4.2).
@@ -367,5 +387,44 @@ mod tests {
         let kinds = find_kinds_in_udta(&udta).unwrap();
         assert_eq!(kinds.len(), 1);
         assert_eq!(kinds[0].scheme_uri, "urn:scheme");
+    }
+
+    #[test]
+    fn to_body_bytes_is_parse_inverse_with_value() {
+        let k = KindEntry {
+            scheme_uri: "urn:mpeg:dash:role:2011".to_string(),
+            value: Some("caption".to_string()),
+        };
+        let body = k.to_body_bytes();
+        assert_eq!(parse_kind(&body).unwrap(), k);
+    }
+
+    #[test]
+    fn to_body_bytes_is_parse_inverse_uri_only() {
+        // value None ⇒ [uri]\0\0 ⇒ parses back as None.
+        let k = KindEntry {
+            scheme_uri: "https://www.w3.org/TR/webvtt1/".to_string(),
+            value: None,
+        };
+        let body = k.to_body_bytes();
+        let reparsed = parse_kind(&body).unwrap();
+        assert_eq!(reparsed, k);
+        assert!(!reparsed.has_value());
+    }
+
+    #[test]
+    fn to_body_bytes_empty_value_round_trips_as_none() {
+        // An empty Some("") is surfaced by parse_kind as None — assert
+        // the body matches the None encoding so the round-trip is stable.
+        let with_empty = KindEntry {
+            scheme_uri: "urn:x".to_string(),
+            value: Some(String::new()),
+        };
+        let as_none = KindEntry {
+            scheme_uri: "urn:x".to_string(),
+            value: None,
+        };
+        assert_eq!(with_empty.to_body_bytes(), as_none.to_body_bytes());
+        assert_eq!(parse_kind(&with_empty.to_body_bytes()).unwrap(), as_none);
     }
 }
