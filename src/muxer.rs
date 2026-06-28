@@ -62,6 +62,7 @@ use crate::gmhd::{Gmin, Tcmi};
 use crate::header::Hmhd;
 use crate::media_meta::{Clap, ColorParameters, Cslg, Fiel, Pasp, Tapt};
 use crate::metadata_sample::{MetadataSampleEntry, SimpleTextSampleEntry, SubtitleSampleEntry};
+use crate::sample_table::{SdtpEntry, StshEntry, SubSampleInfo};
 use crate::text_sample::TextSampleDescription;
 use crate::timecode::Tmcd;
 use std::io::Write;
@@ -901,6 +902,36 @@ struct TrackWrite {
     /// form) or when any size exceeds 16 bits (`stz2` cannot represent
     /// it). Defaults to `false`.
     compact_sample_size: bool,
+    /// Optional `stbl`-scope Independent and Disposable Samples Box
+    /// (`sdtp`, ISO/IEC 14496-12 §8.6.4). When non-empty the muxer emits
+    /// one packed dependency byte per sample after the chunk-offset
+    /// table; the row count must equal the track's sample count (§8.6.4.1
+    /// — the box carries no on-disk count field). Empty ⇒ no `sdtp`. Set
+    /// via [`MovMuxer::set_sample_dependencies`].
+    sdtp: Vec<SdtpEntry>,
+    /// Optional `stbl`-scope Degradation Priority Box (`stdp`, ISO/IEC
+    /// 14496-12 §8.5.3). When non-empty the muxer emits one 16-bit
+    /// priority per sample; the row count must equal the track's sample
+    /// count (§8.5.3.1 — no on-disk count field). Empty ⇒ no `stdp`. Set
+    /// via [`MovMuxer::set_degradation_priorities`].
+    stdp: Vec<u16>,
+    /// Optional `stbl`-scope Padding Bits Box (`padb`, ISO/IEC 14496-12
+    /// §8.7.6). When non-empty the muxer emits one 3-bit `pad` field per
+    /// sample (two rows packed per byte); the row count must equal the
+    /// track's sample count and each value is `0..=7`. Empty ⇒ no `padb`.
+    /// Set via [`MovMuxer::set_padding_bits`].
+    padb: Vec<u8>,
+    /// Optional `stbl`-scope Shadow Sync Sample Box (`stsh`, ISO/IEC
+    /// 14496-12 §8.6.3). When non-empty the muxer emits the
+    /// shadowed→sync sample-number pairs, sorted ascending by
+    /// `shadowed_sample_number`. Empty ⇒ no `stsh`. Set via
+    /// [`MovMuxer::set_shadow_sync_samples`].
+    stsh: Vec<StshEntry>,
+    /// Optional `stbl`-scope Sub-Sample Information Box (`subs`, ISO/IEC
+    /// 14496-12 §8.7.7). When non-empty the muxer emits the sparse
+    /// per-sample sub-sample table (delta-coded sample numbers). Empty ⇒
+    /// no `subs`. Set via [`MovMuxer::set_sub_samples`].
+    subs: Vec<SubSampleInfo>,
 }
 
 /// The packed `mdhd.language` value for `"und"` (undetermined) — the
@@ -1178,6 +1209,11 @@ impl MovMuxer {
             gmin: None,
             text_header_matrix: None,
             compact_sample_size: false,
+            sdtp: Vec::new(),
+            stdp: Vec::new(),
+            padb: Vec::new(),
+            stsh: Vec::new(),
+            subs: Vec::new(),
         });
         self.tracks.len() as u32
     }
@@ -1774,6 +1810,202 @@ impl MovMuxer {
                 ))
             })?;
         self.tracks[idx].compact_sample_size = enable;
+        Ok(())
+    }
+
+    /// Attach an Independent and Disposable Samples Box (`sdtp`, ISO/IEC
+    /// 14496-12 §8.6.4) to a previously-added track.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// One [`SdtpEntry`] per sample, in decode order; the slice length
+    /// must equal the track's sample count (§8.6.4.1 — the box has no
+    /// on-disk count field, its row count is implied by the sample-size
+    /// table). An empty slice removes any previously-attached table.
+    ///
+    /// On the next non-fragmented [`MovMuxer::encode_to_vec`] /
+    /// [`write_to`](MovMuxer::write_to), the muxer emits a `sdtp` inside
+    /// the track's `stbl` after the chunk-offset table (one packed byte
+    /// per sample). Each entry's four 2-bit dependency fields pack
+    /// MSB-first via [`SdtpEntry::to_byte`]; the file round-trips through
+    /// the read-side [`crate::sample_table::parse_sdtp`] back onto
+    /// `Track::sample_table.sdtp` and the typed
+    /// [`crate::demuxer::MovDemuxer::sample_dependency`] accessor.
+    ///
+    /// The fragmented write path ignores this table (per-fragment
+    /// dependency signalling rides the `trun` `sample_flags`).
+    pub fn set_sample_dependencies(&mut self, track_id: u32, entries: &[SdtpEntry]) -> Result<()> {
+        let idx = self.track_index(track_id, "set_sample_dependencies")?;
+        let want = self.tracks[idx].samples.len();
+        if !entries.is_empty() && entries.len() != want {
+            return Err(Error::invalid(format!(
+                "MOV muxer: sdtp has {} rows but track {track_id} has {want} samples",
+                entries.len()
+            )));
+        }
+        self.tracks[idx].sdtp = entries.to_vec();
+        Ok(())
+    }
+
+    /// Attach a Degradation Priority Box (`stdp`, ISO/IEC 14496-12
+    /// §8.5.3) to a previously-added track.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// One 16-bit `priority` per sample, in decode order; the slice
+    /// length must equal the track's sample count (§8.5.3.1 — no on-disk
+    /// count field). An empty slice removes any previously-attached
+    /// table. Higher values mark samples whose degradation has the
+    /// greatest effect on quality (§8.5.3.3); the base spec fixes no
+    /// numeric range, so the raw `u16` is written verbatim.
+    ///
+    /// On the next non-fragmented write the muxer emits a `stdp` inside
+    /// the track's `stbl` after the chunk-offset table (and after any
+    /// `sdtp`). Round-trips through the read-side
+    /// [`crate::sample_table::parse_stdp`] back onto
+    /// `Track::sample_table.stdp`.
+    pub fn set_degradation_priorities(&mut self, track_id: u32, priorities: &[u16]) -> Result<()> {
+        let idx = self.track_index(track_id, "set_degradation_priorities")?;
+        let want = self.tracks[idx].samples.len();
+        if !priorities.is_empty() && priorities.len() != want {
+            return Err(Error::invalid(format!(
+                "MOV muxer: stdp has {} rows but track {track_id} has {want} samples",
+                priorities.len()
+            )));
+        }
+        self.tracks[idx].stdp = priorities.to_vec();
+        Ok(())
+    }
+
+    /// Attach a Padding Bits Box (`padb`, ISO/IEC 14496-12 §8.7.6) to a
+    /// previously-added track.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// One 3-bit `pad` value per sample (the count of padding bits at the
+    /// end of the sample's media payload, §8.7.6.3); the slice length
+    /// must equal the track's sample count and every value must be
+    /// `0..=7` (the field is 3 bits). An empty slice removes any
+    /// previously-attached table.
+    ///
+    /// On the next non-fragmented write the muxer emits a `padb` inside
+    /// the track's `stbl` after the chunk-offset table, packing two rows
+    /// per byte (`[reserved:1, pad1:3, reserved:1, pad2:3]`, MSB-first,
+    /// §8.7.6.2). When the sample count is odd the trailing low nibble of
+    /// the final byte is the `pad2` slot for a non-existent sample,
+    /// written zero. Round-trips through the read-side
+    /// [`crate::sample_table::parse_padb`] back onto
+    /// `Track::sample_table.padb` and the
+    /// [`crate::demuxer::MovDemuxer::sample_padding_bits`] accessor.
+    pub fn set_padding_bits(&mut self, track_id: u32, pads: &[u8]) -> Result<()> {
+        let idx = self.track_index(track_id, "set_padding_bits")?;
+        let want = self.tracks[idx].samples.len();
+        if !pads.is_empty() && pads.len() != want {
+            return Err(Error::invalid(format!(
+                "MOV muxer: padb has {} rows but track {track_id} has {want} samples",
+                pads.len()
+            )));
+        }
+        if let Some((i, &v)) = pads.iter().enumerate().find(|(_, &v)| v > 7) {
+            return Err(Error::invalid(format!(
+                "MOV muxer: padb pad value {v} at sample {i} exceeds the 3-bit field (max 7)"
+            )));
+        }
+        self.tracks[idx].padb = pads.to_vec();
+        Ok(())
+    }
+
+    /// Attach a Shadow Sync Sample Box (`stsh`, ISO/IEC 14496-12 §8.6.3)
+    /// to a previously-added track.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// Each [`StshEntry`] pairs a (normally non-sync) *shadowed* sample
+    /// with an alternative *sync* sample whose media can substitute for
+    /// it during seeking (§8.6.3.1); both numbers are 1-based. An empty
+    /// slice removes any previously-attached table.
+    ///
+    /// The entries are sorted ascending by `shadowed_sample_number`
+    /// before writing (§8.6.3.1 requires the on-disk table to be sorted);
+    /// a duplicate `shadowed_sample_number` is rejected because the
+    /// lookup would be ambiguous and the read-side
+    /// [`crate::sample_table::parse_stsh`] rejects it. Both sample numbers
+    /// must be within `1..=sample_count`.
+    ///
+    /// On the next non-fragmented write the muxer emits a `stsh` inside
+    /// the track's `stbl` after the chunk-offset table. Round-trips
+    /// through `parse_stsh` back onto `Track::sample_table.stsh` and the
+    /// [`crate::demuxer::MovDemuxer::shadow_sync_sample`] accessor.
+    pub fn set_shadow_sync_samples(&mut self, track_id: u32, entries: &[StshEntry]) -> Result<()> {
+        let idx = self.track_index(track_id, "set_shadow_sync_samples")?;
+        let want = self.tracks[idx].samples.len() as u32;
+        let mut sorted = entries.to_vec();
+        sorted.sort_by_key(|e| e.shadowed_sample_number);
+        for w in sorted.windows(2) {
+            if w[0].shadowed_sample_number == w[1].shadowed_sample_number {
+                return Err(Error::invalid(format!(
+                    "MOV muxer: stsh duplicate shadowed_sample_number {}",
+                    w[0].shadowed_sample_number
+                )));
+            }
+        }
+        for e in &sorted {
+            for (label, n) in [
+                ("shadowed", e.shadowed_sample_number),
+                ("sync", e.sync_sample_number),
+            ] {
+                if n == 0 || n > want {
+                    return Err(Error::invalid(format!(
+                        "MOV muxer: stsh {label}_sample_number {n} out of range 1..={want}"
+                    )));
+                }
+            }
+        }
+        self.tracks[idx].stsh = sorted;
+        Ok(())
+    }
+
+    /// Attach a Sub-Sample Information Box (`subs`, ISO/IEC 14496-12
+    /// §8.7.7) to a previously-added track.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// The table is *sparse* — each [`SubSampleInfo`] names a 1-based
+    /// `sample_number` and lists that sample's contiguous sub-sample byte
+    /// ranges; samples not named have no sub-sample structure. An empty
+    /// slice removes any previously-attached table.
+    ///
+    /// The rows are sorted ascending by `sample_number` before writing,
+    /// then delta-coded (§8.7.7.3 — the first row's `sample_delta` is its
+    /// difference from zero, each later row's is the difference from the
+    /// previous). A duplicate or zero `sample_number` is rejected (the
+    /// sparse delta coding cannot represent it, matching the read-side
+    /// [`crate::sample_table::parse_subs`]). The box is written **version
+    /// 1** (32-bit `subsample_size`) when any sub-sample exceeds 65535
+    /// bytes, else **version 0** (16-bit), so the narrowest form that
+    /// fits is chosen.
+    ///
+    /// On the next non-fragmented write the muxer emits a `subs` inside
+    /// the track's `stbl` after the chunk-offset table. Round-trips
+    /// through `parse_subs` back onto `Track::sample_table.subs` and the
+    /// [`crate::demuxer::MovDemuxer::sub_samples`] accessor.
+    pub fn set_sub_samples(&mut self, track_id: u32, rows: &[SubSampleInfo]) -> Result<()> {
+        let idx = self.track_index(track_id, "set_sub_samples")?;
+        let want = self.tracks[idx].samples.len() as u32;
+        let mut sorted = rows.to_vec();
+        sorted.sort_by_key(|r| r.sample_number);
+        for r in &sorted {
+            if r.sample_number == 0 || r.sample_number > want {
+                return Err(Error::invalid(format!(
+                    "MOV muxer: subs sample_number {} out of range 1..={want}",
+                    r.sample_number
+                )));
+            }
+        }
+        for w in sorted.windows(2) {
+            if w[0].sample_number == w[1].sample_number {
+                return Err(Error::invalid(format!(
+                    "MOV muxer: subs duplicate sample_number {}",
+                    w[0].sample_number
+                )));
+            }
+        }
+        self.tracks[idx].subs = sorted;
         Ok(())
     }
 
@@ -2816,6 +3048,119 @@ fn build_dinf(refs: &[DataReferenceWrite]) -> Vec<u8> {
     dinf
 }
 
+/// Build a `sdtp` (Independent and Disposable Samples Box) payload —
+/// ISO/IEC 14496-12 §8.6.4.2. FullBox(version=0, 0) followed by one
+/// packed dependency byte per sample (no on-disk count word; the row
+/// count is implied by the sample-size table, §8.6.4.1). Each entry's
+/// four 2-bit fields pack MSB-first via [`SdtpEntry::to_byte`] — the
+/// exact inverse of the read-side [`crate::sample_table::parse_sdtp`].
+fn build_sdtp(entries: &[SdtpEntry]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(4 + entries.len());
+    p.extend_from_slice(&[0, 0, 0, 0]); // version 0 + flags 0
+    p.extend(entries.iter().map(SdtpEntry::to_byte));
+    p
+}
+
+/// Build a `stdp` (Degradation Priority Box) payload — ISO/IEC
+/// 14496-12 §8.5.3.2. FullBox(version=0, 0) followed by one 16-bit
+/// `priority` per sample (no on-disk count word; the row count is
+/// implied by the sample-size table, §8.5.3.1). The inverse of the
+/// read-side [`crate::sample_table::parse_stdp`].
+fn build_stdp(priorities: &[u16]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(4 + priorities.len() * 2);
+    p.extend_from_slice(&[0, 0, 0, 0]); // version 0 + flags 0
+    for &prio in priorities {
+        p.extend_from_slice(&prio.to_be_bytes());
+    }
+    p
+}
+
+/// Build a `padb` (Padding Bits Box) payload — ISO/IEC 14496-12
+/// §8.7.6.2. FullBox(version=0, 0), a 32-bit `sample_count`, then
+/// `⌈sample_count / 2⌉` packed bytes, each `[reserved:1, pad1:3,
+/// reserved:1, pad2:3]` MSB-first (`pad1` ⇒ sample `(i*2)+1`, `pad2` ⇒
+/// sample `(i*2)+2`, both 1-based). The reserved bits are written 0; an
+/// odd sample count leaves the final `pad2` slot zero. The exact
+/// inverse of the read-side [`crate::sample_table::parse_padb`]. Caller
+/// guarantees every value is `0..=7`.
+fn build_padb(pads: &[u8]) -> Vec<u8> {
+    let n = pads.len();
+    let packed = n.div_ceil(2);
+    let mut p = Vec::with_capacity(8 + packed);
+    p.extend_from_slice(&[0, 0, 0, 0]); // version 0 + flags 0
+    p.extend_from_slice(&(n as u32).to_be_bytes());
+    for chunk in pads.chunks(2) {
+        // High nibble = pad1 (this chunk's first sample); low nibble =
+        // pad2 (second sample, or 0 when this is the trailing odd byte).
+        let pad1 = chunk[0] & 0x07;
+        let pad2 = chunk.get(1).copied().unwrap_or(0) & 0x07;
+        p.push((pad1 << 4) | pad2);
+    }
+    p
+}
+
+/// Build a `stsh` (Shadow Sync Sample Box) payload — ISO/IEC 14496-12
+/// §8.6.3.2. FullBox(version=0, 0), a 32-bit `entry_count`, then
+/// `entry_count × {shadowed_sample_number:4, sync_sample_number:4}`.
+/// Caller guarantees the entries are sorted ascending by
+/// `shadowed_sample_number` with no duplicates (§8.6.3.1). The inverse
+/// of the read-side [`crate::sample_table::parse_stsh`].
+fn build_stsh(entries: &[StshEntry]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(8 + entries.len() * 8);
+    p.extend_from_slice(&[0, 0, 0, 0]); // version 0 + flags 0
+    p.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    for e in entries {
+        p.extend_from_slice(&e.shadowed_sample_number.to_be_bytes());
+        p.extend_from_slice(&e.sync_sample_number.to_be_bytes());
+    }
+    p
+}
+
+/// Build a `subs` (Sub-Sample Information Box) payload — ISO/IEC
+/// 14496-12 §8.7.7.2. FullBox(version, 0), a 32-bit `entry_count`, then
+/// per row `[sample_delta:4][subsample_count:2]` followed by
+/// `subsample_count` records of `[subsample_size:(2|4)]
+/// [subsample_priority:1][discardable:1][codec_specific_parameters:4]`.
+///
+/// `version` is 1 (32-bit `subsample_size`) when any sub-sample exceeds
+/// 65535 bytes, else 0 (16-bit) — the narrowest representable form. The
+/// caller-sorted absolute `sample_number`s are converted back to the
+/// sparse `sample_delta` coding (first row = difference from zero, each
+/// later row = difference from the previous). The inverse of the
+/// read-side [`crate::sample_table::parse_subs`].
+fn build_subs(rows: &[SubSampleInfo]) -> Vec<u8> {
+    // Pick the narrowest size width that fits every sub-sample.
+    let need_v1 = rows
+        .iter()
+        .flat_map(|r| r.subsamples.iter())
+        .any(|s| s.subsample_size > u32::from(u16::MAX));
+    let version: u8 = if need_v1 { 1 } else { 0 };
+
+    let mut p = Vec::new();
+    p.push(version);
+    p.extend_from_slice(&[0, 0, 0]); // flags 0
+    p.extend_from_slice(&(rows.len() as u32).to_be_bytes());
+
+    let mut prev_sample: u32 = 0;
+    for r in rows {
+        let delta = r.sample_number - prev_sample;
+        prev_sample = r.sample_number;
+        p.extend_from_slice(&delta.to_be_bytes());
+        p.extend_from_slice(&(r.subsamples.len() as u16).to_be_bytes());
+        for s in &r.subsamples {
+            if version == 1 {
+                p.extend_from_slice(&s.subsample_size.to_be_bytes());
+            } else {
+                p.extend_from_slice(&(s.subsample_size as u16).to_be_bytes());
+            }
+            p.push(s.subsample_priority);
+            p.push(s.discardable);
+            p.extend_from_slice(&s.codec_specific_parameters.to_be_bytes());
+        }
+    }
+    p
+}
+
 fn build_stbl(
     t: &TrackWrite,
     chunk_offset: u64,
@@ -2848,6 +3193,26 @@ fn build_stbl(
         push_atom(&mut stbl, *b"co64", &build_co64(chunk_offset));
     } else {
         push_atom(&mut stbl, *b"stco", &build_stco(chunk_offset as u32));
+    }
+    // Optional per-sample dependency / priority / padding / shadow-sync /
+    // sub-sample tables. Each is emitted only when the caller attached
+    // it; all follow the chunk-offset table inside `stbl` (box order
+    // inside a `stbl` is not significant to a conformant reader, but a
+    // stable order is chosen for deterministic output).
+    if !t.sdtp.is_empty() {
+        push_atom(&mut stbl, *b"sdtp", &build_sdtp(&t.sdtp));
+    }
+    if !t.stdp.is_empty() {
+        push_atom(&mut stbl, *b"stdp", &build_stdp(&t.stdp));
+    }
+    if !t.padb.is_empty() {
+        push_atom(&mut stbl, *b"padb", &build_padb(&t.padb));
+    }
+    if !t.stsh.is_empty() {
+        push_atom(&mut stbl, *b"stsh", &build_stsh(&t.stsh));
+    }
+    if !t.subs.is_empty() {
+        push_atom(&mut stbl, *b"subs", &build_subs(&t.subs));
     }
     // Sample-auxiliary-information pair (ISO/IEC 14496-12 §8.7.8 /
     // §8.7.9). Emitted only when the track carries an aux stream; the
@@ -4225,6 +4590,11 @@ mod tests {
             gmin: None,
             text_header_matrix: None,
             compact_sample_size: false,
+            sdtp: Vec::new(),
+            stdp: Vec::new(),
+            padb: Vec::new(),
+            stsh: Vec::new(),
+            subs: Vec::new(),
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -4275,6 +4645,11 @@ mod tests {
             gmin: None,
             text_header_matrix: None,
             compact_sample_size: false,
+            sdtp: Vec::new(),
+            stdp: Vec::new(),
+            padb: Vec::new(),
+            stsh: Vec::new(),
+            subs: Vec::new(),
         }
     }
 
@@ -4724,6 +5099,11 @@ mod tests {
             gmin: None,
             text_header_matrix: None,
             compact_sample_size: false,
+            sdtp: Vec::new(),
+            stdp: Vec::new(),
+            padb: Vec::new(),
+            stsh: Vec::new(),
+            subs: Vec::new(),
         };
         assert!(build_stss(&t).is_none());
     }
@@ -4755,6 +5135,11 @@ mod tests {
             gmin: None,
             text_header_matrix: None,
             compact_sample_size: false,
+            sdtp: Vec::new(),
+            stdp: Vec::new(),
+            padb: Vec::new(),
+            stsh: Vec::new(),
+            subs: Vec::new(),
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -4814,6 +5199,11 @@ mod tests {
             gmin: None,
             text_header_matrix: None,
             compact_sample_size: false,
+            sdtp: Vec::new(),
+            stdp: Vec::new(),
+            padb: Vec::new(),
+            stsh: Vec::new(),
+            subs: Vec::new(),
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -4864,6 +5254,11 @@ mod tests {
             gmin: None,
             text_header_matrix: None,
             compact_sample_size: false,
+            sdtp: Vec::new(),
+            stdp: Vec::new(),
+            padb: Vec::new(),
+            stsh: Vec::new(),
+            subs: Vec::new(),
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

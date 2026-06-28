@@ -170,6 +170,39 @@ impl SdtpEntry {
         }
     }
 
+    /// Encode this entry into the single packed `sdtp` byte —
+    /// the exact inverse of [`SdtpEntry::from_byte`]. `is_leading`
+    /// occupies bits 7..6, `sample_depends_on` bits 5..4,
+    /// `sample_is_depended_on` bits 3..2, `sample_has_redundancy`
+    /// bits 1..0 (§8.6.4.2), each field MSB-first.
+    pub fn to_byte(&self) -> u8 {
+        let il = match self.is_leading {
+            IsLeading::Unknown => 0u8,
+            IsLeading::LeadingUndecodable => 1,
+            IsLeading::NotLeading => 2,
+            IsLeading::LeadingDecodable => 3,
+        };
+        let sdo = match self.sample_depends_on {
+            SampleDependsOn::Unknown => 0u8,
+            SampleDependsOn::DependsOnOthers => 1,
+            SampleDependsOn::Independent => 2,
+            SampleDependsOn::Reserved => 3,
+        };
+        let sido = match self.sample_is_depended_on {
+            SampleIsDependedOn::Unknown => 0u8,
+            SampleIsDependedOn::NotDisposable => 1,
+            SampleIsDependedOn::Disposable => 2,
+            SampleIsDependedOn::Reserved => 3,
+        };
+        let shr = match self.sample_has_redundancy {
+            SampleHasRedundancy::Unknown => 0u8,
+            SampleHasRedundancy::Redundant => 1,
+            SampleHasRedundancy::NotRedundant => 2,
+            SampleHasRedundancy::Reserved => 3,
+        };
+        (il << 6) | (sdo << 4) | (sido << 2) | shr
+    }
+
     /// True when this sample is independently decodable (an I-picture):
     /// `sample_depends_on == 2` (§8.6.4.3). Pairs with `stss` as a
     /// codec-agnostic random-access hint.

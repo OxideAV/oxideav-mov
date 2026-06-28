@@ -346,6 +346,24 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   safe. Both forms round-trip onto the same per-sample sizes; the
   read-side `MovDemuxer::sample_size_source` reports which box (and the
   `stz2` `field_size`) carried them.
+- Per-sample auxiliary sample-table boxes (`stbl` scope, written after
+  the chunk-offset table): `set_sample_dependencies(track_id,
+  &[SdtpEntry])` writes the Independent and Disposable Samples Box
+  (`sdtp`, §8.6.4) one packed dependency byte per sample (`SdtpEntry::
+  to_byte`, the inverse of `from_byte`); `set_degradation_priorities(
+  track_id, &[u16])` writes the Degradation Priority Box (`stdp`,
+  §8.5.3); `set_padding_bits(track_id, &[u8])` writes the Padding Bits
+  Box (`padb`, §8.7.6, two 3-bit rows per byte, values `0..=7`);
+  `set_shadow_sync_samples(track_id, &[StshEntry])` writes the Shadow
+  Sync Sample Box (`stsh`, §8.6.3, auto-sorted ascending by
+  `shadowed_sample_number`); and `set_sub_samples(track_id,
+  &[SubSampleInfo])` writes the Sub-Sample Information Box (`subs`,
+  §8.7.7, sparse rows sorted + delta-coded, auto-promoting to version 1
+  when a sub-sample exceeds 65535 bytes). None carries an on-disk count
+  field — each table's length is validated against the track's sample
+  count — and all round-trip through `parse_sdtp` / `parse_stdp` /
+  `parse_padb` / `parse_stsh` / `parse_subs` back onto
+  `Track::sample_table`.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.
