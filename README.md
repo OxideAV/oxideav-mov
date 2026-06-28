@@ -364,6 +364,14 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   count — and all round-trip through `parse_sdtp` / `parse_stdp` /
   `parse_padb` / `parse_stsh` / `parse_subs` back onto
   `Track::sample_table`.
+- `set_track_load_settings(track_id, Some(Load))` emits a `load` (Track
+  Load Settings atom, QTFF pp. 48–49) as an early `trak` child carrying
+  the movie-timescale preload window (`preload_start_time` /
+  `preload_duration`, `0xFFFF_FFFF` = to-end) plus the preload-mode
+  (`LOAD_PRELOAD_ALWAYS` / `_IF_ENABLED`) and quality-hint
+  (`LOAD_HINT_DOUBLE_BUFFER` / `_HIGH_QUALITY`) bitfields. `Load::
+  to_body_bytes` is the inverse of `parse_load` (a non-FullBox 16-byte
+  body). QuickTime-only; round-trips onto `Track::load`.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.

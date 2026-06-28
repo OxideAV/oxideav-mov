@@ -120,6 +120,20 @@ impl Load {
     pub fn hint_high_quality(&self) -> bool {
         (self.default_hints & LOAD_HINT_HIGH_QUALITY) != 0
     }
+
+    /// Serialise into the 16-byte `load` atom body — the exact inverse
+    /// of [`parse_load`]. Four big-endian `u32`s in QTFF Figure 2-12
+    /// order: `preload_start_time`, `preload_duration`, `preload_flags`,
+    /// `default_hints`. The atom is **not** a FullBox (no version/flags
+    /// prefix).
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut p = Vec::with_capacity(16);
+        p.extend_from_slice(&self.preload_start_time.to_be_bytes());
+        p.extend_from_slice(&self.preload_duration.to_be_bytes());
+        p.extend_from_slice(&self.preload_flags.to_be_bytes());
+        p.extend_from_slice(&self.default_hints.to_be_bytes());
+        p
+    }
 }
 
 /// Parse a `load` atom payload.
@@ -214,6 +228,28 @@ mod tests {
         assert!(l.hint_double_buffer());
         assert!(l.hint_high_quality());
         assert_eq!(l.default_hints & 0x0000_0080, 0x0000_0080);
+    }
+
+    #[test]
+    fn to_body_bytes_is_parse_inverse() {
+        let l = Load {
+            preload_start_time: 120,
+            preload_duration: 600,
+            preload_flags: LOAD_PRELOAD_IF_ENABLED,
+            default_hints: LOAD_HINT_DOUBLE_BUFFER | LOAD_HINT_HIGH_QUALITY,
+        };
+        let body = l.to_body_bytes();
+        assert_eq!(body.len(), 16);
+        assert_eq!(parse_load(&body).unwrap(), l);
+
+        // Round-trip the to-end sentinel too.
+        let l2 = Load {
+            preload_start_time: 0,
+            preload_duration: LOAD_PRELOAD_DURATION_TO_END,
+            preload_flags: LOAD_PRELOAD_ALWAYS,
+            default_hints: 0,
+        };
+        assert_eq!(parse_load(&l2.to_body_bytes()).unwrap(), l2);
     }
 
     #[test]

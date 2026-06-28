@@ -65,6 +65,7 @@ use crate::metadata_sample::{MetadataSampleEntry, SimpleTextSampleEntry, Subtitl
 use crate::sample_table::{SdtpEntry, StshEntry, SubSampleInfo};
 use crate::text_sample::TextSampleDescription;
 use crate::timecode::Tmcd;
+use crate::track_load::Load;
 use std::io::Write;
 
 /// One sample destined for a track. The muxer copies `data` into the
@@ -932,6 +933,13 @@ struct TrackWrite {
     /// per-sample sub-sample table (delta-coded sample numbers). Empty ⇒
     /// no `subs`. Set via [`MovMuxer::set_sub_samples`].
     subs: Vec<SubSampleInfo>,
+    /// Optional `trak`-scope Track Load Settings atom (`load`, QTFF
+    /// pp. 48–49). When `Some` the muxer emits a `load` as an early
+    /// `trak` child carrying the movie-timescale preload window + the
+    /// preload-mode / quality-hint bitfields. `None` ⇒ no `load`. This
+    /// is a QuickTime-only atom (ISO BMFF does not define it). Set via
+    /// [`MovMuxer::set_track_load_settings`].
+    load: Option<Load>,
 }
 
 /// The packed `mdhd.language` value for `"und"` (undetermined) — the
@@ -1214,6 +1222,7 @@ impl MovMuxer {
             padb: Vec::new(),
             stsh: Vec::new(),
             subs: Vec::new(),
+            load: None,
         });
         self.tracks.len() as u32
     }
@@ -2009,6 +2018,38 @@ impl MovMuxer {
         Ok(())
     }
 
+    /// Attach a Track Load Settings atom (`load`, QTFF pp. 48–49) to a
+    /// previously-added track.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// The [`Load`] carries the movie-timescale preload window
+    /// (`preload_start_time` / `preload_duration`, with `0xFFFF_FFFF`
+    /// meaning "to the end of the track"), the mutually-exclusive
+    /// preload-mode flags ([`LOAD_PRELOAD_ALWAYS`] /
+    /// [`LOAD_PRELOAD_IF_ENABLED`]), and the playback-quality hint
+    /// bitfield ([`LOAD_HINT_DOUBLE_BUFFER`] / [`LOAD_HINT_HIGH_QUALITY`]
+    /// plus any vendor bits). Passing `None` removes any
+    /// previously-attached settings (no `load` box).
+    ///
+    /// On the next non-fragmented [`MovMuxer::encode_to_vec`] /
+    /// [`write_to`](MovMuxer::write_to), the muxer emits a `load` as an
+    /// early `trak` child (after `tapt`, before `edts`). The 16-byte body
+    /// is [`Load::to_body_bytes`] — the exact inverse of the read-side
+    /// [`crate::track_load::parse_load`] — so the file round-trips onto
+    /// `Track::load`. `load` is a QuickTime-only atom (ISO BMFF does not
+    /// define it); the fragmented init `moov` does not carry it.
+    ///
+    /// [`Load`]: crate::track_load::Load
+    /// [`LOAD_PRELOAD_ALWAYS`]: crate::track_load::LOAD_PRELOAD_ALWAYS
+    /// [`LOAD_PRELOAD_IF_ENABLED`]: crate::track_load::LOAD_PRELOAD_IF_ENABLED
+    /// [`LOAD_HINT_DOUBLE_BUFFER`]: crate::track_load::LOAD_HINT_DOUBLE_BUFFER
+    /// [`LOAD_HINT_HIGH_QUALITY`]: crate::track_load::LOAD_HINT_HIGH_QUALITY
+    pub fn set_track_load_settings(&mut self, track_id: u32, load: Option<Load>) -> Result<()> {
+        let idx = self.track_index(track_id, "set_track_load_settings")?;
+        self.tracks[idx].load = load;
+        Ok(())
+    }
+
     /// Attach movie-level user-data metadata, emitted as a `moov/udta`
     /// after the last `trak` (QTFF pp. 36–38 / ISO/IEC 14496-12
     /// §8.10.1).
@@ -2615,6 +2656,13 @@ fn build_trak(
     // rectangles; only the populated children are emitted.
     if let Some(tapt) = &t.tapt {
         push_atom(&mut trak, *b"tapt", &build_tapt(tapt));
+    }
+    // Track Load Settings atom (`load`, QTFF pp. 48–49) — a QuickTime-
+    // only early `trak` child carrying the movie-timescale preload
+    // window + preload-mode / quality-hint bitfields. Emitted only when
+    // the caller attached it via set_track_load_settings.
+    if let Some(load) = &t.load {
+        push_atom(&mut trak, *b"load", &load.to_body_bytes());
     }
     // edts > elst between tkhd and mdia (QTFF p. 46, Figure 2-8: the
     // edit atom precedes the media atom inside a track atom).
@@ -4595,6 +4643,7 @@ mod tests {
             padb: Vec::new(),
             stsh: Vec::new(),
             subs: Vec::new(),
+            load: None,
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -4650,6 +4699,7 @@ mod tests {
             padb: Vec::new(),
             stsh: Vec::new(),
             subs: Vec::new(),
+            load: None,
         }
     }
 
@@ -5104,6 +5154,7 @@ mod tests {
             padb: Vec::new(),
             stsh: Vec::new(),
             subs: Vec::new(),
+            load: None,
         };
         assert!(build_stss(&t).is_none());
     }
@@ -5140,6 +5191,7 @@ mod tests {
             padb: Vec::new(),
             stsh: Vec::new(),
             subs: Vec::new(),
+            load: None,
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -5204,6 +5256,7 @@ mod tests {
             padb: Vec::new(),
             stsh: Vec::new(),
             subs: Vec::new(),
+            load: None,
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -5259,6 +5312,7 @@ mod tests {
             padb: Vec::new(),
             stsh: Vec::new(),
             subs: Vec::new(),
+            load: None,
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows
