@@ -58,6 +58,7 @@ use oxideav_core::{Error, Result};
 #[cfg(not(feature = "registry"))]
 use crate::standalone::{Error, Result};
 
+use crate::clip::Clipping;
 use crate::gmhd::{Gmin, Tcmi};
 use crate::header::Hmhd;
 use crate::media_meta::{Clap, ColorParameters, Cslg, Fiel, Pasp, Tapt};
@@ -940,6 +941,13 @@ struct TrackWrite {
     /// is a QuickTime-only atom (ISO BMFF does not define it). Set via
     /// [`MovMuxer::set_track_load_settings`].
     load: Option<Load>,
+    /// Optional `trak`-scope Clipping atom (`clip` > `crgn`, QTFF
+    /// pp. 43–44). When `Some` the muxer emits a `clip` (wrapping a
+    /// single `crgn` Clipping Region) as a `trak` child carrying the
+    /// QuickDraw bounding box + optional scanline mask. `None` ⇒ no
+    /// `clip`. QuickTime-only (ISO BMFF does not define it). Set via
+    /// [`MovMuxer::set_track_clipping`].
+    clipping: Option<Clipping>,
 }
 
 /// The packed `mdhd.language` value for `"und"` (undetermined) — the
@@ -1223,6 +1231,7 @@ impl MovMuxer {
             stsh: Vec::new(),
             subs: Vec::new(),
             load: None,
+            clipping: None,
         });
         self.tracks.len() as u32
     }
@@ -2050,6 +2059,35 @@ impl MovMuxer {
         Ok(())
     }
 
+    /// Attach a Clipping atom (`clip` > `crgn`, QTFF pp. 43–44) to a
+    /// previously-added track.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// The [`Clipping`] carries a single `crgn` Clipping Region — its
+    /// QuickDraw bounding-box rectangle (`QdRect`, signed 16-bit
+    /// top/left/bottom/right) plus an optional opaque scanline payload
+    /// for a non-rectangular mask. Build a rectangular region with
+    /// [`crate::clip::ClippingRegion::rectangular`]. Passing `None`
+    /// removes any previously-attached clipping (no `clip` box).
+    ///
+    /// On the next non-fragmented [`MovMuxer::encode_to_vec`] /
+    /// [`write_to`](MovMuxer::write_to), the muxer emits a `clip` (with
+    /// its lone framed `crgn` child) as a `trak` child. The bodies are
+    /// [`Clipping::to_body_bytes`] / [`crate::clip::ClippingRegion::
+    /// to_body_bytes`] — the exact inverses of the read-side
+    /// [`crate::clip::parse_clip`] / `parse_crgn` (the `crgn`'s
+    /// `region_size` is recomputed from the scanline length) — so the
+    /// file round-trips onto `Track::clipping`. `clip` is a
+    /// QuickTime-only atom (ISO BMFF does not define it); the fragmented
+    /// init `moov` does not carry it.
+    ///
+    /// [`Clipping`]: crate::clip::Clipping
+    pub fn set_track_clipping(&mut self, track_id: u32, clipping: Option<Clipping>) -> Result<()> {
+        let idx = self.track_index(track_id, "set_track_clipping")?;
+        self.tracks[idx].clipping = clipping;
+        Ok(())
+    }
+
     /// Attach movie-level user-data metadata, emitted as a `moov/udta`
     /// after the last `trak` (QTFF pp. 36–38 / ISO/IEC 14496-12
     /// §8.10.1).
@@ -2663,6 +2701,12 @@ fn build_trak(
     // the caller attached it via set_track_load_settings.
     if let Some(load) = &t.load {
         push_atom(&mut trak, *b"load", &load.to_body_bytes());
+    }
+    // Track Clipping atom (`clip` > `crgn`, QTFF pp. 43–44) — a
+    // QuickTime-only `trak` child carrying the QuickDraw clipping region.
+    // Emitted only when the caller attached it via set_track_clipping.
+    if let Some(clipping) = &t.clipping {
+        push_atom(&mut trak, *b"clip", &clipping.to_body_bytes());
     }
     // edts > elst between tkhd and mdia (QTFF p. 46, Figure 2-8: the
     // edit atom precedes the media atom inside a track atom).
@@ -4644,6 +4688,7 @@ mod tests {
             stsh: Vec::new(),
             subs: Vec::new(),
             load: None,
+            clipping: None,
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -4700,6 +4745,7 @@ mod tests {
             stsh: Vec::new(),
             subs: Vec::new(),
             load: None,
+            clipping: None,
         }
     }
 
@@ -5155,6 +5201,7 @@ mod tests {
             stsh: Vec::new(),
             subs: Vec::new(),
             load: None,
+            clipping: None,
         };
         assert!(build_stss(&t).is_none());
     }
@@ -5192,6 +5239,7 @@ mod tests {
             stsh: Vec::new(),
             subs: Vec::new(),
             load: None,
+            clipping: None,
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -5257,6 +5305,7 @@ mod tests {
             stsh: Vec::new(),
             subs: Vec::new(),
             load: None,
+            clipping: None,
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -5313,6 +5362,7 @@ mod tests {
             stsh: Vec::new(),
             subs: Vec::new(),
             load: None,
+            clipping: None,
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

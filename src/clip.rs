@@ -140,6 +140,49 @@ impl ClippingRegion {
     pub fn is_rectangular(&self) -> bool {
         self.region_size == 10 && self.region_data.is_empty()
     }
+
+    /// Build a rectangular `ClippingRegion` from a bounding box — the
+    /// minimum legal region (no scanline payload, `region_size == 10`).
+    pub fn rectangular(bounding_box: QdRect) -> Self {
+        Self {
+            region_size: 10,
+            bounding_box,
+            region_data: Vec::new(),
+        }
+    }
+
+    /// Serialise into the `crgn` atom body — the exact inverse of
+    /// [`parse_crgn`]. The `region_size` field is recomputed as
+    /// `10 + region_data.len()` so a caller need not keep the stored
+    /// `region_size` consistent with `region_data`; the `[rgnSize:u16]
+    /// [bbox: top,left,bottom,right:i16×4][region_data]` layout (QTFF
+    /// p. 44) follows.
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let region_size = 10u16.saturating_add(self.region_data.len() as u16);
+        let mut p = Vec::with_capacity(region_size as usize);
+        p.extend_from_slice(&region_size.to_be_bytes());
+        p.extend_from_slice(&self.bounding_box.top.to_be_bytes());
+        p.extend_from_slice(&self.bounding_box.left.to_be_bytes());
+        p.extend_from_slice(&self.bounding_box.bottom.to_be_bytes());
+        p.extend_from_slice(&self.bounding_box.right.to_be_bytes());
+        p.extend_from_slice(&self.region_data);
+        p
+    }
+}
+
+impl Clipping {
+    /// Serialise into the `clip` atom payload — a single framed `crgn`
+    /// child (`[size:u32][\"crgn\"][crgn body]`, QTFF p. 43 Figure 2-8).
+    /// The inverse of [`parse_clip`] (which surfaces the lone `crgn`
+    /// directly onto [`Clipping::region`]).
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let crgn = self.region.to_body_bytes();
+        let mut p = Vec::with_capacity(8 + crgn.len());
+        p.extend_from_slice(&((8 + crgn.len()) as u32).to_be_bytes());
+        p.extend_from_slice(b"crgn");
+        p.extend_from_slice(&crgn);
+        p
+    }
 }
 
 /// Parsed `clip` Clipping atom (QTFF p. 43).
@@ -475,5 +518,53 @@ mod tests {
         let clip = parse_clip(&clip_payload).unwrap();
         assert_eq!(clip.region.bounding_box.top, 3);
         assert_eq!(clip.region.bounding_box.right, 14);
+    }
+
+    #[test]
+    fn crgn_to_body_bytes_is_parse_inverse_rectangular() {
+        let region = ClippingRegion::rectangular(QdRect {
+            top: -32,
+            left: -64,
+            bottom: 128,
+            right: 256,
+        });
+        let body = region.to_body_bytes();
+        assert_eq!(body.len(), 10);
+        assert_eq!(parse_crgn(&body).unwrap(), region);
+    }
+
+    #[test]
+    fn crgn_to_body_bytes_recomputes_region_size() {
+        // A caller-supplied region_size that disagrees with region_data
+        // is corrected by to_body_bytes (size = 10 + data len).
+        let region = ClippingRegion {
+            region_size: 999, // wrong on purpose
+            bounding_box: QdRect {
+                top: 0,
+                left: 0,
+                bottom: 50,
+                right: 50,
+            },
+            region_data: vec![0xAA, 0xBB, 0xCC, 0xDD],
+        };
+        let body = region.to_body_bytes();
+        let reparsed = parse_crgn(&body).unwrap();
+        assert_eq!(reparsed.region_size, 14);
+        assert_eq!(reparsed.region_data, region.region_data);
+        assert_eq!(reparsed.bounding_box, region.bounding_box);
+    }
+
+    #[test]
+    fn clip_to_body_bytes_is_parse_inverse() {
+        let clip = Clipping {
+            region: ClippingRegion::rectangular(QdRect {
+                top: 10,
+                left: 20,
+                bottom: 110,
+                right: 220,
+            }),
+        };
+        let body = clip.to_body_bytes();
+        assert_eq!(parse_clip(&body).unwrap(), clip);
     }
 }

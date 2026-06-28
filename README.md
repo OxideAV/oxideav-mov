@@ -372,6 +372,14 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   (`LOAD_HINT_DOUBLE_BUFFER` / `_HIGH_QUALITY`) bitfields. `Load::
   to_body_bytes` is the inverse of `parse_load` (a non-FullBox 16-byte
   body). QuickTime-only; round-trips onto `Track::load`.
+- `set_track_clipping(track_id, Some(Clipping))` emits a `clip` > `crgn`
+  (Track Clipping atom, QTFF pp. 43–44) as a `trak` child carrying the
+  QuickDraw clipping region — a signed-16-bit `QdRect` bounding box plus
+  an optional opaque scanline mask. `Clipping::to_body_bytes` /
+  `ClippingRegion::to_body_bytes` are the inverses of `parse_clip` /
+  `parse_crgn` (the `crgn` `region_size` is recomputed);
+  `ClippingRegion::rectangular(QdRect)` builds the minimum region.
+  QuickTime-only; round-trips onto `Track::clipping`.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.
