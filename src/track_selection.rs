@@ -172,6 +172,21 @@ impl TrackSelection {
     pub fn typed_attributes(&self) -> impl Iterator<Item = ([u8; 4], TsAttributeRole)> + '_ {
         self.attributes.iter().map(|&a| (a, ts_attribute_role(&a)))
     }
+
+    /// Serialise into the `tsel` FullBox body (ISO/IEC 14496-12
+    /// §8.10.3.3) — the exact inverse of [`parse_tsel`]. Layout:
+    /// `[version=0:1][flags=0:3][switch_group:i32]` followed by each
+    /// attribute FourCC as an `unsigned int(32)`, in order. The attribute
+    /// list runs to the end of the box (no count word).
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut p = Vec::with_capacity(8 + self.attributes.len() * 4);
+        p.extend_from_slice(&[0, 0, 0, 0]); // version 0 + flags 0
+        p.extend_from_slice(&self.switch_group.to_be_bytes());
+        for a in &self.attributes {
+            p.extend_from_slice(a);
+        }
+        p
+    }
 }
 
 /// Parse a `tsel` Track Selection box payload (ISO/IEC 14496-12
@@ -477,5 +492,28 @@ mod tests {
             assert_eq!(ts_attribute_role(fc), TsAttributeRole::Differentiating);
         }
         assert_eq!(ts_attribute_role(b"ZZZZ"), TsAttributeRole::Unknown);
+    }
+
+    #[test]
+    fn to_body_bytes_is_parse_inverse_with_attributes() {
+        let ts = TrackSelection {
+            switch_group: 7,
+            attributes: vec![TSEL_ATTR_CODEC, TSEL_ATTR_BITRATE],
+        };
+        let body = ts.to_body_bytes();
+        assert_eq!(parse_tsel(&body).unwrap(), ts);
+    }
+
+    #[test]
+    fn to_body_bytes_is_parse_inverse_empty_attributes() {
+        let ts = TrackSelection {
+            switch_group: -3,
+            attributes: Vec::new(),
+        };
+        let body = ts.to_body_bytes();
+        assert_eq!(body.len(), 8);
+        let reparsed = parse_tsel(&body).unwrap();
+        assert_eq!(reparsed, ts);
+        assert!(reparsed.is_informative());
     }
 }

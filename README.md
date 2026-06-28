@@ -392,6 +392,13 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   or more` per track. `KindEntry::to_body_bytes` is the inverse of
   `parse_kind`. The track `udta` carries metadata + kinds together;
   round-trips onto `Track::kinds`.
+- `set_track_selection(track_id, Some(TrackSelection))` emits an ISO
+  BMFF Track Selection box (`tsel`, §8.10.3) into the track-level `udta`
+  — the `switch_group` plus differentiating/descriptive attribute
+  FourCCs (`TSEL_ATTR_*`) that group tracks for adaptive switching.
+  `TrackSelection::to_body_bytes` is the inverse of `parse_tsel`;
+  coexists with metadata + `kind` in one `udta`; round-trips onto
+  `Track::track_selection`.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.

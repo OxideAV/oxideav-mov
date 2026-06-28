@@ -69,6 +69,7 @@ use crate::sample_table::{SdtpEntry, StshEntry, SubSampleInfo};
 use crate::text_sample::TextSampleDescription;
 use crate::timecode::Tmcd;
 use crate::track_load::Load;
+use crate::track_selection::TrackSelection;
 use std::io::Write;
 
 /// One sample destined for a track. The muxer copies `data` into the
@@ -964,6 +965,13 @@ struct TrackWrite {
     /// BMFF-only (QTFF does not define it). Set via
     /// [`MovMuxer::set_track_kinds`].
     track_kinds: Vec<KindEntry>,
+    /// Optional ISO BMFF Track Selection box (`tsel`, §8.10.3) emitted
+    /// into the track-level `udta`. Carries the `switch_group` +
+    /// differentiating/descriptive `attributes` that group tracks for
+    /// adaptive switching across an alternate group. `Quantity: Zero or
+    /// one`. `None` ⇒ no `tsel`. ISO BMFF-only. Set via
+    /// [`MovMuxer::set_track_selection`].
+    track_selection: Option<TrackSelection>,
 }
 
 /// The packed `mdhd.language` value for `"und"` (undetermined) — the
@@ -1250,6 +1258,7 @@ impl MovMuxer {
             clipping: None,
             matte: None,
             track_kinds: Vec::new(),
+            track_selection: None,
         });
         self.tracks.len() as u32
     }
@@ -2161,6 +2170,38 @@ impl MovMuxer {
         Ok(())
     }
 
+    /// Attach an ISO BMFF Track Selection box (`tsel`, §8.10.3) to a
+    /// previously-added track.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// The [`TrackSelection`] carries the `switch_group` (tracks sharing
+    /// a non-zero value are switchable alternatives within their
+    /// `tkhd.alternate_group`) plus an `attributes` list of FourCCs
+    /// declaring which media properties differentiate the group's members
+    /// (`cdec` codec, `bitr` bitrate, …) — see the `TSEL_ATTR_*`
+    /// constants. §8.10.3.1 allows at most one `tsel` per track
+    /// (`Quantity: Zero or one`). Passing `None` removes any
+    /// previously-attached selection.
+    ///
+    /// The box is emitted into the track-level `udta` (the same
+    /// container as track metadata + `kind` boxes) via
+    /// [`TrackSelection::to_body_bytes`] — the exact inverse of the
+    /// read-side [`crate::track_selection::parse_tsel`]. A file written
+    /// this way round-trips onto `Track::track_selection`
+    /// (`MovDemuxer::track_selection`). `tsel` is ISO BMFF-only (QTFF
+    /// does not define it).
+    ///
+    /// [`TrackSelection`]: crate::track_selection::TrackSelection
+    pub fn set_track_selection(
+        &mut self,
+        track_id: u32,
+        selection: Option<TrackSelection>,
+    ) -> Result<()> {
+        let idx = self.track_index(track_id, "set_track_selection")?;
+        self.tracks[idx].track_selection = selection;
+        Ok(())
+    }
+
     /// Attach movie-level user-data metadata, emitted as a `moov/udta`
     /// after the last `trak` (QTFF pp. 36–38 / ISO/IEC 14496-12
     /// §8.10.1).
@@ -2810,12 +2851,17 @@ fn build_trak(
     // `kind` (Track Kind) boxes — both share the track-level `udta`
     // container, so they're emitted into one box. No `udta` when neither
     // is present.
-    if !t.metadata.is_empty() || !t.track_kinds.is_empty() {
+    if !t.metadata.is_empty() || !t.track_kinds.is_empty() || t.track_selection.is_some() {
         let mut udta = build_udta(&t.metadata);
         // Append each `kind` child after the metadata items; the read
         // side (find_kinds_in_udta) walks the flat udta atom list.
         for k in &t.track_kinds {
             push_atom(&mut udta, *b"kind", &k.to_body_bytes());
+        }
+        // Append the single `tsel` Track Selection box (§8.10.3,
+        // Quantity: Zero or one); find_tsel_in_udta returns the first.
+        if let Some(sel) = &t.track_selection {
+            push_atom(&mut udta, *b"tsel", &sel.to_body_bytes());
         }
         push_atom(&mut trak, *b"udta", &udta);
     }
@@ -4780,6 +4826,7 @@ mod tests {
             clipping: None,
             matte: None,
             track_kinds: Vec::new(),
+            track_selection: None,
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -4839,6 +4886,7 @@ mod tests {
             clipping: None,
             matte: None,
             track_kinds: Vec::new(),
+            track_selection: None,
         }
     }
 
@@ -5297,6 +5345,7 @@ mod tests {
             clipping: None,
             matte: None,
             track_kinds: Vec::new(),
+            track_selection: None,
         };
         assert!(build_stss(&t).is_none());
     }
@@ -5337,6 +5386,7 @@ mod tests {
             clipping: None,
             matte: None,
             track_kinds: Vec::new(),
+            track_selection: None,
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -5405,6 +5455,7 @@ mod tests {
             clipping: None,
             matte: None,
             track_kinds: Vec::new(),
+            track_selection: None,
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -5464,6 +5515,7 @@ mod tests {
             clipping: None,
             matte: None,
             track_kinds: Vec::new(),
+            track_selection: None,
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows
