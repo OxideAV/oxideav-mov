@@ -61,6 +61,7 @@ use crate::standalone::{Error, Result};
 use crate::clip::Clipping;
 use crate::gmhd::{Gmin, Tcmi};
 use crate::header::Hmhd;
+use crate::matte::Matte;
 use crate::media_meta::{Clap, ColorParameters, Cslg, Fiel, Pasp, Tapt};
 use crate::metadata_sample::{MetadataSampleEntry, SimpleTextSampleEntry, SubtitleSampleEntry};
 use crate::sample_table::{SdtpEntry, StshEntry, SubSampleInfo};
@@ -948,6 +949,13 @@ struct TrackWrite {
     /// `clip`. QuickTime-only (ISO BMFF does not define it). Set via
     /// [`MovMuxer::set_track_clipping`].
     clipping: Option<Clipping>,
+    /// Optional `trak`-scope Track Matte atom (`matt` > `kmat`, QTFF
+    /// pp. 44–45). When `Some` the muxer emits a `matt` (wrapping a
+    /// single `kmat` Compressed Matte) as a `trak` child carrying the
+    /// blend matte's image description + compressed matte data. `None` ⇒
+    /// no `matt`. QuickTime-only (ISO BMFF does not define it). Set via
+    /// [`MovMuxer::set_track_matte`].
+    matte: Option<Matte>,
 }
 
 /// The packed `mdhd.language` value for `"und"` (undetermined) — the
@@ -1232,6 +1240,7 @@ impl MovMuxer {
             subs: Vec::new(),
             load: None,
             clipping: None,
+            matte: None,
         });
         self.tracks.len() as u32
     }
@@ -2088,6 +2097,37 @@ impl MovMuxer {
         Ok(())
     }
 
+    /// Attach a Track Matte atom (`matt` > `kmat`, QTFF pp. 44–45) to a
+    /// previously-added track.
+    ///
+    /// `track_id` is the 1-based id returned by [`MovMuxer::add_track`].
+    /// The [`Matte`] carries a single `kmat` Compressed Matte — a blend
+    /// matte (a greyscale image that weights this track against the one
+    /// below it during compositing) whose pixels are themselves coded:
+    /// a QTFF image description structure (the same on-disk shape as a
+    /// video sample description, naming the codec) followed by the
+    /// compressed matte data. Passing `None` removes any
+    /// previously-attached matte (no `matt` box).
+    ///
+    /// On the next non-fragmented [`MovMuxer::encode_to_vec`] /
+    /// [`write_to`](MovMuxer::write_to), the muxer emits a `matt` (with
+    /// its lone framed `kmat` child) as a `trak` child. The bodies are
+    /// [`Matte::to_body_bytes`] / [`crate::matte::CompressedMatte::
+    /// to_body_bytes`] — the exact inverses of the read-side
+    /// [`crate::matte::parse_matt`] / `parse_kmat` (the image description
+    /// is written verbatim, its leading 4-byte size word the caller's
+    /// responsibility, exactly as a video sample description carries its
+    /// own size) — so the file round-trips onto `Track::matte`. `matt` is
+    /// a QuickTime-only atom (ISO BMFF does not define it); the
+    /// fragmented init `moov` does not carry it.
+    ///
+    /// [`Matte`]: crate::matte::Matte
+    pub fn set_track_matte(&mut self, track_id: u32, matte: Option<Matte>) -> Result<()> {
+        let idx = self.track_index(track_id, "set_track_matte")?;
+        self.tracks[idx].matte = matte;
+        Ok(())
+    }
+
     /// Attach movie-level user-data metadata, emitted as a `moov/udta`
     /// after the last `trak` (QTFF pp. 36–38 / ISO/IEC 14496-12
     /// §8.10.1).
@@ -2707,6 +2747,12 @@ fn build_trak(
     // Emitted only when the caller attached it via set_track_clipping.
     if let Some(clipping) = &t.clipping {
         push_atom(&mut trak, *b"clip", &clipping.to_body_bytes());
+    }
+    // Track Matte atom (`matt` > `kmat`, QTFF pp. 44–45) — a
+    // QuickTime-only `trak` child carrying a coded blend matte. Emitted
+    // only when the caller attached it via set_track_matte.
+    if let Some(matte) = &t.matte {
+        push_atom(&mut trak, *b"matt", &matte.to_body_bytes());
     }
     // edts > elst between tkhd and mdia (QTFF p. 46, Figure 2-8: the
     // edit atom precedes the media atom inside a track atom).
@@ -4689,6 +4735,7 @@ mod tests {
             subs: Vec::new(),
             load: None,
             clipping: None,
+            matte: None,
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -4746,6 +4793,7 @@ mod tests {
             subs: Vec::new(),
             load: None,
             clipping: None,
+            matte: None,
         }
     }
 
@@ -5202,6 +5250,7 @@ mod tests {
             subs: Vec::new(),
             load: None,
             clipping: None,
+            matte: None,
         };
         assert!(build_stss(&t).is_none());
     }
@@ -5240,6 +5289,7 @@ mod tests {
             subs: Vec::new(),
             load: None,
             clipping: None,
+            matte: None,
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -5306,6 +5356,7 @@ mod tests {
             subs: Vec::new(),
             load: None,
             clipping: None,
+            matte: None,
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -5363,6 +5414,7 @@ mod tests {
             subs: Vec::new(),
             load: None,
             clipping: None,
+            matte: None,
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

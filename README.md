@@ -380,6 +380,12 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   `parse_crgn` (the `crgn` `region_size` is recomputed);
   `ClippingRegion::rectangular(QdRect)` builds the minimum region.
   QuickTime-only; round-trips onto `Track::clipping`.
+- `set_track_matte(track_id, Some(Matte))` emits a `matt` > `kmat`
+  (Track Matte atom, QTFF pp. 44–45) as a `trak` child carrying a coded
+  blend matte — a FullBox header, a QTFF image description naming the
+  codec, and the compressed matte data. `Matte::to_body_bytes` /
+  `CompressedMatte::to_body_bytes` are the inverses of `parse_matt` /
+  `parse_kmat`. QuickTime-only; round-trips onto `Track::matte`.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.

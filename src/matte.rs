@@ -144,6 +144,44 @@ impl CompressedMatte {
     pub fn image_description_size(&self) -> u32 {
         self.image_description.len() as u32
     }
+
+    /// Serialise into the `kmat` atom body — the exact inverse of
+    /// [`parse_kmat`]. Layout (QTFF p. 45): `[version:1][flags:3]`, then
+    /// the image description structure (preceded by its own 4-byte size
+    /// word which the parser reads back as `image_description[0..4]`),
+    /// then the compressed matte data.
+    ///
+    /// `version` / `flags` are written from the stored fields; a
+    /// spec-conformant caller leaves both 0 (the parser rejects non-zero
+    /// on read). The image description is emitted verbatim — the caller
+    /// is responsible for the 4-byte size word at its head matching the
+    /// structure length, exactly as a video sample description carries
+    /// its own size (QTFF p. 70).
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut p = Vec::with_capacity(4 + self.image_description.len() + self.matte_data.len());
+        p.push(self.version);
+        p.push(((self.flags >> 16) & 0xFF) as u8);
+        p.push(((self.flags >> 8) & 0xFF) as u8);
+        p.push((self.flags & 0xFF) as u8);
+        p.extend_from_slice(&self.image_description);
+        p.extend_from_slice(&self.matte_data);
+        p
+    }
+}
+
+impl Matte {
+    /// Serialise into the `matt` atom payload — a single framed `kmat`
+    /// child (`[size:u32][\"kmat\"][kmat body]`, QTFF p. 45 Figure 2-9).
+    /// The inverse of [`parse_matt`] (which surfaces the lone `kmat`
+    /// directly onto [`Matte::compressed`]).
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let kmat = self.compressed.to_body_bytes();
+        let mut p = Vec::with_capacity(8 + kmat.len());
+        p.extend_from_slice(&((8 + kmat.len()) as u32).to_be_bytes());
+        p.extend_from_slice(b"kmat");
+        p.extend_from_slice(&kmat);
+        p
+    }
 }
 
 /// Parsed `matt` Track Matte atom (QTFF p. 44).
@@ -481,5 +519,47 @@ mod tests {
         matt_body.extend_from_slice(&kmat_body);
         let parsed = parse_matt(&matt_body).unwrap();
         assert_eq!(parsed.compressed.matte_data, b"tail");
+    }
+
+    #[test]
+    fn kmat_to_body_bytes_is_parse_inverse() {
+        let image_desc = build_image_description(b"png ", 4);
+        let cm = CompressedMatte {
+            version: 0,
+            flags: 0,
+            image_description: image_desc,
+            matte_data: vec![1, 2, 3, 4, 5],
+        };
+        let body = cm.to_body_bytes();
+        assert_eq!(parse_kmat(&body).unwrap(), cm);
+    }
+
+    #[test]
+    fn kmat_to_body_bytes_empty_matte_data() {
+        let cm = CompressedMatte {
+            version: 0,
+            flags: 0,
+            image_description: build_image_description(b"raw ", 0),
+            matte_data: Vec::new(),
+        };
+        let body = cm.to_body_bytes();
+        let reparsed = parse_kmat(&body).unwrap();
+        assert_eq!(reparsed, cm);
+        assert_eq!(reparsed.data_format(), Some(*b"raw "));
+        assert!(reparsed.matte_data.is_empty());
+    }
+
+    #[test]
+    fn matt_to_body_bytes_is_parse_inverse() {
+        let matte = Matte {
+            compressed: CompressedMatte {
+                version: 0,
+                flags: 0,
+                image_description: build_image_description(b"jpeg", 8),
+                matte_data: vec![0xAA; 16],
+            },
+        };
+        let body = matte.to_body_bytes();
+        assert_eq!(parse_matt(&body).unwrap(), matte);
     }
 }
