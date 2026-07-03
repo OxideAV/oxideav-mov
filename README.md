@@ -1,5 +1,7 @@
 # oxideav-mov
 
+[![CI](https://github.com/OxideAV/oxideav-mov/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-mov/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-mov.svg)](https://crates.io/crates/oxideav-mov) [![docs.rs](https://docs.rs/oxideav-mov/badge.svg)](https://docs.rs/oxideav-mov) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust Apple QuickTime File Format (QTFF) demuxer + muxer.
 
 QTFF is the immediate ancestor of ISO Base Media File Format
