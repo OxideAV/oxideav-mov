@@ -2974,6 +2974,17 @@ fn track_media_duration(t: &TrackWrite) -> u64 {
 }
 
 fn track_movie_duration(t: &TrackWrite, movie_ts: u32) -> u64 {
+    // QTFF p. 41 (tkhd duration): "this property is derived from the
+    // track's edits. The value of this field is equal to the sum of
+    // the durations of all of the track's edits. If there is no edit
+    // list, then the duration is the sum of the sample durations,
+    // converted into the movie timescale." `MuxEdit.track_duration`
+    // is already in movie-timescale ticks. The movie header's
+    // duration (longest-track rule) inherits the same edit awareness
+    // through this helper.
+    if !t.edits.is_empty() {
+        return t.edits.iter().map(|e| e.track_duration).sum();
+    }
     let media_dur = track_media_duration(t);
     if t.media_timescale == 0 {
         return 0;

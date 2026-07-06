@@ -421,3 +421,44 @@ fn multi_track_edits_apply_independently() {
     assert_eq!(b_pkts[0].pts, Some(0));
     assert_eq!(b_pkts[5].pts, Some(500));
 }
+
+#[test]
+fn tkhd_duration_is_sum_of_edit_durations() {
+    // QTFF p. 41: with an edit list, tkhd.duration equals the sum of
+    // the edits' track_durations (movie-timescale ticks) — NOT the
+    // rescaled media duration. 10×100 media ticks trimmed to a
+    // 300-tick presentation must declare 300.
+    let mut m = MovMuxer::new().with_movie_timescale(1000);
+    let tid = m.add_track(audio_kind(), 1000, uniform_samples(10, 100), &[]);
+    m.set_edit_list(tid, &[MuxEdit::empty(100), MuxEdit::segment(200, 500)])
+        .unwrap();
+    let d = open(m.encode_to_vec().unwrap());
+    assert_eq!(d.tracks[0].tkhd.duration, 300);
+    // mvhd inherits the longest-track rule from the edited value.
+    assert_eq!(d.mvhd.as_ref().unwrap().duration, 300);
+}
+
+#[test]
+fn tkhd_duration_without_edits_stays_media_derived() {
+    // No edit list: duration is the rescaled sum of sample durations
+    // (10×100 media ticks at matching timescales → 1000).
+    let mut m = MovMuxer::new().with_movie_timescale(1000);
+    m.add_track(audio_kind(), 1000, uniform_samples(10, 100), &[]);
+    let d = open(m.encode_to_vec().unwrap());
+    assert_eq!(d.tracks[0].tkhd.duration, 1000);
+    assert_eq!(d.mvhd.as_ref().unwrap().duration, 1000);
+}
+
+#[test]
+fn mvhd_duration_is_longest_edited_track() {
+    // Track A: trimmed to 250 movie ticks. Track B: no edits, 600
+    // media ticks at media ts 1000 → 600 movie ticks. mvhd takes B.
+    let mut m = MovMuxer::new().with_movie_timescale(1000);
+    let a = m.add_track(audio_kind(), 1000, uniform_samples(10, 100), &[]);
+    m.set_edit_list(a, &[MuxEdit::segment(250, 0)]).unwrap();
+    let _b = m.add_track(audio_kind(), 1000, uniform_samples(6, 100), &[]);
+    let d = open(m.encode_to_vec().unwrap());
+    assert_eq!(d.tracks[0].tkhd.duration, 250);
+    assert_eq!(d.tracks[1].tkhd.duration, 600);
+    assert_eq!(d.mvhd.as_ref().unwrap().duration, 600);
+}
