@@ -151,6 +151,63 @@ pub struct SoundV1 {
     pub bytes_per_sample: u32,
 }
 
+/// ISO BMFF `ChannelLayout` box (`chnl`, ISO/IEC 14496-12:2015
+/// §12.2.4) — documents the assignment of channels (and/or audio
+/// objects) in the stream. Carried inside an audio sample entry;
+/// signalling more than 2 channels requires an `AudioSampleEntryV1`
+/// (§12.2.4.1). A stream may be channel-structured, object-structured,
+/// both, or neither (`stream_structure` flags 1 / 2).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChannelLayout {
+    /// `stream_structure` flag field: bit 0 (`1`) = the stream
+    /// carries channels, bit 1 (`2`) = the stream carries objects.
+    /// All other bits are reserved (§12.2.4.3).
+    pub stream_structure: u8,
+    /// Channel-structure payload, present when `stream_structure & 1`.
+    pub channels: Option<ChannelStructure>,
+    /// Object count, present when `stream_structure & 2`.
+    pub object_count: Option<u8>,
+}
+
+impl ChannelLayout {
+    /// §12.2.4.2 `channelStructured` flag.
+    pub const CHANNEL_STRUCTURED: u8 = 1;
+    /// §12.2.4.2 `objectStructured` flag.
+    pub const OBJECT_STRUCTURED: u8 = 2;
+}
+
+/// The channel-structured half of a [`ChannelLayout`] (§12.2.4.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChannelStructure {
+    /// `definedLayout != 0`: a ChannelConfiguration from ISO/IEC
+    /// 23001-8 plus a 64-bit bitmap of channels omitted from this
+    /// track (1-bit = absent; `0` = the standard layout is fully
+    /// present, §12.2.4.3).
+    Defined {
+        /// ISO/IEC 23001-8 ChannelConfiguration index.
+        defined_layout: u8,
+        /// LSB-first omitted-channels bitmap.
+        omitted_channels_map: u64,
+    },
+    /// `definedLayout == 0`: one explicit speaker position per channel
+    /// (the count comes from the sample entry's `channelcount`).
+    Explicit(Vec<SpeakerPosition>),
+}
+
+/// One explicit speaker position row of a [`ChannelStructure::Explicit`]
+/// layout (§12.2.4.2): an ISO/IEC 23001-8 OutputChannelPosition, with
+/// `speaker_position == 126` carrying an explicit azimuth/elevation
+/// pair (degrees, as defined for LoudspeakerAzimuth / -Elevation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpeakerPosition {
+    /// OutputChannelPosition code; `126` = explicit position.
+    pub speaker_position: u8,
+    /// Azimuth in degrees, only for `speaker_position == 126`.
+    pub azimuth: Option<i16>,
+    /// Elevation in degrees, only for `speaker_position == 126`.
+    pub elevation: Option<i8>,
+}
+
 /// One sample-description-table entry. QTFF p. 70 ("Sample
 /// Description Atoms") — the first 16 bytes are universal:
 /// `[size:4][format:4][reserved:6][data_reference_index:2]`. Per-
@@ -239,6 +296,27 @@ pub struct SampleDescription {
     /// decompressor.
     pub sound_v1: Option<SoundV1>,
 
+    // ─────── Round-394 ISO audio sample entry v1 ───────
+    /// `true` when this audio entry is an ISO BMFF
+    /// `AudioSampleEntryV1` (ISO/IEC 14496-12:2015 §12.2.3):
+    /// `entry_version == 1` inside a `stsd` whose FullBox version is
+    /// also 1. The fixed 20-byte body layout matches version 0 (the
+    /// QTFF 16-byte `SoundDescriptionV1` extension is *not* present);
+    /// optional `srat` / `chnl` boxes may follow. Distinguished from
+    /// the QTFF version-1 sound description (which lives in a
+    /// version-0 `stsd` and sets [`SampleDescription::sound_v1`]).
+    pub iso_audio_entry_v1: bool,
+    /// `srat` SamplingRateBox (§12.2.3.2): the *actual* sampling rate,
+    /// overriding the entry's 16.16 `samplerate` field (which then
+    /// holds a suitable integer multiple/division — typically the
+    /// media timescale). Only valid inside an `AudioSampleEntryV1`;
+    /// parsed leniently wherever it appears. See
+    /// [`SampleDescription::effective_sample_rate`].
+    pub sampling_rate: Option<u32>,
+    /// `chnl` ChannelLayout box (§12.2.4), when the audio entry
+    /// documents its channel/object assignment.
+    pub chnl: Option<ChannelLayout>,
+
     // ─────── Round-6 timecode extension ───────
     /// Parsed `tmcd` sample-description body — populated only when the
     /// track's handler is a time-code track (`hdlr.is_timecode()`) and
@@ -315,6 +393,16 @@ impl SampleDescription {
     /// not `-2`.
     pub fn is_vbr(&self) -> bool {
         self.audio_version == 1 && self.audio_compression_id == -2
+    }
+
+    /// The audio entry's actual sampling rate in Hz: the `srat`
+    /// SamplingRateBox value when present (ISO/IEC 14496-12:2015
+    /// §12.2.3.3 — "when a SamplingRateBox is present, [the
+    /// samplerate field] is a suitable integer multiple or division
+    /// of the actual sampling rate"), otherwise the integer portion
+    /// of the entry's 16.16 `samplerate` field.
+    pub fn effective_sample_rate(&self) -> u32 {
+        self.sampling_rate.unwrap_or(self.sample_rate)
     }
 }
 
@@ -874,7 +962,12 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
     if payload.len() < 8 {
         return Err(Error::invalid("MOV: stsd payload < 8 bytes"));
     }
-    let _ver_flags = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    // FullBox version: 0 for every classic table; 1 signals that an
+    // audio entry may be an ISO `AudioSampleEntryV1` (ISO/IEC
+    // 14496-12:2015 §8.5.2 / §12.2.3 — "version is set to zero unless
+    // the box contains an AudioSampleEntryV1, whereupon version must
+    // be 1").
+    let stsd_version = payload[0];
     let n = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
     // Allocate for the byte-backed entry count, not the declared one:
     // each sample description occupies at least 16 bytes (the QTFF
@@ -990,6 +1083,16 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
             // typed and start the codec `extra` scan past them.
             let extra_start = match version {
                 0 => 20usize,
+                // ISO BMFF AudioSampleEntryV1 (ISO/IEC 14496-12:2015
+                // §12.2.3.2): entry_version 1 is only legal inside a
+                // version-1 stsd, and its fixed body is the *same*
+                // 20 bytes as version 0 — the QTFF 16-byte
+                // CompressionInfo extension is NOT present. Optional
+                // srat / chnl boxes follow in the trailing box area.
+                1 if stsd_version == 1 => {
+                    entry.iso_audio_entry_v1 = true;
+                    20
+                }
                 1 if body.len() >= 36 => {
                     entry.sound_v1 = Some(SoundV1 {
                         samples_per_packet: u32::from_be_bytes([
@@ -1078,12 +1181,117 @@ fn scan_video_extensions(entry: &mut SampleDescription) -> Result<()> {
 /// `wave` / `esds` stay opaque for downstream codec crates).
 fn scan_audio_extensions(entry: &mut SampleDescription) -> Result<()> {
     let buf = entry.extra.clone();
+    let channel_count = entry.channels;
     walk_atoms(&buf, |fourcc, payload| {
-        if fourcc == b"chan" {
-            entry.chan = Some(parse_chan(payload)?);
+        match fourcc {
+            b"chan" => {
+                entry.chan = Some(parse_chan(payload)?);
+            }
+            b"srat" => {
+                entry.sampling_rate = Some(parse_srat(payload)?);
+            }
+            b"chnl" => {
+                entry.chnl = Some(parse_chnl(payload, channel_count)?);
+            }
+            _ => {}
         }
         Ok(())
     })
+}
+
+/// Parse a `srat` SamplingRateBox body (ISO/IEC 14496-12:2015
+/// §12.2.3.2): a FullBox (version 0) wrapping one 32-bit integer, the
+/// actual sampling rate of the audio media.
+pub fn parse_srat(payload: &[u8]) -> Result<u32> {
+    if payload.len() < 8 {
+        return Err(Error::invalid("MOV: srat body < 8 bytes"));
+    }
+    if payload[0] != 0 {
+        return Err(Error::invalid("MOV: srat version != 0"));
+    }
+    Ok(u32::from_be_bytes([
+        payload[4], payload[5], payload[6], payload[7],
+    ]))
+}
+
+/// Parse a `chnl` ChannelLayout box body (ISO/IEC 14496-12:2015
+/// §12.2.4.2). `channel_count` is the enclosing audio sample entry's
+/// `channelcount` — the explicit-position loop runs once per channel
+/// ("channelCount comes from the sample entry").
+pub fn parse_chnl(payload: &[u8], channel_count: u16) -> Result<ChannelLayout> {
+    if payload.len() < 5 {
+        return Err(Error::invalid("MOV: chnl body < 5 bytes"));
+    }
+    if payload[0] != 0 {
+        return Err(Error::invalid("MOV: chnl version != 0"));
+    }
+    let stream_structure = payload[4];
+    let mut p = 5usize;
+    let mut out = ChannelLayout {
+        stream_structure,
+        channels: None,
+        object_count: None,
+    };
+    if stream_structure & ChannelLayout::CHANNEL_STRUCTURED != 0 {
+        let defined_layout = *payload
+            .get(p)
+            .ok_or_else(|| Error::invalid("MOV: chnl truncated at definedLayout"))?;
+        p += 1;
+        if defined_layout == 0 {
+            // One explicit OutputChannelPosition per channel; code 126
+            // appends an azimuth (i16) + elevation (i8) pair.
+            let mut rows = Vec::with_capacity((channel_count as usize).min(payload.len()));
+            for _ in 0..channel_count {
+                let pos = *payload
+                    .get(p)
+                    .ok_or_else(|| Error::invalid("MOV: chnl truncated in speaker positions"))?;
+                p += 1;
+                let (azimuth, elevation) = if pos == 126 {
+                    if p + 3 > payload.len() {
+                        return Err(Error::invalid("MOV: chnl truncated in explicit position"));
+                    }
+                    let az = i16::from_be_bytes([payload[p], payload[p + 1]]);
+                    let el = payload[p + 2] as i8;
+                    p += 3;
+                    (Some(az), Some(el))
+                } else {
+                    (None, None)
+                };
+                rows.push(SpeakerPosition {
+                    speaker_position: pos,
+                    azimuth,
+                    elevation,
+                });
+            }
+            out.channels = Some(ChannelStructure::Explicit(rows));
+        } else {
+            if p + 8 > payload.len() {
+                return Err(Error::invalid("MOV: chnl truncated at omittedChannelsMap"));
+            }
+            let omitted = u64::from_be_bytes([
+                payload[p],
+                payload[p + 1],
+                payload[p + 2],
+                payload[p + 3],
+                payload[p + 4],
+                payload[p + 5],
+                payload[p + 6],
+                payload[p + 7],
+            ]);
+            p += 8;
+            out.channels = Some(ChannelStructure::Defined {
+                defined_layout,
+                omitted_channels_map: omitted,
+            });
+        }
+    }
+    if stream_structure & ChannelLayout::OBJECT_STRUCTURED != 0 {
+        let n = *payload
+            .get(p)
+            .ok_or_else(|| Error::invalid("MOV: chnl truncated at object_count"))?;
+        out.object_count = Some(n);
+    }
+    Ok(out)
 }
 
 /// Walk the top-level atoms inside an in-memory buffer. The callback
@@ -1231,6 +1439,138 @@ mod tests {
         }
         p.extend_from_slice(&body);
         p
+    }
+
+    /// Build a **version-1 stsd** carrying a single ISO
+    /// `AudioSampleEntryV1` (ISO/IEC 14496-12:2015 §12.2.3.2):
+    /// entry_version=1, the same 20-byte fixed body as version 0, and
+    /// the given trailing boxes.
+    fn iso_audio_v1_stsd(channels: u16, trailing: &[u8]) -> Vec<u8> {
+        let mut p = Vec::new();
+        p.push(1); // stsd FullBox version = 1
+        p.extend_from_slice(&[0, 0, 0]); // flags
+        p.extend_from_slice(&1u32.to_be_bytes()); // n_entries
+        let entry_size = (16 + 20 + trailing.len()) as u32;
+        p.extend_from_slice(&entry_size.to_be_bytes());
+        p.extend_from_slice(b"fLaC");
+        p.extend_from_slice(&[0u8; 6]); // reserved
+        p.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index
+        let mut body = vec![0u8; 20];
+        body[0..2].copy_from_slice(&1u16.to_be_bytes()); // entry_version = 1
+        body[8..10].copy_from_slice(&channels.to_be_bytes());
+        body[10..12].copy_from_slice(&16u16.to_be_bytes());
+        body[16..20].copy_from_slice(&((48000u32) << 16).to_be_bytes());
+        p.extend_from_slice(&body);
+        p.extend_from_slice(trailing);
+        p
+    }
+
+    fn framed(fourcc: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut a = Vec::with_capacity(8 + body.len());
+        a.extend_from_slice(&((8 + body.len()) as u32).to_be_bytes());
+        a.extend_from_slice(fourcc);
+        a.extend_from_slice(body);
+        a
+    }
+
+    #[test]
+    fn iso_audio_entry_v1_has_no_qtff_extension_bytes() {
+        // §12.2.3.2: entry_version 1 in a version-1 stsd keeps the
+        // 20-byte fixed body — the QTFF 16-byte CompressionInfo
+        // extension must NOT be consumed, so a trailing box starting
+        // at byte 20 parses as a box (here: srat).
+        let mut srat_body = vec![0u8; 8]; // version+flags, rate
+        srat_body[4..8].copy_from_slice(&96_000u32.to_be_bytes());
+        let trailing = framed(b"srat", &srat_body);
+        let p = iso_audio_v1_stsd(2, &trailing);
+        let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+        assert!(v[0].iso_audio_entry_v1);
+        assert_eq!(v[0].audio_version, 1);
+        assert_eq!(v[0].sound_v1, None, "no QTFF v1 fixed-ratio fields");
+        assert_eq!(v[0].sample_rate, 48000);
+        assert_eq!(v[0].sampling_rate, Some(96_000));
+        assert_eq!(v[0].effective_sample_rate(), 96_000);
+    }
+
+    #[test]
+    fn qtff_v1_in_version0_stsd_still_wins() {
+        // The QTFF SoundDescriptionV1 detection must be unaffected:
+        // stsd version 0 + body version 1 keeps the 36-byte layout.
+        let p = audio_stsd(1, 0, Some([1024, 384, 384, 2]));
+        let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+        assert!(!v[0].iso_audio_entry_v1);
+        assert!(v[0].sound_v1.is_some());
+    }
+
+    #[test]
+    fn chnl_defined_layout_with_omitted_map() {
+        // definedLayout != 0 → ChannelConfiguration + 64-bit omitted
+        // bitmap (§12.2.4.2 else-branch).
+        let mut body = vec![0u8; 4]; // FullBox version+flags
+        body.push(ChannelLayout::CHANNEL_STRUCTURED);
+        body.push(6); // definedLayout = 6 (a 23001-8 configuration)
+        body.extend_from_slice(&0x0000_0000_0000_0021u64.to_be_bytes());
+        let trailing = framed(b"chnl", &body);
+        let p = iso_audio_v1_stsd(4, &trailing);
+        let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+        let chnl = v[0].chnl.as_ref().expect("chnl parsed");
+        assert_eq!(chnl.stream_structure, 1);
+        assert_eq!(
+            chnl.channels,
+            Some(ChannelStructure::Defined {
+                defined_layout: 6,
+                omitted_channels_map: 0x21,
+            })
+        );
+        assert_eq!(chnl.object_count, None);
+    }
+
+    #[test]
+    fn chnl_explicit_positions_and_objects() {
+        // definedLayout == 0 → one speaker position per channel (count
+        // from the sample entry), code 126 carrying azimuth/elevation;
+        // plus the object-structured half.
+        let mut body = vec![0u8; 4];
+        body.push(ChannelLayout::CHANNEL_STRUCTURED | ChannelLayout::OBJECT_STRUCTURED);
+        body.push(0); // definedLayout = 0 → explicit positions
+        body.push(2); // channel 1: position 2
+        body.push(126); // channel 2: explicit
+        body.extend_from_slice(&(-30i16).to_be_bytes()); // azimuth
+        body.push(10u8); // elevation +10
+        body.push(3); // object_count = 3
+        let trailing = framed(b"chnl", &body);
+        let p = iso_audio_v1_stsd(2, &trailing);
+        let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+        let chnl = v[0].chnl.as_ref().expect("chnl parsed");
+        assert_eq!(
+            chnl.channels,
+            Some(ChannelStructure::Explicit(vec![
+                SpeakerPosition {
+                    speaker_position: 2,
+                    azimuth: None,
+                    elevation: None,
+                },
+                SpeakerPosition {
+                    speaker_position: 126,
+                    azimuth: Some(-30),
+                    elevation: Some(10),
+                },
+            ]))
+        );
+        assert_eq!(chnl.object_count, Some(3));
+    }
+
+    #[test]
+    fn chnl_truncated_rows_error() {
+        // Declares explicit positions but runs out of bytes mid-row.
+        let mut body = vec![0u8; 4];
+        body.push(ChannelLayout::CHANNEL_STRUCTURED);
+        body.push(0);
+        body.push(126); // explicit position missing its az/el bytes
+        assert!(parse_chnl(&body, 2).is_err());
+        // srat too short / bad version.
+        assert!(parse_srat(&[0u8; 4]).is_err());
+        assert!(parse_srat(&[1, 0, 0, 0, 0, 0, 0, 1]).is_err());
     }
 
     #[test]

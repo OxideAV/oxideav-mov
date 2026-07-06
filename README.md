@@ -93,7 +93,14 @@ Decoding stays in codec crates: this crate calls
   `bytes_per_frame`, `bytes_per_sample`) surface typed via
   [`SoundV1`]; `audio_version` + `audio_compression_id` are exposed,
   and `is_vbr()` decodes the variable-bit-rate "third variant"
-  (version 1, Compression ID `-2`, QTFF p. 102). The Apple `chan`
+  (version 1, Compression ID `-2`, QTFF p. 102). The ISO BMFF side
+  (§12.2.3/§12.2.4) is read too: an `AudioSampleEntryV1` in a
+  version-1 `stsd` (same 20-byte fixed body, no QTFF extension) sets
+  `iso_audio_entry_v1`, with the `srat` SamplingRateBox
+  (`effective_sample_rate()` override) and the `chnl` ChannelLayout
+  (defined ISO/IEC 23001-8 configuration + omitted-channels map, or
+  explicit per-channel speaker positions, plus object counts)
+  surfaced typed. The Apple `chan`
   channel layout is parsed; codec-private blobs (`wave` /
   `esds` / `frma`) stay opaque for the codec crates.
 - Timed-metadata sample entries (ISO/IEC 14496-12 §12.3.3): a `meta`-
