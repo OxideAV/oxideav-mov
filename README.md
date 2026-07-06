@@ -474,7 +474,9 @@ sweeps, random-byte fuzz, extended-size overflow).
 A `cargo-fuzz` harness under `fuzz/` (target `demux`) feeds arbitrary
 bytes through `MovDemuxer::open`, drains up to 256 packets, touches
 every file-scope and per-track accessor, exercises the edit-list
-mapper at boundary PTS values, and re-runs the seek path. Alias
+mapper at boundary PTS values, re-runs the seek path, then flips on
+the applied edit-list mode for a second drain + edited-seek pass
+(probing `edited_pts_to_media_pts` at boundary values). Alias
 resolution is excluded so a fuzz input can't reach the network or
 filesystem. A daily 30-minute run is scheduled.
 

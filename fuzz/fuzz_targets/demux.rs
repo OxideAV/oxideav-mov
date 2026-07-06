@@ -362,4 +362,34 @@ fuzz_target!(|data: &[u8]| {
     // machinery from a random offset. If the file had no streams
     // this returns Err; that's fine.
     let _ = dmx.seek_to(0, 0);
+
+    // Round-394 applied edit-list surface. Flip the demuxer onto the
+    // edited timeline and drain a second bounded packet run: the
+    // per-sample `edited_timing_for_sample` mapper now sits on the
+    // `next_packet` hot path and must survive attacker-controlled
+    // edit lists (zero timescales, dwells, rates near i32::MIN/MAX,
+    // segment windows that overflow the movie duration) for every
+    // emitted sample. The edited seek resolver
+    // (`edited_pts_to_media_pts`) is probed at both boundary values
+    // and an input-derived point before re-running `seek_to`, whose
+    // input is now an edited-timeline timestamp.
+    dmx.apply_edit_lists(true);
+    let _ = dmx.edit_lists_applied();
+    for ti in 0..ntracks {
+        let _ = dmx.edited_pts_to_media_pts(ti, 0);
+        let _ = dmx.edited_pts_to_media_pts(ti, i64::MIN);
+        let _ = dmx.edited_pts_to_media_pts(ti, i64::MAX);
+        if data.len() >= 16 {
+            let probe = i64::from_le_bytes([
+                data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
+            ]);
+            let _ = dmx.edited_pts_to_media_pts(ti, probe);
+        }
+    }
+    let _ = dmx.seek_to(0, 0);
+    for _ in 0..MAX_PACKETS_PER_INPUT {
+        if dmx.next_packet().is_err() {
+            break;
+        }
+    }
 });
