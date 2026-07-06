@@ -174,6 +174,47 @@ impl ChannelLayout {
     pub const CHANNEL_STRUCTURED: u8 = 1;
     /// §12.2.4.2 `objectStructured` flag.
     pub const OBJECT_STRUCTURED: u8 = 2;
+
+    /// Serialise this layout as a `chnl` box body (FullBox header
+    /// included) — the exact inverse of [`parse_chnl`]. The
+    /// `stream_structure` flags are derived from which halves are
+    /// populated (so a hand-set `stream_structure` inconsistent with
+    /// the payload cannot produce an unparseable box).
+    pub fn to_body_bytes(&self) -> Vec<u8> {
+        let mut p = vec![0u8; 4]; // FullBox version 0 + flags 0
+        let mut structure = 0u8;
+        if self.channels.is_some() {
+            structure |= Self::CHANNEL_STRUCTURED;
+        }
+        if self.object_count.is_some() {
+            structure |= Self::OBJECT_STRUCTURED;
+        }
+        p.push(structure);
+        match &self.channels {
+            Some(ChannelStructure::Defined {
+                defined_layout,
+                omitted_channels_map,
+            }) => {
+                p.push(*defined_layout);
+                p.extend_from_slice(&omitted_channels_map.to_be_bytes());
+            }
+            Some(ChannelStructure::Explicit(rows)) => {
+                p.push(0); // definedLayout == 0 → explicit positions
+                for row in rows {
+                    p.push(row.speaker_position);
+                    if row.speaker_position == 126 {
+                        p.extend_from_slice(&row.azimuth.unwrap_or(0).to_be_bytes());
+                        p.push(row.elevation.unwrap_or(0) as u8);
+                    }
+                }
+            }
+            None => {}
+        }
+        if let Some(n) = self.object_count {
+            p.push(n);
+        }
+        p
+    }
 }
 
 /// The channel-structured half of a [`ChannelLayout`] (§12.2.4.2).

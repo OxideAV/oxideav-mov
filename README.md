@@ -428,6 +428,16 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   (`TrackGroupTypeEntry::msrc(id)` for the base-spec source group).
   `to_body_bytes` / `to_framed_atom` invert `parse_track_group_type` /
   `parse_trgr`; round-trips onto `Track::track_groups`.
+- `set_sound_description_v1(track_id, SoundV1, vbr)` writes a QTFF
+  `SoundDescriptionV1` (p. 101) audio entry — version 1 with the four
+  fixed-compression-ratio longs, `vbr` selecting the p. 102 VBR "third
+  variant" (Compression ID `-2`). `set_audio_entry_v1(track_id,
+  AudioEntryV1)` instead writes an ISO BMFF `AudioSampleEntryV1`
+  (§12.2.3.2): `entry_version` 1, the `stsd` auto-promoted to FullBox
+  version 1, plus optional `srat` / `chnl` boxes
+  (`ChannelLayout::to_body_bytes` inverting `parse_chnl`). Mutually
+  exclusive, audio-only, explicit channel layouts validated against
+  the channel count; both honoured on the fragmented path.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.

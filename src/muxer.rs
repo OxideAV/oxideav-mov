@@ -68,6 +68,7 @@ use crate::metadata_sample::{MetadataSampleEntry, SimpleTextSampleEntry, Subtitl
 use crate::sample_table::{SdtpEntry, StshEntry, SubSampleInfo};
 use crate::text_sample::TextSampleDescription;
 use crate::timecode::Tmcd;
+use crate::track::{ChannelLayout, ChannelStructure, SoundV1};
 use crate::track_group::TrackGroupTypeEntry;
 use crate::track_load::Load;
 use crate::track_selection::TrackSelection;
@@ -378,6 +379,45 @@ impl MuxEdit {
             media_rate: 0x0001_0000,
         }
     }
+}
+
+/// Write-side configuration for an ISO BMFF `AudioSampleEntryV1`
+/// (ISO/IEC 14496-12:2015 §12.2.3.2), set via
+/// [`MovMuxer::set_audio_entry_v1`]. The fixed 20-byte body keeps the
+/// version-0 shape (`entry_version` = 1 in its first two bytes); the
+/// optional boxes below follow the codec-config `extra_stsd_atoms` in
+/// the entry's trailing box area.
+#[derive(Clone, Debug, Default)]
+pub struct AudioEntryV1 {
+    /// Emit a `srat` SamplingRateBox carrying the *actual* sampling
+    /// rate (use when it exceeds what the 16.16 `samplerate` field
+    /// can represent — the field then keeps a suitable integer
+    /// multiple/division per §12.2.3.3, here the `MuxTrackKind::Audio`
+    /// `sample_rate`). `None` ⇒ no `srat`.
+    pub sampling_rate: Option<u32>,
+    /// Emit a `chnl` ChannelLayout box (§12.2.4) documenting the
+    /// channel/object assignment. An
+    /// [`ChannelStructure::Explicit`](crate::ChannelStructure) layout
+    /// must carry exactly one row per `MuxTrackKind::Audio` channel
+    /// (the read-side loop count comes from the sample entry).
+    /// `None` ⇒ no `chnl`.
+    pub channel_layout: Option<ChannelLayout>,
+}
+
+/// Which audio sample-description layout a track's `stsd` entry uses.
+#[derive(Clone, Debug, Default)]
+enum AudioDescriptionWrite {
+    /// QTFF p. 100 version-0 (20-byte fixed body). The default.
+    #[default]
+    V0,
+    /// QTFF p. 101 `SoundDescriptionV1`: version 1 plus the four
+    /// 32-bit fixed-compression-ratio fields; `vbr` selects the
+    /// p. 102 "third variant" (Compression ID `-2`).
+    QtffV1 { fields: SoundV1, vbr: bool },
+    /// ISO/IEC 14496-12:2015 §12.2.3 `AudioSampleEntryV1`
+    /// (`entry_version` = 1 inside a version-1 `stsd`, optional
+    /// `srat` / `chnl` boxes).
+    IsoV1(AudioEntryV1),
 }
 
 /// One write-side user-data metadata item, emitted into a `udta`
@@ -980,6 +1020,12 @@ struct TrackWrite {
     /// to the same group. Empty ⇒ no `trgr`. ISO BMFF-only. Set via
     /// [`MovMuxer::set_track_groups`].
     track_groups: Vec<TrackGroupTypeEntry>,
+    /// Which audio sample-description layout `build_stsd` writes for a
+    /// [`MuxTrackKind::Audio`] track. Defaults to the 20-byte QTFF
+    /// version-0 body; see [`MovMuxer::set_sound_description_v1`]
+    /// (QTFF p. 101 / p. 102) and [`MovMuxer::set_audio_entry_v1`]
+    /// (ISO/IEC 14496-12:2015 §12.2.3). Ignored on non-audio tracks.
+    audio_description: AudioDescriptionWrite,
 }
 
 /// The packed `mdhd.language` value for `"und"` (undetermined) — the
@@ -1268,6 +1314,7 @@ impl MovMuxer {
             track_kinds: Vec::new(),
             track_selection: None,
             track_groups: Vec::new(),
+            audio_description: AudioDescriptionWrite::V0,
         });
         self.tracks.len() as u32
     }
@@ -1562,6 +1609,109 @@ impl MovMuxer {
     /// init-segment `moov`; a follow-up can emit the init-`trak` `edts`.
     ///
     /// [`encode_fragmented_to_vec`]: MovMuxer::encode_fragmented_to_vec
+    /// Write this audio track's `stsd` entry as a QTFF
+    /// **`SoundDescriptionV1`** (QTFF p. 101): version 1 with the four
+    /// 32-bit fixed-compression-ratio fields appended after the
+    /// 20-byte version-0 body. `vbr` selects the p. 102 VBR "third
+    /// variant" — Compression ID `-2`, each sample a *compressed
+    /// frame* (then only `samples_per_packet` / `bytes_per_sample`
+    /// are meaningful; pass the other two as `0`).
+    ///
+    /// Errors on an unknown `track_id`, a non-audio track, or a track
+    /// already configured as an ISO `AudioSampleEntryV1` (the two
+    /// layouts are mutually exclusive). Round-trips onto
+    /// [`crate::SampleDescription`]'s `audio_version` / `sound_v1` /
+    /// `audio_compression_id` / `is_vbr()`.
+    pub fn set_sound_description_v1(
+        &mut self,
+        track_id: u32,
+        fields: SoundV1,
+        vbr: bool,
+    ) -> Result<()> {
+        let t = self.audio_track_mut(track_id)?;
+        if matches!(t.audio_description, AudioDescriptionWrite::IsoV1(_)) {
+            return Err(Error::invalid(
+                "MOV: track already uses an ISO AudioSampleEntryV1; QTFF v1 is exclusive",
+            ));
+        }
+        t.audio_description = AudioDescriptionWrite::QtffV1 { fields, vbr };
+        Ok(())
+    }
+
+    /// Write this audio track's `stsd` entry as an ISO BMFF
+    /// **`AudioSampleEntryV1`** (ISO/IEC 14496-12:2015 §12.2.3.2):
+    /// `entry_version` = 1 (same 20-byte fixed body as version 0),
+    /// the enclosing `stsd` taking FullBox version 1 as §8.5.2
+    /// requires, and optional `srat` SamplingRateBox / `chnl`
+    /// ChannelLayout boxes emitted after the codec-config
+    /// `extra_stsd_atoms` in the entry's trailing box area.
+    ///
+    /// Errors on an unknown `track_id`, a non-audio track, a track
+    /// already configured as a QTFF `SoundDescriptionV1`, an
+    /// [`ChannelStructure::Explicit`] layout whose row count differs
+    /// from the track's channel count (§12.2.4.2 sizes the read loop
+    /// from the sample entry's `channelcount`), or a
+    /// [`ChannelStructure::Defined`] layout with `defined_layout ==
+    /// 0` (that value on-wire selects the explicit-position form).
+    /// Round-trips onto [`crate::SampleDescription`]'s
+    /// `iso_audio_entry_v1` / `sampling_rate` / `chnl`.
+    pub fn set_audio_entry_v1(&mut self, track_id: u32, entry: AudioEntryV1) -> Result<()> {
+        let channels = {
+            let t = self.audio_track_mut(track_id)?;
+            if matches!(t.audio_description, AudioDescriptionWrite::QtffV1 { .. }) {
+                return Err(Error::invalid(
+                    "MOV: track already uses a QTFF SoundDescriptionV1; ISO v1 is exclusive",
+                ));
+            }
+            match t.kind {
+                MuxTrackKind::Audio { channels, .. } => channels,
+                _ => unreachable!("audio_track_mut gated"),
+            }
+        };
+        match &entry.channel_layout {
+            Some(ChannelLayout {
+                channels: Some(ChannelStructure::Explicit(rows)),
+                ..
+            }) if rows.len() != channels as usize => {
+                return Err(Error::invalid(format!(
+                    "MOV: chnl explicit layout has {} rows for {} channels",
+                    rows.len(),
+                    channels
+                )));
+            }
+            Some(ChannelLayout {
+                channels:
+                    Some(ChannelStructure::Defined {
+                        defined_layout: 0, ..
+                    }),
+                ..
+            }) => {
+                return Err(Error::invalid(
+                    "MOV: chnl definedLayout 0 selects the explicit form; use Explicit",
+                ));
+            }
+            _ => {}
+        }
+        let t = self.audio_track_mut(track_id)?;
+        t.audio_description = AudioDescriptionWrite::IsoV1(entry);
+        Ok(())
+    }
+
+    /// Shared lookup for the audio-description setters.
+    fn audio_track_mut(&mut self, track_id: u32) -> Result<&mut TrackWrite> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|i| *i < self.tracks.len())
+            .ok_or_else(|| Error::invalid(format!("MOV: unknown track id {track_id}")))?;
+        let t = &mut self.tracks[idx];
+        if !matches!(t.kind, MuxTrackKind::Audio { .. }) {
+            return Err(Error::invalid(format!(
+                "MOV: track {track_id} is not an audio track",
+            )));
+        }
+        Ok(t)
+    }
+
     pub fn set_edit_list(&mut self, track_id: u32, edits: &[MuxEdit]) -> Result<()> {
         let idx = (track_id as usize)
             .checked_sub(1)
@@ -3856,18 +4006,61 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
             bits_per_sample,
             sample_rate,
         } => {
-            let mut e = Vec::with_capacity(16 + 20 + t.extra_stsd_atoms.len());
-            let mut body = vec![0u8; 20];
-            // version=0, revision=0, vendor=0 left zero.
+            // Fixed body: 20 bytes for version 0 and for the ISO
+            // AudioSampleEntryV1 (ISO/IEC 14496-12:2015 §12.2.3.2 —
+            // entry_version 1 keeps the version-0 shape); 36 bytes for
+            // the QTFF SoundDescriptionV1 (p. 101 — four fixed-ratio
+            // longs appended).
+            let body_len = match &t.audio_description {
+                AudioDescriptionWrite::QtffV1 { .. } => 36,
+                _ => 20,
+            };
+            let mut e = Vec::with_capacity(16 + body_len + t.extra_stsd_atoms.len());
+            let mut body = vec![0u8; body_len];
+            match &t.audio_description {
+                AudioDescriptionWrite::V0 => {
+                    // version=0, revision=0, vendor=0 left zero.
+                }
+                AudioDescriptionWrite::QtffV1 { fields, vbr } => {
+                    // version @ 0..2 = 1 (QTFF p. 101).
+                    body[0..2].copy_from_slice(&1u16.to_be_bytes());
+                    // Compression ID @ 12..14: -2 flags the VBR third
+                    // variant (QTFF p. 102), else 0.
+                    if *vbr {
+                        body[12..14].copy_from_slice(&(-2i16).to_be_bytes());
+                    }
+                    body[20..24].copy_from_slice(&fields.samples_per_packet.to_be_bytes());
+                    body[24..28].copy_from_slice(&fields.bytes_per_packet.to_be_bytes());
+                    body[28..32].copy_from_slice(&fields.bytes_per_frame.to_be_bytes());
+                    body[32..36].copy_from_slice(&fields.bytes_per_sample.to_be_bytes());
+                }
+                AudioDescriptionWrite::IsoV1(_) => {
+                    // entry_version @ 0..2 = 1 (§12.2.3.2); the next
+                    // six bytes are reserved zero.
+                    body[0..2].copy_from_slice(&1u16.to_be_bytes());
+                }
+            }
             body[8..10].copy_from_slice(&channels.to_be_bytes());
             body[10..12].copy_from_slice(&bits_per_sample.to_be_bytes());
-            // compression_id @ 12..14 = 0; packet_size @ 14..16 = 0.
+            // packet_size @ 14..16 = 0.
             // sample_rate @ 16..20 — 16.16 fixed; QTFF caps the integer
             // portion at u16, so cap the rate to 65535 Hz when needed.
             let sr = (*sample_rate).min(0xFFFF);
             body[16..20].copy_from_slice(&(sr << 16).to_be_bytes());
             e.extend_from_slice(&body);
             e.extend_from_slice(&t.extra_stsd_atoms);
+            if let AudioDescriptionWrite::IsoV1(v1) = &t.audio_description {
+                // §12.2.3.2 optional trailing boxes, after the codec
+                // config so a decoder-specific box stays first.
+                if let Some(rate) = v1.sampling_rate {
+                    let mut srat = vec![0u8; 4]; // FullBox v0+flags
+                    srat.extend_from_slice(&rate.to_be_bytes());
+                    push_atom(&mut e, *b"srat", &srat);
+                }
+                if let Some(chnl) = &v1.channel_layout {
+                    push_atom(&mut e, *b"chnl", &chnl.to_body_bytes());
+                }
+            }
             wrap_stsd_entry(format, &e, dri)
         }
         MuxTrackKind::Timecode { description, .. } => {
@@ -3923,7 +4116,14 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
         }
     };
     let mut stsd = Vec::with_capacity(8 + entry_body.len());
-    stsd.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+    // §8.5.2: the stsd FullBox takes version 1 when it contains an
+    // ISO AudioSampleEntryV1 ("version is set to zero unless the box
+    // contains an AudioSampleEntryV1, whereupon version must be 1").
+    let stsd_version: u32 = match &t.audio_description {
+        AudioDescriptionWrite::IsoV1(_) => 1 << 24,
+        _ => 0,
+    };
+    stsd.extend_from_slice(&stsd_version.to_be_bytes()); // ver+flags
     stsd.extend_from_slice(&1u32.to_be_bytes()); // entry_count
     stsd.extend_from_slice(&entry_body);
     stsd
@@ -4888,6 +5088,7 @@ mod tests {
             track_kinds: Vec::new(),
             track_selection: None,
             track_groups: Vec::new(),
+            audio_description: AudioDescriptionWrite::V0,
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -4949,6 +5150,7 @@ mod tests {
             track_kinds: Vec::new(),
             track_selection: None,
             track_groups: Vec::new(),
+            audio_description: AudioDescriptionWrite::V0,
         }
     }
 
@@ -5409,6 +5611,7 @@ mod tests {
             track_kinds: Vec::new(),
             track_selection: None,
             track_groups: Vec::new(),
+            audio_description: AudioDescriptionWrite::V0,
         };
         assert!(build_stss(&t).is_none());
     }
@@ -5451,6 +5654,7 @@ mod tests {
             track_kinds: Vec::new(),
             track_selection: None,
             track_groups: Vec::new(),
+            audio_description: AudioDescriptionWrite::V0,
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -5521,6 +5725,7 @@ mod tests {
             track_kinds: Vec::new(),
             track_selection: None,
             track_groups: Vec::new(),
+            audio_description: AudioDescriptionWrite::V0,
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -5582,6 +5787,7 @@ mod tests {
             track_kinds: Vec::new(),
             track_selection: None,
             track_groups: Vec::new(),
+            audio_description: AudioDescriptionWrite::V0,
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows
