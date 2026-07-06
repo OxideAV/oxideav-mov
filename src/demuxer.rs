@@ -1533,16 +1533,91 @@ impl MovDemuxer {
 
     /// Read the next sample's bytes from the input. Returns
     /// `(stream_index, sample, data)`.
+    ///
+    /// A sample whose data reference points at **external** media
+    /// (its sample description's `data_reference_index` resolves to a
+    /// non-self-referencing `dref` entry — QTFF p. 65 / ISO/IEC
+    /// 14496-12 §8.7.2.1: the self-reference flag `0x000001` "means
+    /// the media data is in the same file") returns an `Unsupported`
+    /// error *after* advancing the cursor: the bytes at
+    /// `sample.offset` in *this* file would be some other track's
+    /// data, so emitting them would be silent corruption. The error
+    /// is per-sample and recoverable — call again to continue with
+    /// the next sample. See [`MovDemuxer::sample_data_in_file`] /
+    /// [`MovDemuxer::track_has_external_data`].
     pub fn read_next(&mut self) -> Result<(u32, SampleEntry, Vec<u8>)> {
         if self.next >= self.samples.len() {
             return Err(Error::Eof);
         }
         let (stream_idx, sample) = self.samples[self.next];
         self.next += 1;
+        if !self.sample_data_in_file(stream_idx as usize, &sample) {
+            return Err(unsupported_error(format!(
+                "MOV: sample {} of track {} references external media \
+                 (non-self dref entry {}); resolve the data reference externally",
+                sample.index,
+                stream_idx,
+                self.tracks[stream_idx as usize]
+                    .sample_descriptions
+                    .get(sample.sample_description_id.saturating_sub(1) as usize)
+                    .map(|sd| sd.data_reference_index)
+                    .unwrap_or(0),
+            )));
+        }
         self.input.seek(SeekFrom::Start(sample.offset))?;
         let mut buf = vec![0u8; sample.size as usize];
         self.input.read_exact(&mut buf)?;
         Ok((stream_idx, sample, buf))
+    }
+
+    /// Whether a sample's media bytes live in **this** file: its
+    /// sample description's 1-based `data_reference_index` resolves
+    /// to a self-referencing `dref` entry (QTFF p. 65 / ISO/IEC
+    /// 14496-12 §8.7.2.1 flag `0x000001`). Tracks without a parsed
+    /// `dref` table, an out-of-spec zero index, or a dangling index
+    /// are treated as in-file (the lenient historical behaviour —
+    /// every writer that omits the table stores its data locally).
+    pub fn sample_data_in_file(&self, track_index: usize, sample: &SampleEntry) -> bool {
+        let Some(track) = self.tracks.get(track_index) else {
+            return true;
+        };
+        if track.data_references.is_empty() {
+            return true;
+        }
+        let Some(sd) = track
+            .sample_descriptions
+            .get(sample.sample_description_id.saturating_sub(1) as usize)
+        else {
+            return true;
+        };
+        let Some(dri) = sd.data_reference_index.checked_sub(1) else {
+            return true; // index 0 is out of spec; assume local
+        };
+        match track.data_references.get(dri as usize) {
+            Some(crate::DataReference::SelfRef) => true,
+            Some(_) => false,
+            None => true, // dangling index; assume local
+        }
+    }
+
+    /// Whether **any** of a track's sample descriptions reference
+    /// external media (a non-self `dref` entry). Such a track's
+    /// samples (or the subset using those descriptions) yield
+    /// recoverable `Unsupported` errors from `next_packet()` /
+    /// `read_next()` instead of bytes read from this file's `mdat`.
+    pub fn track_has_external_data(&self, track_index: usize) -> bool {
+        let Some(track) = self.tracks.get(track_index) else {
+            return false;
+        };
+        if track.data_references.is_empty() {
+            return false;
+        }
+        track.sample_descriptions.iter().any(|sd| {
+            sd.data_reference_index
+                .checked_sub(1)
+                .and_then(|i| track.data_references.get(i as usize))
+                .is_some_and(|r| !matches!(r, crate::DataReference::SelfRef))
+        })
     }
 
     /// Whether more samples are available.

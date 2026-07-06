@@ -107,8 +107,10 @@ pub fn build_stsd_video(format: &[u8; 4], w: u16, h: u16, extras: &[u8]) -> Vec<
     p.extend_from_slice(&[0u8; 6]); // reserved
     p.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index
     let mut vbody = vec![0u8; 70];
-    vbody[24..26].copy_from_slice(&w.to_be_bytes());
-    vbody[26..28].copy_from_slice(&h.to_be_bytes());
+    // Width/height at bytes 16..20 per the QTFF p. 92 field order
+    // (they directly follow the two quality dwords).
+    vbody[16..18].copy_from_slice(&w.to_be_bytes());
+    vbody[18..20].copy_from_slice(&h.to_be_bytes());
     p.extend_from_slice(&vbody);
     p.extend_from_slice(extras);
     p

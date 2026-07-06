@@ -146,6 +146,12 @@ Decoding stays in codec crates: this crate calls
 - Reference movies (`rmra/rmda/rmdr/rmcs`): parsed; alias resolution
   is opt-in (`open_with_aliases`) so the default `open` path can't
   reach the network / filesystem.
+- External data references (`dinf/dref`, §8.7.2): a sample whose
+  description points at a non-self `dref` entry yields a recoverable
+  `Unsupported` error instead of silently emitting local bytes;
+  local tracks in the same movie keep demuxing.
+  `sample_data_in_file` / `track_has_external_data` expose the
+  resolution.
 
 ## Seek
 
