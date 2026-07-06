@@ -2601,6 +2601,128 @@ impl MovDemuxer {
     /// "next packet's dts will equal this" contract.
     #[cfg(feature = "registry")]
     pub(crate) fn seek_to_impl(&mut self, stream_index: u32, pts: i64) -> Result<i64> {
+        if !self.apply_edits {
+            return self.seek_media_impl(stream_index, pts);
+        }
+        // Applied edit-list mode: `pts` is an **edited-timeline**
+        // timestamp (what `next_packet()` emits in this mode), so
+        // resolve it back to a media timestamp through the edit list
+        // (QTFF pp. 46–48 / ISO/IEC 14496-12 §8.6.6) before driving
+        // the media-time seek machinery. Edited timestamps with no
+        // media correspondence (inside an empty-edit window, before
+        // the first presented segment, or past the last) clamp to the
+        // nearest presented media tick.
+        let media_target = self.edited_pts_to_media_pts(stream_index as usize, pts);
+        let raw_dts = self.seek_media_impl(stream_index, media_target)?;
+        // Honour the "next packet's dts will equal this" contract on
+        // the edited timeline: the landed sync sample (or samples
+        // right after it) may itself be dropped by the edit list, so
+        // report the edited dts of the first post-seek sample of this
+        // stream that the applied mode will actually emit.
+        for (sidx, s) in &self.samples[self.next..] {
+            if *sidx != stream_index {
+                continue;
+            }
+            if let Some(t) = self.edited_timing_for(stream_index as usize, s) {
+                return Ok(t.dts);
+            }
+        }
+        // Every remaining sample is dropped by the edit list; the
+        // next read returns Eof, so the raw landing is as good a
+        // report as any.
+        Ok(raw_dts)
+    }
+
+    /// Resolve an **edited-timeline** timestamp (media-timescale
+    /// ticks, the applied-mode packet contract) to the media
+    /// timestamp that presents at that instant. Out-of-presentation
+    /// inputs clamp to the nearest presented media tick: an edited
+    /// time inside an empty-edit window (or before the first
+    /// presented segment) resolves to the *next* presented segment's
+    /// media start, and a past-the-end time resolves to the last
+    /// presented segment's final media tick. Returns `pts.max(0)`
+    /// unchanged when the track has no resolvable timeline (missing
+    /// `mvhd` or zero timescales).
+    pub fn edited_pts_to_media_pts(&self, track_index: usize, pts: i64) -> i64 {
+        let fallback = pts.max(0);
+        let Some(track) = self.tracks.get(track_index) else {
+            return fallback;
+        };
+        let Some(mvhd) = self.mvhd.as_ref() else {
+            return fallback;
+        };
+        let mds = track.mdhd.time_scale;
+        let mvs = mvhd.time_scale;
+        if mds == 0 || mvs == 0 {
+            return fallback;
+        }
+        // Edited media ticks → movie ticks (half-up), the inverse of
+        // the applied mode's movie→media rescale.
+        let movie_pts = ((fallback as i128 * mvs as i128 + mds as i128 / 2) / mds as i128) as i64;
+        let owned;
+        let segments: &[crate::EditSegment] = match self.edited_segments.get(track_index) {
+            Some(segs) if self.edited_segments.len() == self.tracks.len() => segs,
+            _ => {
+                owned = track.edit_segments(mvs, Some(mvhd.duration));
+                &owned
+            }
+        };
+        if let Some(m) = crate::edit::movie_pts_to_media_pts(segments, movie_pts, mvs, mds) {
+            return m;
+        }
+        // No direct correspondence — clamp. First presented segment
+        // whose window ends after the requested movie tick wins (the
+        // player would next show its head); otherwise fall back to
+        // the end of the last presented segment.
+        const RATE_ONE: i128 = 0x0001_0000;
+        let media_span = |seg: &crate::EditSegment, rate_fp: i128| -> i128 {
+            let dur_movie = seg.movie_time_end as i128 - seg.movie_time_start as i128;
+            let num = dur_movie * mds as i128 * rate_fp;
+            let denom = mvs as i128 * RATE_ONE;
+            (num + denom / 2) / denom
+        };
+        for seg in segments {
+            if (seg.movie_time_end as i128) <= movie_pts as i128 {
+                continue;
+            }
+            match seg.kind {
+                crate::EditSegmentKind::Empty => continue,
+                crate::EditSegmentKind::Dwell { media_time } => return media_time as i64,
+                crate::EditSegmentKind::Media {
+                    media_time_start,
+                    media_rate,
+                } => {
+                    if media_rate <= 0 {
+                        continue;
+                    }
+                    return media_time_start as i64;
+                }
+            }
+        }
+        for seg in segments.iter().rev() {
+            match seg.kind {
+                crate::EditSegmentKind::Empty => continue,
+                crate::EditSegmentKind::Dwell { media_time } => return media_time as i64,
+                crate::EditSegmentKind::Media {
+                    media_time_start,
+                    media_rate,
+                } => {
+                    if media_rate <= 0 {
+                        continue;
+                    }
+                    let span = media_span(seg, media_rate as i128).max(1);
+                    return (media_time_start as i128 + span - 1) as i64;
+                }
+            }
+        }
+        fallback
+    }
+
+    /// Media-timeline seek core (the historical `seek_to` semantics;
+    /// see [`MovDemuxer::seek_to_impl`] for the applied edit-list
+    /// wrapper).
+    #[cfg(feature = "registry")]
+    fn seek_media_impl(&mut self, stream_index: u32, pts: i64) -> Result<i64> {
         // 1. Range + media-type gate.
         let idx = stream_index as usize;
         let track = self.tracks.get(idx).ok_or_else(|| {

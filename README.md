@@ -145,7 +145,11 @@ Decoding stays in codec crates: this crate calls
 `MovDemuxer::seek_to(stream, pts)` walks the per-track sample queue,
 snaps to the largest sync (`stss`) sample at-or-before the target DTS,
 and resets the cursor so the next `next_packet()` re-emits from there.
-Fragmented files use `tfra` when present.
+Fragmented files use `tfra` when present. With `apply_edit_lists(true)`
+the input is an edited-timeline timestamp (resolved back to media time
+via the edit list, clamping out-of-presentation targets) and the return
+value is the edited dts of the first packet the mode will emit —
+`edited_pts_to_media_pts` exposes the resolver.
 
 ## Muxer
 
