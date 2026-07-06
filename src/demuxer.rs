@@ -207,6 +207,17 @@ pub struct MovDemuxer {
     samples: Vec<(u32, SampleEntry)>,
     /// Cursor into `samples` for the next packet to emit.
     next: usize,
+    /// When `true`, `next_packet()` applies each track's edit list to
+    /// packet timing (QTFF pp. 46–48 / ISO/IEC 14496-12 §8.6.6):
+    /// samples outside every edit are dropped and emitted timestamps
+    /// live on the edited (presentation) timeline. Opt in via
+    /// [`MovDemuxer::apply_edit_lists`]; the default (`false`)
+    /// preserves the historical media-timeline packet contract.
+    apply_edits: bool,
+    /// Per-track resolved edit segments, cached when
+    /// [`MovDemuxer::apply_edit_lists`] enables the edited timeline
+    /// (parallel to `tracks`; empty while the mode is off).
+    edited_segments: Vec<Vec<crate::EditSegment>>,
     /// Per-track `trex` defaults from `moov/mvex` (ISO/IEC 14496-12
     /// §8.8.3). Empty for non-fragmented streams. Round 18 surfaces
     /// the parsed records so callers can inspect the per-track
@@ -990,6 +1001,8 @@ impl MovDemuxer {
             file_uuids,
             samples,
             next: 0,
+            apply_edits: false,
+            edited_segments: Vec::new(),
             trex_defaults,
             mehd: mehd_box,
             leva: leva_box,
@@ -1596,6 +1609,95 @@ impl MovDemuxer {
         let track = self.tracks.get(track_index)?;
         let mvhd = self.mvhd.as_ref()?;
         Some(track.edit_segments(mvhd.time_scale, Some(mvhd.duration)))
+    }
+
+    /// Opt in (or back out) of **applied** edit-list packet timing.
+    ///
+    /// The default (`false`) keeps the historical contract: packets
+    /// carry raw media-timeline timestamps and every sample in the
+    /// sample tables is emitted, with the edit list merely *parsed*
+    /// and exposed through [`MovDemuxer::movie_pts_for`] /
+    /// [`MovDemuxer::media_pts_for`] / [`MovDemuxer::edit_segments_for`].
+    ///
+    /// With the mode enabled, `next_packet()` instead *applies* each
+    /// track's edit list (QTFF Chapter 2 "Edit Atoms" pp. 46–48 /
+    /// ISO/IEC 14496-12 §8.6.6) to the packets it emits:
+    ///
+    /// * A sample whose presentation timestamp falls outside every
+    ///   edit segment is **dropped** — it is not part of the edited
+    ///   presentation (e.g. encoder-priming samples skipped by a
+    ///   head edit, or media trimmed off by a shortened segment).
+    /// * Emitted `pts` / `dts` / `duration` live on the **edited
+    ///   timeline**, still expressed in the stream's media timescale
+    ///   (`Packet.time_base` is unchanged): a head empty edit delays
+    ///   every timestamp, a trim edit shifts them toward zero, a
+    ///   non-unity `media_rate` segment scales spacing and durations,
+    ///   and a dwell edit stretches its held sample across the
+    ///   segment window. See [`crate::edit::edited_timing_for_sample`]
+    ///   for the exact per-segment rules.
+    /// * Tracks without an edit list follow the "no edits" rule
+    ///   (QTFF p. 47): the whole media plays from movie time 0, so
+    ///   their packets are unchanged.
+    ///
+    /// Dropping is keyed on the sample's *presentation* time alone;
+    /// a consumer that needs undisplayed decode dependencies (an
+    /// edit starting on a non-sync frame) should keep the default
+    /// mode and apply [`MovDemuxer::movie_pts_for`] itself. Files
+    /// without a movie header (`mvhd`) have no movie timeline, so
+    /// enabling the mode on one is a no-op.
+    pub fn apply_edit_lists(&mut self, enable: bool) {
+        let Some(mvhd) = self.mvhd.as_ref() else {
+            self.apply_edits = false;
+            return;
+        };
+        if enable && self.edited_segments.len() != self.tracks.len() {
+            self.edited_segments = self
+                .tracks
+                .iter()
+                .map(|t| t.edit_segments(mvhd.time_scale, Some(mvhd.duration)))
+                .collect();
+        }
+        self.apply_edits = enable;
+    }
+
+    /// `true` when [`MovDemuxer::apply_edit_lists`] enabled the
+    /// edited-timeline packet contract on this demuxer.
+    pub fn edit_lists_applied(&self) -> bool {
+        self.apply_edits
+    }
+
+    /// Project one sample of `track_index` onto the edited
+    /// (presentation) timeline — the per-sample mapping used by the
+    /// applied edit-list mode. Returns `None` when the sample is not
+    /// presented by any edit segment (the applied mode drops it),
+    /// when the track index is out of range, or when the file has no
+    /// movie header. Usable regardless of whether the mode is
+    /// enabled; see [`crate::edit::edited_timing_for_sample`].
+    pub fn edited_timing_for(
+        &self,
+        track_index: usize,
+        sample: &SampleEntry,
+    ) -> Option<crate::edit::EditedTiming> {
+        let track = self.tracks.get(track_index)?;
+        let mvhd = self.mvhd.as_ref()?;
+        // Use the cache when the mode has built it; otherwise resolve
+        // on the fly so the helper works stand-alone.
+        let owned;
+        let segments: &[crate::EditSegment] = match self.edited_segments.get(track_index) {
+            Some(segs) if self.edited_segments.len() == self.tracks.len() => segs,
+            _ => {
+                owned = track.edit_segments(mvhd.time_scale, Some(mvhd.duration));
+                &owned
+            }
+        };
+        crate::edit::edited_timing_for_sample(
+            segments,
+            sample.pts(),
+            sample.dts as i64,
+            sample.duration as i64,
+            mvhd.time_scale,
+            track.mdhd.time_scale,
+        )
     }
 
     /// Iterator over `(track_index, &Track)` for tracks that should
@@ -3913,16 +4015,34 @@ impl Demuxer for MovDemuxer {
     }
 
     fn next_packet(&mut self) -> Result<Packet> {
-        let (stream_idx, sample, data) = self.read_next()?;
-        let stream = &self.streams[stream_idx as usize];
-        let mut pkt = Packet::new(stream_idx, stream.time_base, data)
-            .with_dts(sample.dts as i64)
-            .with_pts(sample.pts())
-            .with_keyframe(sample.keyframe);
-        if sample.duration > 0 {
-            pkt = pkt.with_duration(sample.duration as i64);
+        loop {
+            let (stream_idx, sample, data) = self.read_next()?;
+            let stream = &self.streams[stream_idx as usize];
+            if self.apply_edits {
+                // Applied edit-list mode (QTFF pp. 46–48 / ISO/IEC
+                // 14496-12 §8.6.6): timestamps live on the edited
+                // timeline; samples outside every edit are dropped.
+                let Some(t) = self.edited_timing_for(stream_idx as usize, &sample) else {
+                    continue;
+                };
+                let mut pkt = Packet::new(stream_idx, stream.time_base, data)
+                    .with_dts(t.dts)
+                    .with_pts(t.pts)
+                    .with_keyframe(sample.keyframe);
+                if t.duration > 0 {
+                    pkt = pkt.with_duration(t.duration);
+                }
+                return Ok(pkt);
+            }
+            let mut pkt = Packet::new(stream_idx, stream.time_base, data)
+                .with_dts(sample.dts as i64)
+                .with_pts(sample.pts())
+                .with_keyframe(sample.keyframe);
+            if sample.duration > 0 {
+                pkt = pkt.with_duration(sample.duration as i64);
+            }
+            return Ok(pkt);
         }
-        Ok(pkt)
     }
 
     fn duration_micros(&self) -> Option<i64> {

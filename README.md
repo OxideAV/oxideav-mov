@@ -42,8 +42,17 @@ Decoding stays in codec crates: this crate calls
   implementing QTFF "Finding a Sample" without iterating prior samples.
 - Edit lists (`edts/elst`): `movie_pts_for` / `media_pts_for` map
   between media- and movie-timescale PTS, handling empty / dwell /
-  composition-shift edits and non-unity `media_rate`. `next_packet`
-  keeps the media-time PTS contract.
+  composition-shift edits and non-unity `media_rate`. By default
+  `next_packet` keeps the media-time PTS contract; opt-in
+  `apply_edit_lists(true)` **applies** the edit list to packet timing
+  (QTFF pp. 46–48 / §8.6.6) — samples outside every edit are dropped,
+  timestamps move onto the edited presentation timeline (still in the
+  stream's media timescale), rate-N segments scale spacing and
+  durations, dwells stretch their held sample, and a mid-sample trim
+  clamps the final duration. Per-sample mapping surfaces via
+  `edited_timing_for` / `edit::edited_timing_for_sample`
+  (`EditedTiming { pts, dts, duration }`), validated against an
+  ffprobe black-box oracle.
 - Track relationships: typed `tref` accessors for every QTFF reference
   kind (`chap`, `tmcd`, `sync`, `scpt`, `hint`, `ssrc`) plus the ISO
   BMFF §8.3.3.3 reference types `cdsc` (content-describes), `font`,

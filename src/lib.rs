@@ -87,8 +87,8 @@ pub use derived::{
     TransformChain, TransformOp,
 };
 pub use edit::{
-    media_pts_to_movie_pts, movie_pts_to_media_pts, resolve_edit_segments, Edit, EditList,
-    EditSegment, EditSegmentKind,
+    edited_timing_for_sample, media_pts_to_movie_pts, movie_pts_to_media_pts,
+    resolve_edit_segments, Edit, EditList, EditSegment, EditSegmentKind, EditedTiming,
 };
 pub use fragment::{
     parse_mehd, parse_mfhd, parse_mfra, parse_mfro, parse_moof, parse_mvex, parse_tfdt, parse_tfhd,

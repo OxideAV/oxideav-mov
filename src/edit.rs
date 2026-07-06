@@ -505,6 +505,161 @@ pub fn movie_pts_to_media_pts(
     None
 }
 
+/// Per-sample timing after applying a track's edit list — the result
+/// of projecting one media sample onto the *edited* (presentation)
+/// timeline. All three fields are expressed in **media-timescale
+/// ticks** so they stay directly comparable with `Packet.time_base`
+/// (the demuxer keeps one time base per stream); the edited timeline's
+/// origin is the movie timeline's origin (movie time 0), rescaled from
+/// movie- to media-timescale ticks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EditedTiming {
+    /// Presentation timestamp on the edited timeline.
+    pub pts: i64,
+    /// Decode timestamp on the edited timeline: `pts` minus the
+    /// sample's composition offset scaled by the matching segment's
+    /// `media_rate` (a 2.0× segment compresses decode/composition
+    /// spacing by 2 on the presentation timeline, per the QTFF
+    /// Chapter 5 "Playing With Edit Lists" consumption model,
+    /// pp. 226–227).
+    pub dts: i64,
+    /// Sample duration on the edited timeline: scaled by the segment
+    /// rate and clamped so the sample never plays past its segment's
+    /// end (a trailing edit that cuts mid-sample shortens the last
+    /// sample's presentation duration).
+    pub duration: i64,
+}
+
+/// Project one media sample onto the edited (presentation) timeline
+/// defined by a track's resolved edit segments.
+///
+/// This is the per-sample core of the demuxer's *applied* edit-list
+/// mode (QTFF Chapter 2 "Edit Atoms" pp. 46–48 / ISO/IEC 14496-12
+/// §8.6.6 — the edit list maps the presentation timeline onto the
+/// media timeline). Where [`media_pts_to_movie_pts`] answers "what
+/// movie tick does this media tick play at", this helper answers the
+/// packet-level question: given a sample's media `pts` / `dts` /
+/// `duration`, what timing should the emitted packet carry so that a
+/// consumer sees the edited presentation directly?
+///
+/// Segment membership follows [`media_pts_to_movie_pts`] exactly (the
+/// sample's *presentation* timestamp selects the segment; declaration
+/// order wins on overlap). Returns `None` when `media_pts` falls
+/// outside every segment — the sample is not presented by any edit
+/// and the caller should drop it.
+///
+/// Timing rules per segment kind:
+/// * [`EditSegmentKind::Media`] — `pts` lands at the segment's
+///   movie-time start (rescaled movie→media ticks, half-up) plus the
+///   media delta divided by the segment rate (rate 2.0 halves
+///   presentation spacing; QTFF pp. 226–227). `dts` keeps the
+///   sample's composition offset, also divided by the rate.
+///   `duration` is the rate-scaled span, clamped at the segment's
+///   media end so a segment that trims mid-sample shortens the final
+///   sample.
+/// * [`EditSegmentKind::Dwell`] — the held sample (`media_pts ==
+///   media_time`) occupies the whole segment window: `pts` = window
+///   start, `duration` = window length, `dts` keeps the (rate-1)
+///   composition offset.
+/// * [`EditSegmentKind::Empty`] — never matches a sample; empty edits
+///   shift later segments' movie-time windows instead (that offset is
+///   already baked into [`resolve_edit_segments`]' bounds).
+///
+/// Movie→media rescaling is half-up (`(v × mds + mvs/2) / mvs`),
+/// matching the rounding convention used throughout this module
+/// (QTFF does not prescribe a direction). Note `dts` monotonicity is
+/// only guaranteed *within* one segment: a splice that re-orders or
+/// repeats media regions produces a timestamp jump at each segment
+/// boundary, exactly as the edited presentation demands.
+pub fn edited_timing_for_sample(
+    segments: &[EditSegment],
+    media_pts: i64,
+    media_dts: i64,
+    media_duration: i64,
+    movie_timescale: u32,
+    media_timescale: u32,
+) -> Option<EditedTiming> {
+    if media_timescale == 0 || movie_timescale == 0 {
+        return None;
+    }
+    let mvs = movie_timescale as i128;
+    let mds = media_timescale as i128;
+    const RATE_ONE: i128 = 0x0001_0000;
+    // Movie-timescale tick → edited-timeline media tick (half-up).
+    let movie_to_media = |v: i128| -> i128 { (v * mds + mvs / 2) / mvs };
+    let comp_offset = media_pts as i128 - media_dts as i128;
+    for seg in segments {
+        match seg.kind {
+            EditSegmentKind::Empty => continue,
+            EditSegmentKind::Dwell { media_time } => {
+                if media_pts as i128 != media_time as i128 {
+                    continue;
+                }
+                let start = movie_to_media(seg.movie_time_start as i128);
+                let end = movie_to_media(seg.movie_time_end as i128);
+                return Some(EditedTiming {
+                    pts: start as i64,
+                    dts: (start - comp_offset) as i64,
+                    duration: (end - start).max(0) as i64,
+                });
+            }
+            EditSegmentKind::Media {
+                media_time_start,
+                media_rate,
+            } => {
+                // QTFF p. 48: media_rate "cannot be 0 or negative".
+                if media_rate <= 0 {
+                    continue;
+                }
+                let rate_fp = media_rate as i128;
+                let seg_dur_movie = seg.movie_time_end as i128 - seg.movie_time_start as i128;
+                if seg_dur_movie < 0 {
+                    continue;
+                }
+                // Media ticks this segment consumes (see
+                // `media_pts_to_movie_pts` for the convention).
+                let num = seg_dur_movie * mds * rate_fp;
+                let denom = mvs * RATE_ONE;
+                let seg_dur_media = (num + denom / 2) / denom;
+                let media_start = media_time_start as i128;
+                let media_end = media_start + seg_dur_media;
+                let p = media_pts as i128;
+                // Zero-duration Media segments are the §8.6.6.1
+                // composition-shift idiom; they present nothing.
+                if seg_dur_media == 0 {
+                    continue;
+                }
+                if p < media_start || p >= media_end {
+                    continue;
+                }
+                // Rate-scale a media-tick delta onto the edited
+                // timeline (half-up): Δedited = Δmedia × 65536 / rate.
+                let scale = |d: i128| -> i128 {
+                    let n = d * RATE_ONE;
+                    if n >= 0 {
+                        (n + rate_fp / 2) / rate_fp
+                    } else {
+                        (n - rate_fp / 2) / rate_fp
+                    }
+                };
+                let seg_start_edited = movie_to_media(seg.movie_time_start as i128);
+                let pts = seg_start_edited + scale(p - media_start);
+                let dts = pts - scale(comp_offset);
+                // Clamp the sample's end at the segment's media end so
+                // a mid-sample trim shortens the emitted duration.
+                let end_media = (p + (media_duration.max(0) as i128)).min(media_end);
+                let duration = (scale(end_media - media_start) - scale(p - media_start)).max(0);
+                return Some(EditedTiming {
+                    pts: pts as i64,
+                    dts: dts as i64,
+                    duration: duration as i64,
+                });
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
