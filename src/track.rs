@@ -914,8 +914,8 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
             //   compressor_name:32 depth:2 color_table_id:2
             // → 70 bytes of fixed fields; extras (e.g. avcC/clap/colr)
             //   follow.
-            entry.width = u16::from_be_bytes([body[24], body[25]]);
-            entry.height = u16::from_be_bytes([body[26], body[27]]);
+            entry.width = u16::from_be_bytes([body[16], body[17]]);
+            entry.height = u16::from_be_bytes([body[18], body[19]]);
             entry.extra = body[70..].to_vec();
             scan_video_extensions(&mut entry)?;
         } else if hdlr.is_timecode() && &format == b"tmcd" && body.len() >= 20 {
@@ -1153,10 +1153,11 @@ mod tests {
         p.extend_from_slice(&[0u8; 6]);
         // data_reference_index=1
         p.extend_from_slice(&1u16.to_be_bytes());
-        // 70-byte video fixed body. width @ offset 24, height @ 26.
+        // 70-byte video fixed body. width @ offset 16, height @ 18
+        // (QTFF p. 92: width/height follow the two quality fields).
         let mut body = vec![0u8; 70];
-        body[24..26].copy_from_slice(&1920u16.to_be_bytes());
-        body[26..28].copy_from_slice(&1080u16.to_be_bytes());
+        body[16..18].copy_from_slice(&1920u16.to_be_bytes());
+        body[18..20].copy_from_slice(&1080u16.to_be_bytes());
         p.extend_from_slice(&body);
 
         let v = parse_stsd(&p, &vide_hdlr()).unwrap();

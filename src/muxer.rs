@@ -3824,18 +3824,25 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
             //   width:2 height:2 hres:4 vres:4 data_size:4 frame_count:2
             //   compressor_name:32 depth:2 color_table_id:2
             let mut body = vec![0u8; 70];
-            // hres @ 16..20 = 72.0 (16.16 = 0x00480000)
-            body[16..20].copy_from_slice(&0x0048_0000u32.to_be_bytes());
-            // vres @ 20..24 = 72.0
+            // Field offsets per the QTFF p. 92 order (width/height
+            // directly follow the two quality fields; see also the
+            // Chapter 5 worked example bytes).
+            // width @ 16..18, height @ 18..20
+            body[16..18].copy_from_slice(&width.to_be_bytes());
+            body[18..20].copy_from_slice(&height.to_be_bytes());
+            // hres @ 20..24 = 72.0 dpi (16.16 = 0x00480000)
             body[20..24].copy_from_slice(&0x0048_0000u32.to_be_bytes());
-            // frame_count @ 28..30 = 1
-            body[28..30].copy_from_slice(&1u16.to_be_bytes());
-            // depth @ 64..66 = 24 (typical for non-alpha video)
-            body[64..66].copy_from_slice(&24u16.to_be_bytes());
-            // color_table_id @ 66..68 = -1 (no color table)
-            body[66..68].copy_from_slice(&(-1i16).to_be_bytes());
-            body[24..26].copy_from_slice(&width.to_be_bytes());
-            body[26..28].copy_from_slice(&height.to_be_bytes());
+            // vres @ 24..28 = 72.0 dpi
+            body[24..28].copy_from_slice(&0x0048_0000u32.to_be_bytes());
+            // data_size @ 28..32 "must be set to 0" — left zero.
+            // frame_count @ 32..34 = 1
+            body[32..34].copy_from_slice(&1u16.to_be_bytes());
+            // compressor_name @ 34..66: 32-byte Pascal string, left
+            // zero (empty name).
+            // depth @ 66..68 = 24 (typical for non-alpha video)
+            body[66..68].copy_from_slice(&24u16.to_be_bytes());
+            // color_table_id @ 68..70 = -1 (no color table)
+            body[68..70].copy_from_slice(&(-1i16).to_be_bytes());
             e.extend_from_slice(&body);
             // Codec-config blobs (`avcC` / `hvcC` / …) come first by
             // convention, then the typed visual extension boxes.
