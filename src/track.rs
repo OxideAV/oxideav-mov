@@ -95,6 +95,13 @@ pub enum TrackRefKind {
     /// graphical information for the referenced track or its alternate
     /// group (§8.3.3.3).
     Subtitle,
+    /// `folw` — Subtitle Follows (QTFF 2012-08-14 p. 187): a *sound*
+    /// track points at the single subtitle track, from among the
+    /// subtitle tracks in the same alternate group, that "should be
+    /// considered the default to select if the sound track is
+    /// selected". Only used when language-tag compatibility cannot
+    /// otherwise select a default subtitle track.
+    SubtitleFollows,
     /// Anything else (vendor-specific / from a derived specification).
     Other,
 }
@@ -115,6 +122,7 @@ impl TrackRefKind {
             b"vdep" => Self::VideoDepth,
             b"vplx" => Self::VideoParallax,
             b"subt" => Self::Subtitle,
+            b"folw" => Self::SubtitleFollows,
             _ => Self::Other,
         }
     }
@@ -149,6 +157,134 @@ pub struct SoundV1 {
     pub bytes_per_frame: u32,
     /// Size of one uncompressed sample.
     pub bytes_per_sample: u32,
+}
+
+/// The `formatSpecificFlags` word of a Sound Sample Description
+/// **version 2** (QTFF 2012-08-14 p. 183, "LPCM flag values"). For
+/// uncompressed (`lpcm`) audio the flags describe the layout and
+/// formatting of the stream's PCM samples; the same word carries the
+/// Apple Lossless source-bit-depth code when the data format is
+/// Apple Lossless. Wraps the raw 32-bit big-endian value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LpcmFlags(pub u32);
+
+impl LpcmFlags {
+    /// Samples are floating point (`1 << 0`).
+    pub const IS_FLOAT: u32 = 1 << 0;
+    /// Samples are big-endian (`1 << 1`).
+    pub const IS_BIG_ENDIAN: u32 = 1 << 1;
+    /// Integer samples are signed (`1 << 2`).
+    pub const IS_SIGNED_INTEGER: u32 = 1 << 2;
+    /// Samples are packed — no padding bits (`1 << 3`).
+    pub const IS_PACKED: u32 = 1 << 3;
+    /// Unpacked samples are aligned high in their container (`1 << 4`).
+    pub const IS_ALIGNED_HIGH: u32 = 1 << 4;
+    /// Channels are stored non-interleaved (`1 << 5`).
+    pub const IS_NON_INTERLEAVED: u32 = 1 << 5;
+    /// The stream must not be mixed with others (`1 << 6`).
+    pub const IS_NON_MIXABLE: u32 = 1 << 6;
+    /// All flags deliberately cleared (`1 << 31`) — distinguishes "no
+    /// flags apply" from "flags not set".
+    pub const ARE_ALL_CLEAR: u32 = 1 << 31;
+    /// Bit position of the linear-PCM sample-fraction field.
+    pub const SAMPLE_FRACTION_SHIFT: u32 = 7;
+    /// Mask of the linear-PCM sample-fraction field (`0x3F << 7`).
+    pub const SAMPLE_FRACTION_MASK: u32 = 0x3F << Self::SAMPLE_FRACTION_SHIFT;
+    /// Apple Lossless source data was 16-bit (whole-word flag value).
+    pub const APPLE_LOSSLESS_16BIT_SOURCE: u32 = 1;
+    /// Apple Lossless source data was 20-bit.
+    pub const APPLE_LOSSLESS_20BIT_SOURCE: u32 = 2;
+    /// Apple Lossless source data was 24-bit.
+    pub const APPLE_LOSSLESS_24BIT_SOURCE: u32 = 3;
+    /// Apple Lossless source data was 32-bit.
+    pub const APPLE_LOSSLESS_32BIT_SOURCE: u32 = 4;
+
+    /// Samples are floating point.
+    pub fn is_float(self) -> bool {
+        self.0 & Self::IS_FLOAT != 0
+    }
+    /// Samples are big-endian.
+    pub fn is_big_endian(self) -> bool {
+        self.0 & Self::IS_BIG_ENDIAN != 0
+    }
+    /// Integer samples are signed.
+    pub fn is_signed_integer(self) -> bool {
+        self.0 & Self::IS_SIGNED_INTEGER != 0
+    }
+    /// Samples are packed (no padding bits in their container).
+    pub fn is_packed(self) -> bool {
+        self.0 & Self::IS_PACKED != 0
+    }
+    /// Unpacked samples are aligned high in their container.
+    pub fn is_aligned_high(self) -> bool {
+        self.0 & Self::IS_ALIGNED_HIGH != 0
+    }
+    /// Channels are stored non-interleaved.
+    pub fn is_non_interleaved(self) -> bool {
+        self.0 & Self::IS_NON_INTERLEAVED != 0
+    }
+    /// The stream must not be mixed with others.
+    pub fn is_non_mixable(self) -> bool {
+        self.0 & Self::IS_NON_MIXABLE != 0
+    }
+    /// The "all flags deliberately clear" marker bit is set.
+    pub fn all_clear(self) -> bool {
+        self.0 & Self::ARE_ALL_CLEAR != 0
+    }
+    /// The 6-bit linear-PCM sample-fraction field (bits 7..13): the
+    /// number of fractional bits in fixed-point samples; `0` for
+    /// integer / float layouts.
+    pub fn sample_fraction(self) -> u32 {
+        (self.0 & Self::SAMPLE_FRACTION_MASK) >> Self::SAMPLE_FRACTION_SHIFT
+    }
+}
+
+/// The fields a Sound Sample Description **version 2** appends after
+/// the version-0 fixed positions (QTFF 2012-08-14 pp. 181–182,
+/// "Sound Sample Description (Version 2)"). Introduced by QuickTime 7
+/// for high-resolution audio: the format field is `lpcm` for
+/// uncompressed data (compressed formats keep their compression type
+/// code, normally `mp4a`, with specifics supplied by extensions).
+///
+/// The v2 structure *renames* the version-0/1 field positions for
+/// backward compatibility — an old reader sees `channels == 3`,
+/// `sample_size == 16`, `compression_id == -2`, `packet_size == 0`
+/// and a 16.16 sample rate of `1.0` (the `always*` fields) — and
+/// appends the fields below. Extension atoms follow at offset
+/// [`SoundV2::size_of_struct_only`] from the start of the sample
+/// description entry.
+///
+/// The three `const_*` fields are nonzero **only if the value is
+/// constant**; zero implies variable (e.g. AAC has variable packet
+/// sizes ⇒ `const_bytes_per_audio_packet == 0`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SoundV2 {
+    /// Offset from the start of the sample-description entry to the
+    /// entry's extension atoms (`sizeOfStructOnly`; `72` for the
+    /// as-specified fixed struct).
+    pub size_of_struct_only: u32,
+    /// Audio frames per second as a 64-bit float (`audioSampleRate`,
+    /// e.g. `44100.0`) — LPCM frames ÷ this value = duration in
+    /// seconds. Supersedes the 16.16 field, whose integer portion
+    /// caps at 65535 Hz.
+    pub audio_sample_rate: f64,
+    /// Number of audio channels (`numAudioChannels`); the channel
+    /// *assignment* is expressed in a `chan` extension.
+    pub num_audio_channels: u32,
+    /// Bits per channel, set only if constant and only for
+    /// uncompressed audio; `0` for all other cases
+    /// (`constBitsPerChannel`).
+    pub const_bits_per_channel: u32,
+    /// LPCM flag values (`formatSpecificFlags`) — see [`LpcmFlags`].
+    pub format_specific_flags: LpcmFlags,
+    /// Bytes per audio packet, only if constant; else `0`
+    /// (`constBytesPerAudioPacket`).
+    pub const_bytes_per_audio_packet: u32,
+    /// LPCM frames per audio packet, only if constant; else `0`
+    /// (`constLPCMFramesPerAudioPacket`). For uncompressed audio an
+    /// audio packet is one LPCM frame; for compressed audio it is
+    /// the format's natural compressed access unit.
+    pub const_lpcm_frames_per_audio_packet: u32,
 }
 
 /// ISO BMFF `ChannelLayout` box (`chnl`, ISO/IEC 14496-12:2015
@@ -337,6 +473,19 @@ pub struct SampleDescription {
     /// decompressor.
     pub sound_v1: Option<SoundV1>,
 
+    // ─────── Round-407 sound sample description version 2 ───────
+    /// The QuickTime-7 **version-2** sound sample description fields
+    /// (QTFF 2012-08-14 pp. 181–182): 64-bit float sample rate,
+    /// 32-bit channel count, and the constant-if-nonzero LPCM
+    /// packet/bit-depth descriptors with the [`LpcmFlags`] word.
+    /// `None` for version-0/1 descriptions and non-audio handlers.
+    /// When present, [`SampleDescription::channels`] /
+    /// [`SampleDescription::bits_per_sample`] /
+    /// [`SampleDescription::sample_rate`] are populated from the v2
+    /// fields (the version-0 positions hold the fixed `always*`
+    /// back-compatibility values on wire).
+    pub sound_v2: Option<SoundV2>,
+
     // ─────── Round-394 ISO audio sample entry v1 ───────
     /// `true` when this audio entry is an ISO BMFF
     /// `AudioSampleEntryV1` (ISO/IEC 14496-12:2015 §12.2.3):
@@ -431,7 +580,11 @@ impl SampleDescription {
     ///
     /// Returns `false` for version-0 descriptions, for video / timecode
     /// handlers, and for any audio description whose Compression ID is
-    /// not `-2`.
+    /// not `-2`. Also `false` for **version-2** descriptions, whose
+    /// Compression ID position carries the fixed `alwaysMinus2`
+    /// back-compatibility constant on wire (QTFF 2012-08-14 p. 181) —
+    /// v2 signals variable packet sizing through zero-valued
+    /// [`SoundV2`] `const_*` fields instead.
     pub fn is_vbr(&self) -> bool {
         self.audio_version == 1 && self.audio_compression_id == -2
     }
@@ -444,6 +597,21 @@ impl SampleDescription {
     /// of the entry's 16.16 `samplerate` field.
     pub fn effective_sample_rate(&self) -> u32 {
         self.sampling_rate.unwrap_or(self.sample_rate)
+    }
+
+    /// The audio entry's sampling rate in Hz as a float, preferring
+    /// the highest-resolution source available: the version-2
+    /// `audioSampleRate` Float64 (QTFF 2012-08-14 p. 182) when
+    /// present and finite, otherwise the integer
+    /// [`SampleDescription::effective_sample_rate`] (which already
+    /// honours a `srat` override).
+    pub fn audio_sample_rate_hz(&self) -> f64 {
+        match self.sound_v2 {
+            Some(v2) if v2.audio_sample_rate.is_finite() && v2.audio_sample_rate > 0.0 => {
+                v2.audio_sample_rate
+            }
+            _ => self.effective_sample_rate() as f64,
+        }
     }
 }
 
@@ -1151,6 +1319,65 @@ pub fn parse_stsd(payload: &[u8], hdlr: &Hdlr) -> Result<Vec<SampleDescription>>
                     });
                     36
                 }
+                // Sound Sample Description **version 2** (QTFF
+                // 2012-08-14 pp. 181–182): the version-0 field
+                // positions hold fixed back-compatibility values
+                // (channels=3, size=16, compression=-2, packet=0,
+                // 16.16 rate=1.0) and the real audio parameters
+                // follow — Float64 sample rate, 32-bit channel
+                // count, LPCM flags, const-if-nonzero descriptors.
+                // Extensions live at `sizeOfStructOnly` from the
+                // start of the sample-description entry.
+                2 if body.len() >= 56 => {
+                    let v2 = SoundV2 {
+                        size_of_struct_only: u32::from_be_bytes([
+                            body[20], body[21], body[22], body[23],
+                        ]),
+                        audio_sample_rate: f64::from_be_bytes([
+                            body[24], body[25], body[26], body[27], body[28], body[29], body[30],
+                            body[31],
+                        ]),
+                        num_audio_channels: u32::from_be_bytes([
+                            body[32], body[33], body[34], body[35],
+                        ]),
+                        // body[36..40] is the fixed always7F000000 word.
+                        const_bits_per_channel: u32::from_be_bytes([
+                            body[40], body[41], body[42], body[43],
+                        ]),
+                        format_specific_flags: LpcmFlags(u32::from_be_bytes([
+                            body[44], body[45], body[46], body[47],
+                        ])),
+                        const_bytes_per_audio_packet: u32::from_be_bytes([
+                            body[48], body[49], body[50], body[51],
+                        ]),
+                        const_lpcm_frames_per_audio_packet: u32::from_be_bytes([
+                            body[52], body[53], body[54], body[55],
+                        ]),
+                    };
+                    // Repopulate the legacy typed fields from the v2
+                    // truth (the version-0 positions parsed above
+                    // carry only the `always*` constants).
+                    entry.channels = v2.num_audio_channels.min(u16::MAX as u32) as u16;
+                    entry.bits_per_sample = v2.const_bits_per_channel.min(u16::MAX as u32) as u16;
+                    if v2.audio_sample_rate.is_finite() && v2.audio_sample_rate > 0.0 {
+                        entry.sample_rate =
+                            v2.audio_sample_rate.round().min(u32::MAX as f64) as u32;
+                    }
+                    // Extensions start at sizeOfStructOnly from the
+                    // entry start (16-byte universal header + 56-byte
+                    // fixed struct = 72 as specified). A hostile /
+                    // corrupt offset — pointing inside the fixed
+                    // struct or past the entry — falls back to the
+                    // end of the fixed fields.
+                    let soso = v2.size_of_struct_only as usize;
+                    let ext = if (72..=16 + body.len()).contains(&soso) {
+                        soso - 16
+                    } else {
+                        56
+                    };
+                    entry.sound_v2 = Some(v2);
+                    ext
+                }
                 _ => 20,
             };
             if body.len() > extra_start {
@@ -1665,6 +1892,171 @@ mod tests {
         assert!(!v[0].is_vbr());
     }
 
+    /// Build a version-0 `stsd` carrying a single **version-2** sound
+    /// sample description (QTFF 2012-08-14 pp. 181–182): the fixed
+    /// `always*` back-compatibility constants in the version-0
+    /// positions, the v2 fields after them, and `trailing` extension
+    /// atoms appended.
+    #[allow(clippy::too_many_arguments)]
+    fn audio_v2_stsd(
+        format: &[u8; 4],
+        rate: f64,
+        channels: u32,
+        bits: u32,
+        flags: u32,
+        bytes_per_packet: u32,
+        frames_per_packet: u32,
+        size_of_struct_only: u32,
+        trailing: &[u8],
+    ) -> Vec<u8> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_be_bytes()); // stsd ver+flags
+        p.extend_from_slice(&1u32.to_be_bytes()); // n_entries
+        let entry_size = (16 + 56 + trailing.len()) as u32;
+        p.extend_from_slice(&entry_size.to_be_bytes());
+        p.extend_from_slice(format);
+        p.extend_from_slice(&[0u8; 6]); // reserved
+        p.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index
+        let mut body = vec![0u8; 56];
+        body[0..2].copy_from_slice(&2u16.to_be_bytes()); // version = 2
+        body[8..10].copy_from_slice(&3u16.to_be_bytes()); // always3
+        body[10..12].copy_from_slice(&16u16.to_be_bytes()); // always16
+        body[12..14].copy_from_slice(&(-2i16).to_be_bytes()); // alwaysMinus2
+                                                              // always0 @ 14..16 left zero
+        body[16..20].copy_from_slice(&65536u32.to_be_bytes()); // always65536
+        body[20..24].copy_from_slice(&size_of_struct_only.to_be_bytes());
+        body[24..32].copy_from_slice(&rate.to_be_bytes());
+        body[32..36].copy_from_slice(&channels.to_be_bytes());
+        body[36..40].copy_from_slice(&0x7F00_0000u32.to_be_bytes());
+        body[40..44].copy_from_slice(&bits.to_be_bytes());
+        body[44..48].copy_from_slice(&flags.to_be_bytes());
+        body[48..52].copy_from_slice(&bytes_per_packet.to_be_bytes());
+        body[52..56].copy_from_slice(&frames_per_packet.to_be_bytes());
+        p.extend_from_slice(&body);
+        p.extend_from_slice(trailing);
+        p
+    }
+
+    #[test]
+    fn stsd_audio_v2_lpcm_surfaces_fields() {
+        // High-resolution lpcm entry the 16.16 field cannot express:
+        // 192 kHz, 6 channels, 24-bit packed signed big-endian.
+        let flags = LpcmFlags::IS_BIG_ENDIAN | LpcmFlags::IS_SIGNED_INTEGER | LpcmFlags::IS_PACKED;
+        let p = audio_v2_stsd(b"lpcm", 192_000.0, 6, 24, flags, 18, 1, 72, &[]);
+        let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+        assert_eq!(&v[0].format, b"lpcm");
+        assert_eq!(v[0].audio_version, 2);
+        let v2 = v[0].sound_v2.expect("v2 fields surfaced");
+        assert_eq!(v2.size_of_struct_only, 72);
+        assert_eq!(v2.audio_sample_rate, 192_000.0);
+        assert_eq!(v2.num_audio_channels, 6);
+        assert_eq!(v2.const_bits_per_channel, 24);
+        assert_eq!(v2.format_specific_flags, LpcmFlags(flags));
+        assert_eq!(v2.const_bytes_per_audio_packet, 18);
+        assert_eq!(v2.const_lpcm_frames_per_audio_packet, 1);
+        // Legacy typed fields repopulated from the v2 truth (the
+        // version-0 positions carry only the always* constants).
+        assert_eq!(v[0].channels, 6);
+        assert_eq!(v[0].bits_per_sample, 24);
+        assert_eq!(v[0].sample_rate, 192_000);
+        assert_eq!(v[0].effective_sample_rate(), 192_000);
+        assert_eq!(v[0].audio_sample_rate_hz(), 192_000.0);
+        // The on-wire alwaysMinus2 must NOT read as the v1 VBR variant.
+        assert_eq!(v[0].audio_compression_id, -2);
+        assert!(!v[0].is_vbr());
+        assert!(v[0].extra.is_empty());
+    }
+
+    #[test]
+    fn stsd_audio_v2_lpcm_flag_predicates() {
+        let f = LpcmFlags(
+            LpcmFlags::IS_FLOAT
+                | LpcmFlags::IS_ALIGNED_HIGH
+                | LpcmFlags::IS_NON_INTERLEAVED
+                | LpcmFlags::IS_NON_MIXABLE
+                | (13 << LpcmFlags::SAMPLE_FRACTION_SHIFT)
+                | LpcmFlags::ARE_ALL_CLEAR,
+        );
+        assert!(f.is_float());
+        assert!(!f.is_big_endian());
+        assert!(!f.is_signed_integer());
+        assert!(!f.is_packed());
+        assert!(f.is_aligned_high());
+        assert!(f.is_non_interleaved());
+        assert!(f.is_non_mixable());
+        assert!(f.all_clear());
+        assert_eq!(f.sample_fraction(), 13);
+        assert_eq!(LpcmFlags::default().sample_fraction(), 0);
+        // Apple Lossless source-depth whole-word values.
+        assert_eq!(LpcmFlags::APPLE_LOSSLESS_24BIT_SOURCE, 3);
+    }
+
+    #[test]
+    fn stsd_audio_v2_extensions_at_size_of_struct_only() {
+        // sizeOfStructOnly may exceed the as-specified 72 (a grown
+        // struct): extensions start there, skipping the unknown
+        // struct tail. Body = 56 fixed + 8 skip + one atom.
+        let ext = framed(b"xcfg", &[0xAA, 0xBB]);
+        let mut trailing = vec![0u8; 8]; // opaque struct growth
+        trailing.extend_from_slice(&ext);
+        let p = audio_v2_stsd(b"lpcm", 48_000.0, 2, 16, 0, 4, 1, 80, &trailing);
+        let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+        assert_eq!(v[0].sound_v2.unwrap().size_of_struct_only, 80);
+        assert_eq!(v[0].extra, ext, "extra starts at sizeOfStructOnly");
+    }
+
+    #[test]
+    fn stsd_audio_v2_hostile_size_of_struct_only_falls_back() {
+        // Corrupt offsets — zero, inside the fixed struct, past the
+        // entry, u32::MAX — must not panic and must fall back to the
+        // end of the fixed fields (byte 56 of the body).
+        let ext = framed(b"xcfg", &[0xCC]);
+        for soso in [0u32, 16, 60, 71, 1_000, u32::MAX] {
+            let p = audio_v2_stsd(b"lpcm", 44_100.0, 2, 16, 0, 4, 1, soso, &ext);
+            let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+            assert_eq!(v[0].sound_v2.unwrap().size_of_struct_only, soso);
+            assert_eq!(v[0].extra, ext, "soso={soso} falls back to 56");
+        }
+    }
+
+    #[test]
+    fn stsd_audio_v2_hostile_sample_rate_guarded() {
+        // NaN / infinite / negative / oversized Float64 rates must not
+        // poison the integer fields or panic.
+        for rate in [f64::NAN, f64::INFINITY, -44100.0, 1e300] {
+            let p = audio_v2_stsd(b"lpcm", rate, 2, 16, 0, 4, 1, 72, &[]);
+            let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+            let v2 = v[0].sound_v2.unwrap();
+            if rate.is_finite() {
+                assert_eq!(v2.audio_sample_rate, rate);
+            } else {
+                assert!(!v2.audio_sample_rate.is_finite());
+            }
+            if rate.is_finite() && rate > 0.0 {
+                assert_eq!(v[0].sample_rate, u32::MAX, "1e300 clamps");
+                assert_eq!(v[0].audio_sample_rate_hz(), rate);
+            } else {
+                // The version-0 position (always65536 ⇒ 16.16 for 1.0)
+                // is retained; the float accessor falls back to it.
+                assert_eq!(v[0].sample_rate, 1);
+                assert_eq!(v[0].audio_sample_rate_hz(), 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn stsd_audio_v2_short_body_does_not_over_read() {
+        // A description declaring version 2 whose body is only the
+        // 20-byte version-0 size must not over-read: no SoundV2, and
+        // the extra scan starts at 20.
+        let p = audio_stsd(2, -2, None);
+        let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+        assert_eq!(v[0].audio_version, 2);
+        assert_eq!(v[0].sound_v2, None);
+        assert_eq!(v[0].sound_v1, None);
+        assert!(!v[0].is_vbr());
+    }
+
     // ─────────────── tref reference-type classification ───────────────
 
     #[test]
@@ -1684,6 +2076,12 @@ mod tests {
             TrackRefKind::VideoParallax
         );
         assert_eq!(TrackRefKind::from_fourcc(b"subt"), TrackRefKind::Subtitle);
+        // Subtitle Follows (QTFF 2012-08-14 p. 187): a sound track's
+        // default-subtitle pointer within its alternate group.
+        assert_eq!(
+            TrackRefKind::from_fourcc(b"folw"),
+            TrackRefKind::SubtitleFollows
+        );
         // Pre-existing QuickTime types still classify.
         assert_eq!(TrackRefKind::from_fourcc(b"chap"), TrackRefKind::Chapter);
         assert_eq!(TrackRefKind::from_fourcc(b"hint"), TrackRefKind::Hint);

@@ -57,7 +57,9 @@ Decoding stays in codec crates: this crate calls
   kind (`chap`, `tmcd`, `sync`, `scpt`, `hint`, `ssrc`) plus the ISO
   BMFF §8.3.3.3 reference types `cdsc` (content-describes), `font`,
   `hind` (hint dependency), `vdep` / `vplx` (auxiliary depth / parallax
-  video), and `subt` — with track-id → index resolvers; `tsel`
+  video), `subt`, and the QTFF 2012-08-14 `folw` Subtitle Follows
+  (a sound track's default-subtitle pointer within its alternate
+  group) — with track-id → index resolvers; `tsel`
   (track selection / switch groups),
   `kind`, `trgr` (track groups), and `strk` sub-tracks. `tkhd` flags
   + `alternate_group` surfaced via `presentation_tracks()` /
@@ -87,13 +89,26 @@ Decoding stays in codec crates: this crate calls
   per-sample text payload decoded by `parse_text_sample_styles` and from
   the `gmhd/text` media-information header. Non-`text` handlers leave the
   field `None`.
-- Sound sample-description versioning: version-0 (uncompressed-sample)
-  and version-1 (QTFF p. 101 `SoundDescriptionV1`) layouts. The four
+- Sound sample-description versioning: version-0 (uncompressed-sample),
+  version-1 (QTFF p. 101 `SoundDescriptionV1`) and version-2
+  (QTFF 2012-08-14 pp. 181–182 `SoundDescriptionV2`) layouts. The four
   fixed-ratio fields (`samples_per_packet`, `bytes_per_packet`,
   `bytes_per_frame`, `bytes_per_sample`) surface typed via
   [`SoundV1`]; `audio_version` + `audio_compression_id` are exposed,
   and `is_vbr()` decodes the variable-bit-rate "third variant"
-  (version 1, Compression ID `-2`, QTFF p. 102). The ISO BMFF side
+  (version 1, Compression ID `-2`, QTFF p. 102). The QuickTime-7
+  high-resolution v2 form (`lpcm` uncompressed / `mp4a`-style
+  compressed) surfaces typed via [`SoundV2`] — Float64
+  `audio_sample_rate` (rates past the 16.16 field's 65535 Hz cap),
+  32-bit `num_audio_channels`, the constant-if-nonzero
+  bits/bytes/frames-per-packet descriptors, and the `lpcm`
+  `format_specific_flags` decoded by [`LpcmFlags`] (float /
+  endianness / signed / packed / aligned-high / non-interleaved /
+  non-mixable / all-clear bits, the fixed-point sample-fraction
+  field, and the Apple Lossless source-depth codes) — with
+  extension atoms located via `sizeOfStructOnly` (hostile offsets
+  fall back safely) and `audio_sample_rate_hz()` picking the best
+  available rate source. The ISO BMFF side
   (§12.2.3/§12.2.4) is read too: an `AudioSampleEntryV1` in a
   version-1 `stsd` (same 20-byte fixed body, no QTFF extension) sets
   `iso_audio_entry_v1`, with the `srat` SamplingRateBox

@@ -172,8 +172,8 @@ pub use timecode::{
     TMCD_FLAG_24_HOUR, TMCD_FLAG_COUNTER, TMCD_FLAG_DROP_FRAME, TMCD_FLAG_NEGATIVES_OK,
 };
 pub use track::{
-    parse_chnl, parse_srat, ChannelLayout, ChannelStructure, SampleDescription, SoundV1,
-    SpeakerPosition, Track, TrackRef, TrackRefKind,
+    parse_chnl, parse_srat, ChannelLayout, ChannelStructure, LpcmFlags, SampleDescription, SoundV1,
+    SoundV2, SpeakerPosition, Track, TrackRef, TrackRefKind,
 };
 pub use track_group::{
     parse_track_group_type, parse_trgr, TrackGroupTypeEntry, TRACK_GROUP_TYPE_MSRC,
