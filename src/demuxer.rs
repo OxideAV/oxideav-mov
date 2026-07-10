@@ -932,6 +932,31 @@ impl MovDemuxer {
             }
         }
 
+        // Bound the flattened queue before materialising it. A forged
+        // sample-count field — the constant-size `stsz` count, `stts`
+        // run counts — is a free 32-bit integer with no byte-backed
+        // table behind it, so a kilobyte input can declare billions
+        // of samples; iterating them would allocate gigabytes (and
+        // burn minutes of CPU) before any per-sample read failed.
+        // Every in-file sample occupies at least one byte of this
+        // input, so `total_len` bounds any plausible total; keep a
+        // generous floor so a small reference movie whose samples
+        // live in external files (non-self `dref`) still opens.
+        let declared: u64 = tracks
+            .iter()
+            .map(|t| {
+                (t.sample_table.sample_count() as u64)
+                    .saturating_add(t.fragment_samples.len() as u64)
+            })
+            .fold(0u64, u64::saturating_add);
+        let max_samples = total_len.max(1 << 20);
+        if declared > max_samples {
+            return Err(Error::invalid(format!(
+                "MOV: sample tables declare {declared} samples but the \
+                 {total_len}-byte input cannot back them"
+            )));
+        }
+
         // Flatten sample tables into a globally offset-sorted queue.
         // For fragmented streams, the per-track stsz_count may be 0
         // (an "init segment" with no in-moov samples) while
@@ -1198,9 +1223,7 @@ impl MovDemuxer {
             .iter_samples()
             .collect::<Result<Vec<_>>>()?;
         for s in samples {
-            self.input.seek(SeekFrom::Start(s.offset))?;
-            let mut buf = vec![0u8; s.size as usize];
-            self.input.read_exact(&mut buf)?;
+            let buf = self.read_exact_bounded(s.offset, s.size as u64, "chapter text sample")?;
             let (title, text_encoding) = decode_text_sample_full(&buf)?;
             entries.push(ChapterEntry {
                 start_time: s.dts,
@@ -1347,11 +1370,13 @@ impl MovDemuxer {
                 for &(_, len) in &extents {
                     total = total.checked_add(len as usize)?;
                 }
-                let mut out = Vec::with_capacity(total);
+                // Cap the pre-allocation: `total` is attacker-declared
+                // and the bounded per-extent reads below fail fast on
+                // truncated data anyway.
+                let mut out =
+                    Vec::with_capacity(total.min(crate::atom::MAX_INMEMORY_ATOM_BODY as usize));
                 for (off, len) in extents {
-                    self.input.seek(SeekFrom::Start(off)).ok()?;
-                    let mut chunk = vec![0u8; len as usize];
-                    self.input.read_exact(&mut chunk).ok()?;
+                    let chunk = self.read_exact_bounded(off, len, "iloc extent").ok()?;
                     out.extend_from_slice(&chunk);
                 }
                 Some(out)
@@ -1425,12 +1450,14 @@ impl MovDemuxer {
                         .checked_add(e.length as usize)
                         .ok_or_else(|| Error::invalid("MOV: iloc extent total overflow"))?;
                 }
-                let mut out = Vec::with_capacity(total);
+                // Cap the pre-allocation: `total` is attacker-declared
+                // and the bounded per-extent reads below fail fast on
+                // truncated data anyway.
+                let mut out =
+                    Vec::with_capacity(total.min(crate::atom::MAX_INMEMORY_ATOM_BODY as usize));
                 for e in &loc.extents {
                     let off = loc.base_offset.saturating_add(e.offset);
-                    self.input.seek(SeekFrom::Start(off))?;
-                    let mut chunk = vec![0u8; e.length as usize];
-                    self.input.read_exact(&mut chunk)?;
+                    let chunk = self.read_exact_bounded(off, e.length, "iloc extent")?;
                     out.extend_from_slice(&chunk);
                 }
                 Ok(out)
@@ -1564,10 +1591,27 @@ impl MovDemuxer {
                     .unwrap_or(0),
             )));
         }
-        self.input.seek(SeekFrom::Start(sample.offset))?;
-        let mut buf = vec![0u8; sample.size as usize];
-        self.input.read_exact(&mut buf)?;
+        let buf = self.read_exact_bounded(sample.offset, sample.size as u64, "sample data")?;
         Ok((stream_idx, sample, buf))
+    }
+
+    /// Seek to `offset` and read exactly `size` declared bytes with an
+    /// allocation that grows only as data actually arrives. A hostile
+    /// size field (e.g. a multi-gigabyte `stsz` entry or `iloc` extent
+    /// declared inside a kilobyte file) hits end-of-input and errors
+    /// instead of pre-allocating the declared amount up front. Errors
+    /// with `Error::invalid` naming `what` on a short read.
+    fn read_exact_bounded(&mut self, offset: u64, size: u64, what: &str) -> Result<Vec<u8>> {
+        self.input.seek(SeekFrom::Start(offset))?;
+        let mut buf = Vec::new();
+        (&mut self.input).take(size).read_to_end(&mut buf)?;
+        if (buf.len() as u64) < size {
+            return Err(Error::invalid(format!(
+                "MOV: {what} truncated: declared {size} bytes, {} available",
+                buf.len()
+            )));
+        }
+        Ok(buf)
     }
 
     /// Whether a sample's media bytes live in **this** file: its

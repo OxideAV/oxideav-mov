@@ -249,6 +249,34 @@ fuzz_target!(|data: &[u8]| {
             };
             let _ = imap.entry_for_ssrc_slot(probe_slot);
         }
+        // Round-407 sound sample-description v2 + extension-atom
+        // surfaces (QTFF 2012-08-14 pp. 181–187). The v2 Float64
+        // sample rate, LPCM flag word and sizeOfStructOnly-driven
+        // extension scan all consume attacker-controlled bytes at
+        // open time; the typed accessors below must hold on any
+        // parse that survived. `parse_wave` must be idempotent
+        // through its own serialiser (children / terminator /
+        // non-atom fallback all round-trip bit-exact).
+        if let Some(track) = dmx.tracks.get(ti) {
+            for sd in track.sample_descriptions.iter().take(8) {
+                let _ = sd.audio_sample_rate_hz();
+                let _ = sd.is_vbr();
+                if let Some(v2) = sd.sound_v2 {
+                    let _ = v2.format_specific_flags.is_float();
+                    let _ = v2.format_specific_flags.sample_fraction();
+                    let _ = v2.size_of_struct_only;
+                }
+                if let Some(w) = &sd.si_decompression_param {
+                    let _ = w.format();
+                    let _ = w.esds();
+                    let reparsed = oxideav_mov::parse_wave(&w.to_payload_bytes());
+                    assert_eq!(&reparsed, w, "wave serialise/parse not idempotent");
+                }
+                let _ = sd.esds.as_deref();
+                let _ = sd.slope_and_intercept;
+                let _ = sd.extension_terminator;
+            }
+        }
         // Round-199 per-track Track Group Box (`trgr`) entry list.
         let entries = dmx.track_group_entries(ti);
         let _ = entries.len();

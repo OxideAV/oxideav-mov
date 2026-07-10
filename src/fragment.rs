@@ -480,6 +480,18 @@ pub fn parse_trun(payload: &[u8]) -> Result<Trun> {
     {
         return Err(Error::invalid("MOV: trun per-sample rows truncated"));
     }
+    // With all four per-sample-field flags clear the rows occupy zero
+    // bytes, making `sample_count` a free field no payload length can
+    // corroborate — a forged run would materialise billions of
+    // default-shaped rows. Cap the empty-row form at a count far above
+    // any real fragment (per-sample-defaulted CBR audio runs number in
+    // the thousands).
+    const MAX_EMPTY_ROW_TRUN_SAMPLES: u32 = 1 << 24;
+    if row_size == 0 && sample_count > MAX_EMPTY_ROW_TRUN_SAMPLES {
+        return Err(Error::invalid(format!(
+            "MOV: trun declares {sample_count} samples with no per-sample fields"
+        )));
+    }
     let mut samples = Vec::with_capacity(sample_count as usize);
     for _ in 0..sample_count {
         let mut s = TrunSample {

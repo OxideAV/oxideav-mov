@@ -287,6 +287,86 @@ fn v2_validation_and_mutual_exclusion() {
 }
 
 #[test]
+fn hostile_giant_stsz_sample_size_errors_without_alloc() {
+    // Fuzz regression (round 407): a v2 lpcm movie whose constant
+    // `stsz` sample size is rewritten to ~2.7 GB inside a sub-KB file
+    // previously made `read_next` pre-allocate the declared size
+    // (libFuzzer OOM). The bounded read must surface a recoverable
+    // error per sample instead of allocating attacker-declared
+    // amounts up front.
+    let mut m = MovMuxer::new();
+    let tid = add_audio(&mut m, *b"lpcm", 2, &[]);
+    m.set_sound_description_v2(
+        tid,
+        AudioEntryV2 {
+            audio_sample_rate: 192_000.0,
+            ..AudioEntryV2::default()
+        },
+    )
+    .unwrap();
+    let mut bytes = m.encode_to_vec().unwrap();
+    let pos = bytes
+        .windows(4)
+        .position(|w| w == b"stsz")
+        .expect("stsz present");
+    // stsz payload: [ver+flags:4][sample_size:4][count:4] — force the
+    // constant sample size to a hostile value.
+    bytes[pos + 8..pos + 12].copy_from_slice(&0xA500_0008u32.to_be_bytes());
+    let mut d = open(bytes);
+    // Every sample read must error (truncated declared size), never
+    // OOM or panic; the demuxer keeps advancing.
+    let mut errors = 0;
+    loop {
+        match d.read_next() {
+            Ok(_) => panic!("2.7 GB sample cannot be satisfied by a sub-KB file"),
+            Err(oxideav_core::Error::Eof) => break,
+            Err(_) => errors += 1,
+        }
+        if errors > 16 {
+            panic!("demuxer failed to reach Eof");
+        }
+    }
+    assert_eq!(errors, 4, "one recoverable error per declared sample");
+}
+
+#[test]
+fn hostile_giant_stsz_sample_count_rejected_at_open() {
+    // Fuzz regression (round 407): the constant-size `stsz` form
+    // carries no per-sample table, so its count field is a free
+    // 32-bit integer — a forged ~1.7 billion previously made open()
+    // materialise the flattened sample queue (gigabytes + minutes of
+    // CPU). The declared total is now bounded by the input length
+    // before materialisation.
+    let mut m = MovMuxer::new();
+    let tid = add_audio(&mut m, *b"lpcm", 2, &[]);
+    m.set_sound_description_v2(
+        tid,
+        AudioEntryV2 {
+            audio_sample_rate: 48_000.0,
+            ..AudioEntryV2::default()
+        },
+    )
+    .unwrap();
+    let mut bytes = m.encode_to_vec().unwrap();
+    let pos = bytes
+        .windows(4)
+        .position(|w| w == b"stsz")
+        .expect("stsz present");
+    // Force the constant-size form (nonzero sample_size) with a
+    // hostile count: [ver+flags:4][sample_size:4][count:4].
+    bytes[pos + 8..pos + 12].copy_from_slice(&8u32.to_be_bytes());
+    bytes[pos + 12..pos + 16].copy_from_slice(&0x6472_6504u32.to_be_bytes());
+    let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+    match MovDemuxer::open(cur) {
+        Ok(_) => panic!("forged sample count must be rejected"),
+        Err(err) => assert!(
+            err.to_string().contains("cannot back"),
+            "unexpected error: {err}"
+        ),
+    }
+}
+
+#[test]
 fn v2_stsd_box_stays_version_0() {
     // The QTFF v2 sound description lives in a version-0 stsd (the
     // FullBox version-1 promotion is ISO AudioSampleEntryV1-only).
