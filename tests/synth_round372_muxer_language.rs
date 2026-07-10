@@ -45,10 +45,7 @@ fn default_language_is_und() {
     let _ = add_audio(&mut m);
     let d = open(m.encode_to_vec().expect("encode"));
     assert_eq!(d.tracks[0].mdhd.language, MDHD_LANGUAGE_UND);
-    assert_eq!(
-        iso_language_tag(d.tracks[0].mdhd.language),
-        Some([b'u', b'n', b'd'])
-    );
+    assert_eq!(iso_language_tag(d.tracks[0].mdhd.language), Some(*b"und"));
     assert!(d.tracks[0].extended_language.is_none());
 }
 
@@ -59,10 +56,7 @@ fn iso639_language_roundtrips() {
     m.set_track_language(a, MovMetadata::iso_language(*b"eng"))
         .expect("set lang");
     let d = open(m.encode_to_vec().expect("encode"));
-    assert_eq!(
-        iso_language_tag(d.tracks[0].mdhd.language),
-        Some([b'e', b'n', b'g'])
-    );
+    assert_eq!(iso_language_tag(d.tracks[0].mdhd.language), Some(*b"eng"));
 }
 
 #[test]
@@ -122,10 +116,7 @@ fn language_and_extended_language_coexist() {
         .expect("set lang");
     m.set_track_extended_language(a, "en-GB").expect("set elng");
     let d = open(m.encode_to_vec().expect("encode"));
-    assert_eq!(
-        iso_language_tag(d.tracks[0].mdhd.language),
-        Some([b'e', b'n', b'g'])
-    );
+    assert_eq!(iso_language_tag(d.tracks[0].mdhd.language), Some(*b"eng"));
     assert_eq!(d.tracks[0].extended_language.as_deref(), Some("en-GB"));
 }
 

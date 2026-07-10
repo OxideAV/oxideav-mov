@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(entries[0].as_str(), Some("Movie Name"));
         match &entries[0].kind {
             UserDataKind::PlainUtf8 { language, .. } => {
-                assert_eq!(iso_language_tag(*language), Some([b'e', b'n', b'g']));
+                assert_eq!(iso_language_tag(*language), Some(*b"eng"));
             }
             _ => panic!("expected PlainUtf8"),
         }
@@ -328,7 +328,7 @@ mod tests {
     fn unknown_entry_kept_as_raw_bytes() {
         // arbitrary fourcc 'wXYZ' with binary blob
         let mut udta = Vec::new();
-        push_atom(&mut udta, [b'w', b'X', b'Y', b'Z'], &[1, 2, 3, 4, 5]);
+        push_atom(&mut udta, *b"wXYZ", &[1, 2, 3, 4, 5]);
         let entries = parse_udta(&udta).unwrap();
         assert_eq!(entries.len(), 1);
         match &entries[0].kind {
@@ -342,7 +342,7 @@ mod tests {
     fn iso_lang_packed_round_trip() {
         // 'eng' -> ((101-96)<<10) | ((110-96)<<5) | (103-96) = 5<<10 | 14<<5 | 7
         let eng: u16 = (5 << 10) | (14 << 5) | 7;
-        assert_eq!(iso_language_tag(eng), Some([b'e', b'n', b'g']));
+        assert_eq!(iso_language_tag(eng), Some(*b"eng"));
         // High-bit-set Mac code returns None.
         assert_eq!(iso_language_tag(0x8000 | eng), None);
     }

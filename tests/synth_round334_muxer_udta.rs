@@ -100,10 +100,7 @@ fn same_fourcc_intl_text_coalesces_into_multilanguage_atom() {
     match &d.user_data[1].kind {
         UserDataKind::InternationalText { language, .. } => {
             assert_eq!(language & UTF8_INTL_TEXT_FLAG, UTF8_INTL_TEXT_FLAG);
-            assert_eq!(
-                iso_language_tag(language & 0x7FFF),
-                Some([b'f', b'r', b'a'])
-            );
+            assert_eq!(iso_language_tag(language & 0x7FFF), Some(*b"fra"));
         }
         _ => panic!("expected international text"),
     }
@@ -125,7 +122,7 @@ fn movie_level_plain_utf8_roundtrips() {
     assert_eq!(d.user_data[0].as_str(), Some("Movie Name"));
     match &d.user_data[0].kind {
         UserDataKind::PlainUtf8 { language, .. } => {
-            assert_eq!(iso_language_tag(*language), Some([b'e', b'n', b'g']));
+            assert_eq!(iso_language_tag(*language), Some(*b"eng"));
         }
         _ => panic!("expected PlainUtf8"),
     }
@@ -209,5 +206,5 @@ fn iso_language_is_bare_inverse_of_read_decoder() {
     // exact inverse of the read-side iso_language_tag.
     let packed = MovMetadata::iso_language(*b"deu");
     assert_eq!(packed & 0x8000, 0, "no high bit on the bare packed value");
-    assert_eq!(iso_language_tag(packed), Some([b'd', b'e', b'u']));
+    assert_eq!(iso_language_tag(packed), Some(*b"deu"));
 }
