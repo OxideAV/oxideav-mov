@@ -287,6 +287,244 @@ pub struct SoundV2 {
     pub const_lpcm_frames_per_audio_packet: u32,
 }
 
+/// The deprecated `flap` **siSlopeAndIntercept** sound-description
+/// extension (QTFF 2012-08-14 p. 184, `SoundSlopeAndInterceptRecord`):
+/// four big-endian `Float64` parameters handed to a decompressor
+/// component. Deprecated in the QuickTime file format — parsed only
+/// to document existing legacy content; do not write it into new
+/// files.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SoundSlopeAndIntercept {
+    /// Slope applied to decompressed samples.
+    pub slope: f64,
+    /// Intercept added to decompressed samples.
+    pub intercept: f64,
+    /// Minimum clip value.
+    pub min_clip: f64,
+    /// Maximum clip value.
+    pub max_clip: f64,
+}
+
+/// One child atom of a [`SiDecompressionParam`] (`wave`) extension —
+/// raw `[size, type]`-framed decompressor configuration (QTFF
+/// 2012-08-14 p. 185).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaveChild {
+    /// The child atom's four-character code (`frma`, `esds`, the
+    /// data-format code itself, …).
+    pub fourcc: [u8; 4],
+    /// The child atom's payload, verbatim.
+    pub payload: Vec<u8>,
+}
+
+impl WaveChild {
+    /// A child with an arbitrary FourCC and payload.
+    pub fn new(fourcc: [u8; 4], payload: Vec<u8>) -> Self {
+        Self { fourcc, payload }
+    }
+
+    /// Build a `frma` Format child (QTFF 2012-08-14 p. 185): the
+    /// value is copied from the sound sample description's
+    /// data-format field.
+    pub fn format(data_format: [u8; 4]) -> Self {
+        Self {
+            fourcc: *b"frma",
+            payload: data_format.to_vec(),
+        }
+    }
+
+    /// Build an `esds` MPEG-4 Elementary Stream Descriptor child
+    /// (QTFF 2012-08-14 p. 186): a full atom — 32-bit version zero,
+    /// then the ISO/IEC 14496 elementary stream descriptor bytes.
+    pub fn elementary_stream_descriptor(descriptor: &[u8]) -> Self {
+        let mut payload = vec![0u8; 4];
+        payload.extend_from_slice(descriptor);
+        Self {
+            fourcc: *b"esds",
+            payload,
+        }
+    }
+}
+
+/// The `wave` **siDecompressionParam** sound-description extension
+/// (QTFF 2012-08-14 p. 185): out-of-band decompressor configuration.
+/// Required for MPEG-4 audio (`mp4a`), whose `wave` typically
+/// contains (in order) a `frma` Format atom, an atom named after the
+/// data format, an `esds` elementary-stream-descriptor atom, and a
+/// Terminator atom. Other codecs store decompressor-dependent
+/// content — media sourced from WAV/AVI may carry a little-endian
+/// `WAVEFORMATEX` structure instead of atoms, surfaced verbatim on
+/// [`SiDecompressionParam::non_atom_data`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SiDecompressionParam {
+    /// The framed child atoms, in file order (empty when the payload
+    /// is not atom-shaped).
+    pub children: Vec<WaveChild>,
+    /// `true` when a Terminator atom (type `0x00000000`, QTFF
+    /// 2012-08-14 p. 185) closed the child list — required for
+    /// `mp4a` per the p. 188 assembly rules.
+    pub terminated: bool,
+    /// The verbatim payload when it does not parse as `[size, type]`
+    /// atoms (e.g. a little-endian `WAVEFORMATEX` from WAV/AVI-
+    /// sourced media). Empty when [`Self::children`] carries the
+    /// content.
+    pub non_atom_data: Vec<u8>,
+}
+
+impl SiDecompressionParam {
+    /// The `frma` Format child's data-format FourCC, when present.
+    pub fn format(&self) -> Option<[u8; 4]> {
+        let p = self.child(b"frma")?;
+        if p.len() >= 4 {
+            Some([p[0], p[1], p[2], p[3]])
+        } else {
+            None
+        }
+    }
+
+    /// The `esds` child's elementary-stream-descriptor bytes (after
+    /// its 32-bit version-zero field), when present.
+    pub fn esds(&self) -> Option<&[u8]> {
+        self.child(b"esds")?.get(4..)
+    }
+
+    /// The first child with the given FourCC, as its raw payload.
+    pub fn child(&self, fourcc: &[u8; 4]) -> Option<&[u8]> {
+        self.children
+            .iter()
+            .find(|c| &c.fourcc == fourcc)
+            .map(|c| c.payload.as_slice())
+    }
+
+    /// Serialise this extension's payload — the exact inverse of
+    /// [`parse_wave`]. Atom-shaped content frames each child and
+    /// appends the 8-byte Terminator when [`Self::terminated`];
+    /// otherwise [`Self::non_atom_data`] is emitted verbatim.
+    pub fn to_payload_bytes(&self) -> Vec<u8> {
+        if self.children.is_empty() && !self.non_atom_data.is_empty() {
+            return self.non_atom_data.clone();
+        }
+        let mut out = Vec::new();
+        for c in &self.children {
+            out.extend_from_slice(&((8 + c.payload.len()) as u32).to_be_bytes());
+            out.extend_from_slice(&c.fourcc);
+            out.extend_from_slice(&c.payload);
+        }
+        if self.terminated {
+            out.extend_from_slice(&8u32.to_be_bytes());
+            out.extend_from_slice(&[0u8; 4]); // type 0x00000000
+        }
+        out
+    }
+
+    /// Serialise as a complete framed `wave` atom, suitable for a
+    /// muxer track's `extra_stsd_atoms`.
+    pub fn to_atom_bytes(&self) -> Vec<u8> {
+        let payload = self.to_payload_bytes();
+        let mut out = Vec::with_capacity(8 + payload.len());
+        out.extend_from_slice(&((8 + payload.len()) as u32).to_be_bytes());
+        out.extend_from_slice(b"wave");
+        out.extend_from_slice(&payload);
+        out
+    }
+}
+
+/// Parse a `wave` siDecompressionParam payload (QTFF 2012-08-14
+/// p. 185). Lenient by design: content that does not parse as
+/// `[size, type]` atoms — a truncated child, a size under 8, bytes
+/// left over — is surfaced verbatim on
+/// [`SiDecompressionParam::non_atom_data`] (the WAV/AVI-sourced
+/// `WAVEFORMATEX` case), never an error. A Terminator atom (type
+/// `0x00000000`) ends the child list.
+pub fn parse_wave(payload: &[u8]) -> SiDecompressionParam {
+    let mut children = Vec::new();
+    let mut terminated = false;
+    let mut p = 0usize;
+    while p < payload.len() {
+        if p + 8 > payload.len() {
+            // Trailing sub-header bytes: not atom-shaped.
+            return SiDecompressionParam {
+                non_atom_data: payload.to_vec(),
+                ..Default::default()
+            };
+        }
+        let size = u32::from_be_bytes([payload[p], payload[p + 1], payload[p + 2], payload[p + 3]])
+            as usize;
+        let mut fc = [0u8; 4];
+        fc.copy_from_slice(&payload[p + 4..p + 8]);
+        if fc == [0u8; 4] {
+            // Terminator (size always 8 per QTFF 2012-08-14 p. 185;
+            // the type-0 word is decisive). It marks the end of the
+            // sound description, so anything after it is ignored.
+            terminated = true;
+            break;
+        }
+        if size < 8 || p + size > payload.len() {
+            return SiDecompressionParam {
+                non_atom_data: payload.to_vec(),
+                ..Default::default()
+            };
+        }
+        children.push(WaveChild {
+            fourcc: fc,
+            payload: payload[p + 8..p + size].to_vec(),
+        });
+        p += size;
+    }
+    SiDecompressionParam {
+        children,
+        terminated,
+        non_atom_data: Vec::new(),
+    }
+}
+
+/// Parse an `esds` MPEG-4 Elementary Stream Descriptor atom payload
+/// (QTFF 2012-08-14 p. 186): a 32-bit version field that must be
+/// zero, then the ISO/IEC 14496 elementary stream descriptor bytes
+/// (returned verbatim — the descriptor's interpretation belongs to
+/// the codec layer).
+pub fn parse_esds(payload: &[u8]) -> Result<Vec<u8>> {
+    if payload.len() < 4 {
+        return Err(Error::invalid("MOV: esds body < 4 bytes"));
+    }
+    if payload[0..4] != [0, 0, 0, 0] {
+        return Err(Error::invalid("MOV: esds version != 0"));
+    }
+    Ok(payload[4..].to_vec())
+}
+
+/// Serialise a framed `esds` atom from raw elementary-stream-
+/// descriptor bytes — the exact inverse of [`parse_esds`], suitable
+/// for a muxer track's `extra_stsd_atoms`.
+pub fn build_esds_atom(descriptor: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12 + descriptor.len());
+    out.extend_from_slice(&((12 + descriptor.len()) as u32).to_be_bytes());
+    out.extend_from_slice(b"esds");
+    out.extend_from_slice(&[0u8; 4]); // 32-bit version = 0
+    out.extend_from_slice(descriptor);
+    out
+}
+
+/// Parse a `flap` siSlopeAndIntercept atom payload (QTFF 2012-08-14
+/// p. 184): the four big-endian `Float64` fields of a
+/// `SoundSlopeAndInterceptRecord`.
+pub fn parse_flap(payload: &[u8]) -> Result<SoundSlopeAndIntercept> {
+    if payload.len() < 32 {
+        return Err(Error::invalid("MOV: flap body < 32 bytes"));
+    }
+    let f = |o: usize| {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&payload[o..o + 8]);
+        f64::from_be_bytes(b)
+    };
+    Ok(SoundSlopeAndIntercept {
+        slope: f(0),
+        intercept: f(8),
+        min_clip: f(16),
+        max_clip: f(24),
+    })
+}
+
 /// ISO BMFF `ChannelLayout` box (`chnl`, ISO/IEC 14496-12:2015
 /// §12.2.4) — documents the assignment of channels (and/or audio
 /// objects) in the stream. Carried inside an audio sample entry;
@@ -485,6 +723,27 @@ pub struct SampleDescription {
     /// fields (the version-0 positions hold the fixed `always*`
     /// back-compatibility values on wire).
     pub sound_v2: Option<SoundV2>,
+
+    // ─────── Round-407 sound sample description extension atoms ───────
+    /// `wave` — siDecompressionParam (QTFF 2012-08-14 p. 185):
+    /// out-of-band decompressor configuration, required for `mp4a`
+    /// (whose `wave` carries `frma` / `esds` / Terminator children).
+    /// `None` when the audio entry has no `wave` extension.
+    pub si_decompression_param: Option<SiDecompressionParam>,
+    /// `esds` — MPEG-4 Elementary Stream Descriptor carried
+    /// *directly* in the sound description's extension area (QTFF
+    /// 2012-08-14 p. 186). The raw ISO/IEC 14496 descriptor bytes
+    /// after the atom's version field; an `esds` nested inside
+    /// `wave` surfaces via [`SiDecompressionParam::esds`] instead.
+    pub esds: Option<Vec<u8>>,
+    /// `flap` — deprecated siSlopeAndIntercept decompressor
+    /// parameters (QTFF 2012-08-14 p. 184), surfaced for legacy
+    /// content only.
+    pub slope_and_intercept: Option<SoundSlopeAndIntercept>,
+    /// `true` when the sound description's extension area ends with
+    /// a Terminator atom (type `0x00000000`, QTFF 2012-08-14
+    /// p. 185).
+    pub extension_terminator: bool,
 
     // ─────── Round-394 ISO audio sample entry v1 ───────
     /// `true` when this audio entry is an ISO BMFF
@@ -1444,9 +1703,13 @@ fn scan_video_extensions(entry: &mut SampleDescription) -> Result<()> {
     })
 }
 
-/// Scan the `extra` blob of an audio sample description for `chan`
-/// (and only `chan` in round 2 — codec-specific extensions such as
-/// `wave` / `esds` stay opaque for downstream codec crates).
+/// Scan the `extra` blob of an audio sample description for the
+/// typed extension atoms: the Apple `chan` channel layout, the ISO
+/// `srat` / `chnl` boxes, and the QTFF 2012-08-14 sound-description
+/// extensions — `wave` (siDecompressionParam), a directly-carried
+/// `esds`, the deprecated `flap` (siSlopeAndIntercept), and the
+/// Terminator atom. The elementary-stream-descriptor *contents* stay
+/// opaque for downstream codec crates.
 fn scan_audio_extensions(entry: &mut SampleDescription) -> Result<()> {
     let buf = entry.extra.clone();
     let channel_count = entry.channels;
@@ -1460,6 +1723,21 @@ fn scan_audio_extensions(entry: &mut SampleDescription) -> Result<()> {
             }
             b"chnl" => {
                 entry.chnl = Some(parse_chnl(payload, channel_count)?);
+            }
+            b"wave" => {
+                entry.si_decompression_param = Some(parse_wave(payload));
+            }
+            b"esds" => {
+                entry.esds = Some(parse_esds(payload)?);
+            }
+            b"flap" => {
+                entry.slope_and_intercept = Some(parse_flap(payload)?);
+            }
+            b"\x00\x00\x00\x00" => {
+                // Terminator atom (QTFF 2012-08-14 p. 185): type is
+                // the 32-bit value 0, marking the end of the sound
+                // description's extensions.
+                entry.extension_terminator = true;
             }
             _ => {}
         }
@@ -2055,6 +2333,156 @@ mod tests {
         assert_eq!(v[0].sound_v2, None);
         assert_eq!(v[0].sound_v1, None);
         assert!(!v[0].is_vbr());
+    }
+
+    // ─────────── sound-description extension atoms (r407) ───────────
+
+    /// A `wave` payload in the `mp4a` shape: frma + esds + Terminator
+    /// (QTFF 2012-08-14 pp. 185–188).
+    fn mp4a_wave_payload(descriptor: &[u8]) -> Vec<u8> {
+        let mut w = Vec::new();
+        w.extend_from_slice(&framed(b"frma", b"mp4a"));
+        let mut esds_body = vec![0u8; 4]; // 32-bit version 0
+        esds_body.extend_from_slice(descriptor);
+        w.extend_from_slice(&framed(b"esds", &esds_body));
+        w.extend_from_slice(&8u32.to_be_bytes());
+        w.extend_from_slice(&[0u8; 4]); // Terminator
+        w
+    }
+
+    #[test]
+    fn wave_extension_surfaces_typed_children() {
+        // QTFF v1 mp4a entry whose extension area carries the p. 188
+        // assembly: wave { frma, esds, Terminator }.
+        let descriptor = [0x03, 0x19, 0x00, 0x01, 0x00];
+        let wave = framed(b"wave", &mp4a_wave_payload(&descriptor));
+        let mut p = audio_stsd(1, -2, Some([1024, 0, 0, 2]));
+        // Grow the single entry in-place: patch stsd entry size.
+        let entry_size = u32::from_be_bytes([p[8], p[9], p[10], p[11]]) + wave.len() as u32;
+        p[8..12].copy_from_slice(&entry_size.to_be_bytes());
+        p.extend_from_slice(&wave);
+        let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+        let w = v[0].si_decompression_param.as_ref().expect("wave surfaced");
+        assert_eq!(w.children.len(), 2);
+        assert_eq!(w.format(), Some(*b"mp4a"));
+        assert_eq!(w.esds(), Some(&descriptor[..]));
+        assert!(w.terminated);
+        assert!(w.non_atom_data.is_empty());
+        assert_eq!(w.child(b"frma"), Some(&b"mp4a"[..]));
+        assert_eq!(w.child(b"none"), None);
+        // The direct esds slot stays empty — the descriptor is nested.
+        assert_eq!(v[0].esds, None);
+    }
+
+    #[test]
+    fn wave_round_trips_through_serialisers() {
+        let w = SiDecompressionParam {
+            children: vec![
+                WaveChild::format(*b"mp4a"),
+                WaveChild::new(*b"mp4a", vec![0u8; 12]),
+                WaveChild::elementary_stream_descriptor(&[0x03, 0x01, 0x02]),
+            ],
+            terminated: true,
+            non_atom_data: Vec::new(),
+        };
+        assert_eq!(parse_wave(&w.to_payload_bytes()), w);
+        // The framed form starts [size]['wave'].
+        let atom = w.to_atom_bytes();
+        assert_eq!(&atom[4..8], b"wave");
+        assert_eq!(
+            u32::from_be_bytes([atom[0], atom[1], atom[2], atom[3]]) as usize,
+            atom.len()
+        );
+        assert_eq!(parse_wave(&atom[8..]), w);
+        // Un-terminated children also round-trip.
+        let open = SiDecompressionParam {
+            terminated: false,
+            ..w.clone()
+        };
+        assert_eq!(parse_wave(&open.to_payload_bytes()), open);
+    }
+
+    #[test]
+    fn wave_non_atom_payload_kept_verbatim() {
+        // A little-endian WAVEFORMATEX-style blob is not atom-shaped:
+        // the first BE u32 is either huge or under 8. Both fall back
+        // to the verbatim non_atom_data surface (and round-trip).
+        let le_blob: &[u8] = &[
+            0x02, 0x00, // wFormatTag = 2 (LE)
+            0x02, 0x00, // nChannels = 2 (LE)
+            0x44, 0xAC, 0x00, 0x00, // nSamplesPerSec = 44100 (LE)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let w = parse_wave(le_blob);
+        assert!(w.children.is_empty());
+        assert!(!w.terminated);
+        assert_eq!(w.non_atom_data, le_blob);
+        assert_eq!(w.to_payload_bytes(), le_blob);
+        // Truncated child header / undersized child size: same path.
+        assert_eq!(parse_wave(&[0, 0, 0, 9]).non_atom_data, [0, 0, 0, 9]);
+        let undersized = framed(b"frma", b"mp4a")
+            .into_iter()
+            .take(9)
+            .collect::<Vec<_>>();
+        assert_eq!(parse_wave(&undersized).non_atom_data, undersized);
+        let bad_size = [0u8, 0, 0, 4, b'f', b'r', b'm', b'a'];
+        assert_eq!(parse_wave(&bad_size).non_atom_data, bad_size);
+        // Empty payload: no children, no data, not terminated.
+        assert_eq!(parse_wave(&[]), SiDecompressionParam::default());
+    }
+
+    #[test]
+    fn direct_esds_and_terminator_surface() {
+        // A v2 lpcm-style compressed entry can carry esds directly in
+        // its extension area, closed by a Terminator atom.
+        let descriptor = [0x03, 0x02, 0xAA, 0xBB];
+        let mut trailing = build_esds_atom(&descriptor);
+        trailing.extend_from_slice(&8u32.to_be_bytes());
+        trailing.extend_from_slice(&[0u8; 4]);
+        let p = audio_v2_stsd(b"mp4a", 48_000.0, 2, 0, 0, 0, 1024, 72, &trailing);
+        let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+        assert_eq!(v[0].esds.as_deref(), Some(&descriptor[..]));
+        assert!(v[0].extension_terminator);
+        assert_eq!(v[0].si_decompression_param, None);
+        // parse_esds validation: short body / nonzero version error.
+        assert!(parse_esds(&[0, 0, 0]).is_err());
+        assert!(parse_esds(&[0, 0, 0, 1, 0x03]).is_err());
+        assert_eq!(parse_esds(&[0, 0, 0, 0]).unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn flap_slope_and_intercept_parses() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1.5f64.to_be_bytes());
+        body.extend_from_slice(&(-0.25f64).to_be_bytes());
+        body.extend_from_slice(&(-1.0f64).to_be_bytes());
+        body.extend_from_slice(&1.0f64.to_be_bytes());
+        let rec = parse_flap(&body).unwrap();
+        assert_eq!(
+            rec,
+            SoundSlopeAndIntercept {
+                slope: 1.5,
+                intercept: -0.25,
+                min_clip: -1.0,
+                max_clip: 1.0,
+            }
+        );
+        // Truncated record errors.
+        assert!(parse_flap(&body[..31]).is_err());
+        // And it surfaces from an audio entry's extension area.
+        let p = audio_v2_stsd(
+            b"lpcm",
+            44_100.0,
+            2,
+            16,
+            0,
+            4,
+            1,
+            72,
+            &framed(b"flap", &body),
+        );
+        let v = parse_stsd(&p, &soun_hdlr()).unwrap();
+        assert_eq!(v[0].slope_and_intercept, Some(rec));
     }
 
     // ─────────────── tref reference-type classification ───────────────

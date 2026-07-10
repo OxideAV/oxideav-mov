@@ -116,8 +116,16 @@ Decoding stays in codec crates: this crate calls
   (defined ISO/IEC 23001-8 configuration + omitted-channels map, or
   explicit per-channel speaker positions, plus object counts)
   surfaced typed. The Apple `chan`
-  channel layout is parsed; codec-private blobs (`wave` /
-  `esds` / `frma`) stay opaque for the codec crates.
+  channel layout is parsed, and the QTFF 2012-08-14 sound-description
+  extension atoms decode typed: `wave` siDecompressionParam
+  (required for `mp4a`; `frma` / `esds` / Terminator children with
+  `format()` / `esds()` accessors, non-atom `WAVEFORMATEX`-style
+  payloads kept verbatim), a directly-carried `esds`, the deprecated
+  `flap` siSlopeAndIntercept record, and the `0x00000000` Terminator
+  atom — write-side inverses (`SiDecompressionParam::to_atom_bytes`,
+  `WaveChild` builders, `build_esds_atom`) plug into a muxer track's
+  `extra_stsd_atoms`. Elementary-stream-descriptor *contents* stay
+  opaque for the codec crates.
 - Timed-metadata sample entries (ISO/IEC 14496-12 §12.3.3): a `meta`-
   handler track's `stsd` entry (`Hdlr::is_metadata()`) is decoded into a
   typed `MetadataSampleEntry` on `SampleDescription::metadata` — `metx`
