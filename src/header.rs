@@ -11,8 +11,8 @@
 //! ISO BMFF (ISO/IEC 14496-12) inherits these atoms with an additional
 //! version 1 layout where the 32-bit time fields become 64-bit. QTFF
 //! itself only defines version 0; we accept version 1 for cross-
-//! compatibility because real-world `.mov` writers (notably ffmpeg
-//! when emitting `ftyp` `qt  ` brand) frequently use v1 fields.
+//! compatibility because widely-deployed real-world `.mov` writers
+//! (emitting the `ftyp` `qt  ` brand) frequently use v1 fields.
 
 #[cfg(feature = "registry")]
 use oxideav_core::{Error, Result};

@@ -547,8 +547,8 @@ impl SampleTable {
         // `..=chunk_count()` for the last row) at `samples_per_chunk`
         // each. Sum chunks-before-target across the rows. The row
         // count is bounded by the on-disk `entry_count`, so an O(n)
-        // scan stays cheap in the wild (ffmpeg-encoded `.mov`s
-        // typically emit a single row).
+        // scan stays cheap in the wild (real-world `.mov`s
+        // typically carry a single row).
         let target = chunk_1based;
         let mut acc: u64 = 0;
         for (i, row) in self.stsc.iter().enumerate() {

@@ -909,7 +909,7 @@ impl MovDemuxer {
         #[cfg(feature = "registry")]
         let streams = build_streams(&tracks, resolver);
 
-        // Tfra-driven keyframe back-patch: ffmpeg's fragmented writer
+        // Tfra-driven keyframe back-patch: a common fragmented writer
         // emits a `tfra` entry per per-moof-leading sample but
         // *omits* `first_sample_flags` on alternate moofs, leaving
         // those samples carrying the per-fragment "non-sync" default.
@@ -4129,9 +4129,8 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
                 // §8.9.2.3 — at most one `sbgp` per
                 // `(grouping_type, grouping_type_parameter)` pair
                 // inside a Sample Table Box. Drop the duplicate
-                // silently rather than erroring; ffmpeg-authored
-                // sgpd-without-sbgp + secondary sbgp shapes appear
-                // in the wild.
+                // silently rather than erroring; sgpd-without-sbgp +
+                // secondary sbgp shapes appear in the wild.
                 if !table.sbgp.iter().any(|s| {
                     s.grouping_type == sbgp.grouping_type
                         && s.grouping_type_parameter == sbgp.grouping_type_parameter
