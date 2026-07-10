@@ -129,8 +129,8 @@ pub use metadata_sample::{
     UriMetadataSampleEntry, XmlMetadataSampleEntry, XmlSubtitleSampleEntry,
 };
 pub use muxer::{
-    AudioEntryV1, DataReferenceWrite, FragmentationMode, MovMetaItem, MovMetadata, MovMuxer,
-    MuxEdit, MuxSample, MuxTrackKind, SampleAuxStream, SampleGroupBoxForm,
+    AudioEntryV1, AudioEntryV2, DataReferenceWrite, FragmentationMode, MovMetaItem, MovMetadata,
+    MovMuxer, MuxEdit, MuxSample, MuxTrackKind, SampleAuxStream, SampleGroupBoxForm,
     SampleGroupDescriptionWrite, SampleToGroupWrite, TrackReference, VisualExtensions,
     MDHD_LANGUAGE_UND, META_NAMESPACE_MDTA, META_TYPE_BE_SIGNED_INT, META_TYPE_BE_UNSIGNED_INT,
     META_TYPE_RAW, META_TYPE_UTF8, UTF8_INTL_TEXT_FLAG,

@@ -68,7 +68,7 @@ use crate::metadata_sample::{MetadataSampleEntry, SimpleTextSampleEntry, Subtitl
 use crate::sample_table::{SdtpEntry, StshEntry, SubSampleInfo};
 use crate::text_sample::TextSampleDescription;
 use crate::timecode::Tmcd;
-use crate::track::{ChannelLayout, ChannelStructure, SoundV1};
+use crate::track::{ChannelLayout, ChannelStructure, LpcmFlags, SoundV1};
 use crate::track_group::TrackGroupTypeEntry;
 use crate::track_load::Load;
 use crate::track_selection::TrackSelection;
@@ -404,6 +404,32 @@ pub struct AudioEntryV1 {
     pub channel_layout: Option<ChannelLayout>,
 }
 
+/// Write-side configuration for a QTFF **Sound Sample Description
+/// version 2** (QTFF 2012-08-14 pp. 181–182), set via
+/// [`MovMuxer::set_sound_description_v2`]. The muxer derives the
+/// remaining wire fields: the `always*` back-compatibility constants,
+/// `sizeOfStructOnly` = 72 (extensions start right after the fixed
+/// struct), and `numAudioChannels` from the track's channel count.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AudioEntryV2 {
+    /// Audio frames per second (`audioSampleRate`, Float64) — use
+    /// this form when the rate exceeds the 16.16 field's 65535 Hz
+    /// cap or is not an integer. Must be finite and positive.
+    pub audio_sample_rate: f64,
+    /// Bits per channel, only if constant and only for uncompressed
+    /// audio; `0` otherwise (`constBitsPerChannel`).
+    pub const_bits_per_channel: u32,
+    /// LPCM flag values (`formatSpecificFlags`) — see
+    /// [`LpcmFlags`](crate::LpcmFlags).
+    pub format_specific_flags: LpcmFlags,
+    /// Bytes per audio packet, only if constant; else `0`
+    /// (`constBytesPerAudioPacket`).
+    pub const_bytes_per_audio_packet: u32,
+    /// LPCM frames per audio packet, only if constant; else `0`
+    /// (`constLPCMFramesPerAudioPacket`).
+    pub const_lpcm_frames_per_audio_packet: u32,
+}
+
 /// Which audio sample-description layout a track's `stsd` entry uses.
 #[derive(Clone, Debug, Default)]
 enum AudioDescriptionWrite {
@@ -414,6 +440,11 @@ enum AudioDescriptionWrite {
     /// 32-bit fixed-compression-ratio fields; `vbr` selects the
     /// p. 102 "third variant" (Compression ID `-2`).
     QtffV1 { fields: SoundV1, vbr: bool },
+    /// QTFF 2012-08-14 pp. 181–182 `SoundDescriptionV2`: version 2,
+    /// the fixed `always*` constants in the version-0 positions,
+    /// Float64 sample rate and LPCM descriptors appended (56-byte
+    /// fixed body).
+    QtffV2(AudioEntryV2),
     /// ISO/IEC 14496-12:2015 §12.2.3 `AudioSampleEntryV1`
     /// (`entry_version` = 1 inside a version-1 `stsd`, optional
     /// `srat` / `chnl` boxes).
@@ -1634,8 +1665,55 @@ impl MovMuxer {
                 "MOV: track already uses an ISO AudioSampleEntryV1; QTFF v1 is exclusive",
             ));
         }
+        if matches!(t.audio_description, AudioDescriptionWrite::QtffV2(_)) {
+            return Err(Error::invalid(
+                "MOV: track already uses a QTFF SoundDescriptionV2; v1 is exclusive",
+            ));
+        }
         t.audio_description = AudioDescriptionWrite::QtffV1 { fields, vbr };
         Ok(())
+    }
+
+    /// Write this audio track's `stsd` entry as a QTFF **Sound Sample
+    /// Description version 2** (QTFF 2012-08-14 pp. 181–182): version
+    /// 2, the fixed back-compatibility constants in the version-0
+    /// field positions (`always3` = 3, `always16` = 16,
+    /// `alwaysMinus2` = -2, `always0` = 0, `always65536` = 65536,
+    /// `always7F000000` = 0x7F000000), then `sizeOfStructOnly` = 72,
+    /// the Float64 `audioSampleRate`, `numAudioChannels` taken from
+    /// the track's channel count, and the [`AudioEntryV2`] LPCM
+    /// descriptors. The QuickTime-7 high-resolution form — use it for
+    /// `lpcm` uncompressed audio, rates past the 16.16 field's
+    /// 65535 Hz cap, non-integer rates, or channel layouts above two
+    /// channels per track (the `chan` extension's v2 requirement,
+    /// p. 186). Codec-config `extra_stsd_atoms` follow at byte 72
+    /// where the read-side extension scan resumes.
+    ///
+    /// Errors on an unknown `track_id`, a non-audio track, a
+    /// non-finite / non-positive `audio_sample_rate`, or a track
+    /// already configured as a QTFF `SoundDescriptionV1` / ISO
+    /// `AudioSampleEntryV1` (the layouts are mutually exclusive).
+    /// Round-trips onto [`crate::SampleDescription`]'s `sound_v2` /
+    /// `audio_version` / `audio_sample_rate_hz()`.
+    pub fn set_sound_description_v2(&mut self, track_id: u32, entry: AudioEntryV2) -> Result<()> {
+        if !(entry.audio_sample_rate.is_finite() && entry.audio_sample_rate > 0.0) {
+            return Err(Error::invalid(
+                "MOV: SoundDescriptionV2 audioSampleRate must be finite and positive",
+            ));
+        }
+        let t = self.audio_track_mut(track_id)?;
+        match t.audio_description {
+            AudioDescriptionWrite::QtffV1 { .. } => Err(Error::invalid(
+                "MOV: track already uses a QTFF SoundDescriptionV1; v2 is exclusive",
+            )),
+            AudioDescriptionWrite::IsoV1(_) => Err(Error::invalid(
+                "MOV: track already uses an ISO AudioSampleEntryV1; QTFF v2 is exclusive",
+            )),
+            AudioDescriptionWrite::V0 | AudioDescriptionWrite::QtffV2(_) => {
+                t.audio_description = AudioDescriptionWrite::QtffV2(entry);
+                Ok(())
+            }
+        }
     }
 
     /// Write this audio track's `stsd` entry as an ISO BMFF
@@ -1661,6 +1739,11 @@ impl MovMuxer {
             if matches!(t.audio_description, AudioDescriptionWrite::QtffV1 { .. }) {
                 return Err(Error::invalid(
                     "MOV: track already uses a QTFF SoundDescriptionV1; ISO v1 is exclusive",
+                ));
+            }
+            if matches!(t.audio_description, AudioDescriptionWrite::QtffV2(_)) {
+                return Err(Error::invalid(
+                    "MOV: track already uses a QTFF SoundDescriptionV2; ISO v1 is exclusive",
                 ));
             }
             match t.kind {
@@ -4021,9 +4104,11 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
             // AudioSampleEntryV1 (ISO/IEC 14496-12:2015 §12.2.3.2 —
             // entry_version 1 keeps the version-0 shape); 36 bytes for
             // the QTFF SoundDescriptionV1 (p. 101 — four fixed-ratio
-            // longs appended).
+            // longs appended); 56 bytes for the QTFF 2012-08-14
+            // SoundDescriptionV2 (pp. 181–182).
             let body_len = match &t.audio_description {
                 AudioDescriptionWrite::QtffV1 { .. } => 36,
+                AudioDescriptionWrite::QtffV2(_) => 56,
                 _ => 20,
             };
             let mut e = Vec::with_capacity(16 + body_len + t.extra_stsd_atoms.len());
@@ -4045,19 +4130,50 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
                     body[28..32].copy_from_slice(&fields.bytes_per_frame.to_be_bytes());
                     body[32..36].copy_from_slice(&fields.bytes_per_sample.to_be_bytes());
                 }
+                AudioDescriptionWrite::QtffV2(v2) => {
+                    // QTFF 2012-08-14 pp. 181–182: version 2, the
+                    // fixed always* back-compatibility constants in
+                    // the version-0 positions (an old reader sees
+                    // ch=3 / bits=16 / compression=-2 / packet=0 /
+                    // 16.16 rate 1.0), then the v2 fields. The
+                    // common channels/bits/rate writes below are
+                    // skipped for this layout.
+                    body[0..2].copy_from_slice(&2u16.to_be_bytes());
+                    // always3 / always16 / alwaysMinus2, then
+                    // always0 @ 14..16 left zero and always65536.
+                    body[8..10].copy_from_slice(&3u16.to_be_bytes());
+                    body[10..12].copy_from_slice(&16u16.to_be_bytes());
+                    body[12..14].copy_from_slice(&(-2i16).to_be_bytes());
+                    body[16..20].copy_from_slice(&65536u32.to_be_bytes());
+                    // sizeOfStructOnly: 16-byte universal header +
+                    // 56-byte fixed struct — extensions follow
+                    // immediately.
+                    body[20..24].copy_from_slice(&72u32.to_be_bytes());
+                    body[24..32].copy_from_slice(&v2.audio_sample_rate.to_be_bytes());
+                    body[32..36].copy_from_slice(&(*channels as u32).to_be_bytes());
+                    body[36..40].copy_from_slice(&0x7F00_0000u32.to_be_bytes());
+                    body[40..44].copy_from_slice(&v2.const_bits_per_channel.to_be_bytes());
+                    body[44..48].copy_from_slice(&v2.format_specific_flags.0.to_be_bytes());
+                    body[48..52].copy_from_slice(&v2.const_bytes_per_audio_packet.to_be_bytes());
+                    body[52..56]
+                        .copy_from_slice(&v2.const_lpcm_frames_per_audio_packet.to_be_bytes());
+                }
                 AudioDescriptionWrite::IsoV1(_) => {
                     // entry_version @ 0..2 = 1 (§12.2.3.2); the next
                     // six bytes are reserved zero.
                     body[0..2].copy_from_slice(&1u16.to_be_bytes());
                 }
             }
-            body[8..10].copy_from_slice(&channels.to_be_bytes());
-            body[10..12].copy_from_slice(&bits_per_sample.to_be_bytes());
-            // packet_size @ 14..16 = 0.
-            // sample_rate @ 16..20 — 16.16 fixed; QTFF caps the integer
-            // portion at u16, so cap the rate to 65535 Hz when needed.
-            let sr = (*sample_rate).min(0xFFFF);
-            body[16..20].copy_from_slice(&(sr << 16).to_be_bytes());
+            if !matches!(&t.audio_description, AudioDescriptionWrite::QtffV2(_)) {
+                body[8..10].copy_from_slice(&channels.to_be_bytes());
+                body[10..12].copy_from_slice(&bits_per_sample.to_be_bytes());
+                // packet_size @ 14..16 = 0.
+                // sample_rate @ 16..20 — 16.16 fixed; QTFF caps the
+                // integer portion at u16, so cap the rate to 65535 Hz
+                // when needed.
+                let sr = (*sample_rate).min(0xFFFF);
+                body[16..20].copy_from_slice(&(sr << 16).to_be_bytes());
+            }
             e.extend_from_slice(&body);
             e.extend_from_slice(&t.extra_stsd_atoms);
             if let AudioDescriptionWrite::IsoV1(v1) = &t.audio_description {

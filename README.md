@@ -460,13 +460,20 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
 - `set_sound_description_v1(track_id, SoundV1, vbr)` writes a QTFF
   `SoundDescriptionV1` (p. 101) audio entry — version 1 with the four
   fixed-compression-ratio longs, `vbr` selecting the p. 102 VBR "third
-  variant" (Compression ID `-2`). `set_audio_entry_v1(track_id,
+  variant" (Compression ID `-2`). `set_sound_description_v2(track_id,
+  AudioEntryV2)` writes the QuickTime-7 high-resolution
+  `SoundDescriptionV2` (QTFF 2012-08-14 pp. 181–182): the `always*`
+  back-compatibility constants, `sizeOfStructOnly` = 72, Float64
+  `audioSampleRate` (rates past 65535 Hz and non-integer rates
+  survive bit-exact), channel count widened to 32 bits, and the
+  `LpcmFlags` / const-descriptor words — use it for `lpcm` and >2-
+  channel layouts. `set_audio_entry_v1(track_id,
   AudioEntryV1)` instead writes an ISO BMFF `AudioSampleEntryV1`
   (§12.2.3.2): `entry_version` 1, the `stsd` auto-promoted to FullBox
   version 1, plus optional `srat` / `chnl` boxes
-  (`ChannelLayout::to_body_bytes` inverting `parse_chnl`). Mutually
-  exclusive, audio-only, explicit channel layouts validated against
-  the channel count; both honoured on the fragmented path.
+  (`ChannelLayout::to_body_bytes` inverting `parse_chnl`). All three
+  mutually exclusive, audio-only, explicit channel layouts validated
+  against the channel count; all honoured on the fragmented path.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.
