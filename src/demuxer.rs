@@ -4229,10 +4229,16 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
 // public surface of `MovDemuxer::open_with` stays unchanged across
 // both builds — the standalone resolver simply returns nothing.
 
+// internal — feature-parity alias so `open_with` compiles identically
+// across registry/standalone builds; not part of the stable API
 #[cfg(feature = "registry")]
+#[doc(hidden)]
 pub use oxideav_core::CodecResolver as CodecResolverShim;
 
+// internal — standalone-build stand-in for the above alias; not part
+// of the stable API
 #[cfg(not(feature = "registry"))]
+#[doc(hidden)]
 pub trait CodecResolverShim: Sync {}
 #[cfg(not(feature = "registry"))]
 impl<T: Sync> CodecResolverShim for T {}
