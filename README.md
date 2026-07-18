@@ -25,9 +25,11 @@ Decoding stays in codec crates: this crate calls
 - `ftyp` / `styp` brand detection (`qt  `, plus the DASH / CMAF
   segment-brand predicates); `pdin`, `sidx`, `ssix`, `prft`, `pnot`,
   `ctab` at file scope; user-type (`uuid`) vendor-extension capture.
-- `moov` walk: `mvhd`, per-track `tkhd` / `mdia` (`mdhd`, `hdlr`) /
-  `minf/stbl`, plus the QuickTime `clip` / `crgn`, `matt` / `kmat`,
-  `load`, `imap`, and Color Table atoms.
+- `moov` walk: `mvhd` (incl. the movie display matrix with a
+  `rotation()` classifier and the QuickTime preview / poster /
+  selection / current time fields), per-track `tkhd` / `mdia`
+  (`mdhd`, `hdlr`) / `minf/stbl`, plus the QuickTime `clip` / `crgn`,
+  `matt` / `kmat`, `load`, `imap`, and Color Table atoms.
 - Sample tables: `stsd`, `stts`, `stsc`, `stsz` / `stz2` (compact),
   `stco` / `co64`, `stss`, `stsh` (shadow sync), `sdtp`, `stdp`,
   `padb`, `subs` (sub-samples), `saiz` / `saio` (sample-aux), and
@@ -489,6 +491,12 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   (`ChannelLayout::to_body_bytes` inverting `parse_chnl`). All three
   mutually exclusive, audio-only, explicit channel layouts validated
   against the channel count; all honoured on the fragmented path.
+- `set_movie_matrix(Some([i32; 9]))` overrides the `mvhd` movie
+  display matrix (identity by default), and `set_movie_preview` /
+  `set_movie_poster_time` / `set_movie_selection` /
+  `set_movie_current_time` fill the six QuickTime `mvhd` time fields
+  (QTFF pp. 33–34). Round-trip onto `Mvhd`; honoured on the
+  fragmented init `moov` too.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.

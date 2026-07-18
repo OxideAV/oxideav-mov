@@ -1247,6 +1247,19 @@ pub struct MovMuxer {
     /// both are present). Empty ⇒ no `meta` box. Honoured on the
     /// non-fragmented path; the fragmented init `moov` ignores it.
     apple_metadata: Vec<MovMetaItem>,
+    /// Movie display matrix written into `mvhd` (QTFF p. 33). `None`
+    /// ⇒ identity. Set via [`MovMuxer::set_movie_matrix`].
+    movie_matrix: Option<[i32; 9]>,
+    /// The six QuickTime `mvhd` preview/poster/selection/current time
+    /// fields (QTFF pp. 33–34), in declaration order: preview_time,
+    /// preview_duration, poster_time, selection_time,
+    /// selection_duration, current_time. All zero by default (the
+    /// ISO BMFF `pre_defined` reading). Set via
+    /// [`MovMuxer::set_movie_preview`] /
+    /// [`MovMuxer::set_movie_poster_time`] /
+    /// [`MovMuxer::set_movie_selection`] /
+    /// [`MovMuxer::set_movie_current_time`].
+    movie_times: [u32; 6],
 }
 
 impl Default for MovMuxer {
@@ -1265,6 +1278,8 @@ impl MovMuxer {
             compress_movie_resource: false,
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
+            movie_matrix: None,
+            movie_times: [0; 6],
         }
     }
 
@@ -2545,6 +2560,46 @@ impl MovMuxer {
         self.metadata = items.to_vec();
     }
 
+    /// Override the movie display matrix written into `mvhd` (QTFF
+    /// p. 33 "Matrix structure"; layout `[a b u; c d v; tx ty w]` —
+    /// first 8 entries 16.16 fixed-point, trailing column 2.30).
+    /// `None` restores the default identity matrix. Round-trips onto
+    /// [`crate::Mvhd::matrix`] / [`crate::Mvhd::rotation`]. Applies
+    /// to the non-fragmented `moov` and the fragmented init `moov`.
+    pub fn set_movie_matrix(&mut self, matrix: Option<[i32; 9]>) {
+        self.movie_matrix = matrix;
+    }
+
+    /// Set the QuickTime movie-preview window (QTFF p. 33): the
+    /// movie-timescale tick the preview begins at and its duration.
+    /// Zeros (the default) mean "no preview" and match the ISO BMFF
+    /// `pre_defined` reading of the same bytes (§8.2.2). Round-trips
+    /// onto [`crate::Mvhd::preview_time`] / `preview_duration`.
+    pub fn set_movie_preview(&mut self, preview_time: u32, preview_duration: u32) {
+        self.movie_times[0] = preview_time;
+        self.movie_times[1] = preview_duration;
+    }
+
+    /// Set the movie poster frame's time value (QTFF p. 33).
+    /// Round-trips onto [`crate::Mvhd::poster_time`].
+    pub fn set_movie_poster_time(&mut self, poster_time: u32) {
+        self.movie_times[2] = poster_time;
+    }
+
+    /// Set the current-selection window (QTFF pp. 33–34): start time
+    /// value and duration in movie-timescale ticks. Round-trips onto
+    /// [`crate::Mvhd::selection_time`] / `selection_duration`.
+    pub fn set_movie_selection(&mut self, selection_time: u32, selection_duration: u32) {
+        self.movie_times[3] = selection_time;
+        self.movie_times[4] = selection_duration;
+    }
+
+    /// Set the current time position within the movie (QTFF p. 34).
+    /// Round-trips onto [`crate::Mvhd::current_time`].
+    pub fn set_movie_current_time(&mut self, current_time: u32) {
+        self.movie_times[5] = current_time;
+    }
+
     /// Attach track-level user-data metadata to a previously-added
     /// track, emitted as a `udta` that is the last child of the track's
     /// `trak` (QTFF pp. 36–38 / ISO/IEC 14496-12 §8.10.1).
@@ -3081,13 +3136,35 @@ fn build_mvhd(m: &MovMuxer) -> Vec<u8> {
     // volume @ 24..26 = 1.0
     p[24..26].copy_from_slice(&0x0100i16.to_be_bytes());
     // 10 bytes reserved @ 26..36 left zero.
-    // Identity 36-byte matrix @ 36..72 (a=1.0, d=1.0, w=1.0).
-    p[36..40].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // a
-    p[52..56].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // d
-    p[68..72].copy_from_slice(&0x4000_0000u32.to_be_bytes()); // w (2.30)
-                                                              // 24 bytes pre-defined @ 72..96 left zero (preview/poster/sel/cur).
+    // 36-byte movie display matrix @ 36..72 (QTFF p. 33) — the
+    // caller-supplied override or identity (a=1.0, d=1.0, w=1.0).
+    write_movie_matrix(&mut p[36..72], m.movie_matrix.as_ref());
+    // The six QuickTime preview/poster/selection/current time fields
+    // @ 72..96 (QTFF pp. 33–34; zeros = the ISO BMFF `pre_defined`
+    // reading).
+    for (i, v) in m.movie_times.iter().enumerate() {
+        p[72 + i * 4..76 + i * 4].copy_from_slice(&v.to_be_bytes());
+    }
     p[96..100].copy_from_slice(&((m.tracks.len() as u32) + 1).to_be_bytes());
     p
+}
+
+/// Serialise a movie display matrix into a 36-byte `mvhd` slot:
+/// the caller's override verbatim, or the identity matrix
+/// (a=1.0, d=1.0 in 16.16; w=1.0 in 2.30).
+fn write_movie_matrix(slot: &mut [u8], matrix: Option<&[i32; 9]>) {
+    match matrix {
+        Some(mx) => {
+            for (i, v) in mx.iter().enumerate() {
+                slot[i * 4..i * 4 + 4].copy_from_slice(&v.to_be_bytes());
+            }
+        }
+        None => {
+            slot[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // a
+            slot[16..20].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // d
+            slot[32..36].copy_from_slice(&0x4000_0000u32.to_be_bytes()); // w (2.30)
+        }
+    }
 }
 
 /// Total movie-scope duration: max over per-track movie-scope
@@ -4841,9 +4918,10 @@ fn build_init_mvhd(m: &MovMuxer) -> Vec<u8> {
     p[16..20].copy_from_slice(&0u32.to_be_bytes());
     p[20..24].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // rate=1.0
     p[24..26].copy_from_slice(&0x0100i16.to_be_bytes()); // volume=1.0
-    p[36..40].copy_from_slice(&0x0001_0000u32.to_be_bytes());
-    p[52..56].copy_from_slice(&0x0001_0000u32.to_be_bytes());
-    p[68..72].copy_from_slice(&0x4000_0000u32.to_be_bytes());
+    write_movie_matrix(&mut p[36..72], m.movie_matrix.as_ref());
+    for (i, v) in m.movie_times.iter().enumerate() {
+        p[72 + i * 4..76 + i * 4].copy_from_slice(&v.to_be_bytes());
+    }
     p[96..100].copy_from_slice(&((m.tracks.len() as u32) + 1).to_be_bytes());
     p
 }

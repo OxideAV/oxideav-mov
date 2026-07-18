@@ -289,7 +289,41 @@ pub struct Mvhd {
     pub rate: u32,
     /// 8.8 fixed-point preferred volume (1.0 = 0x0100).
     pub volume: i16,
+    /// Raw 9-element movie display matrix as stored on disk (QTFF
+    /// p. 33 "Matrix structure" — "how to map points from one
+    /// coordinate space into another"; see "Matrices", p. 199). Same
+    /// layout convention as [`Tkhd::matrix`]: `[a b u; c d v; tx ty
+    /// w]`, first 8 entries 16.16 fixed-point, trailing column 2.30
+    /// (normal display matrices carry `w = 1.0 = 0x4000_0000`).
+    pub matrix: [i32; 9],
+    /// QTFF p. 33: "The time value in the movie at which the preview
+    /// begins" (movie-timescale ticks). QuickTime-only; ISO BMFF
+    /// files carry zero here (§8.2.2 `pre_defined`).
+    pub preview_time: u32,
+    /// QTFF p. 33: "The duration of the movie preview in movie time
+    /// scale units."
+    pub preview_duration: u32,
+    /// QTFF p. 33: "The time value of the time of the movie poster."
+    pub poster_time: u32,
+    /// QTFF p. 33: "The time value for the start time of the current
+    /// selection."
+    pub selection_time: u32,
+    /// QTFF p. 34: "The duration of the current selection in movie
+    /// time scale units."
+    pub selection_duration: u32,
+    /// QTFF p. 34: "The time value for current time position within
+    /// the movie."
+    pub current_time: u32,
     pub next_track_id: u32,
+}
+
+impl Mvhd {
+    /// Classify the movie display [`Mvhd::matrix`] into the coarse
+    /// [`TrackRotation`] cases, exactly like [`Tkhd::rotation`] does
+    /// for the per-track matrix.
+    pub fn rotation(&self) -> TrackRotation {
+        rotation_from_matrix(&self.matrix)
+    }
 }
 
 /// Parse the payload of an `mvhd` atom.
@@ -337,11 +371,25 @@ pub fn parse_mvhd(payload: &[u8]) -> Result<Mvhd> {
     p += 2;
     // 10 bytes reserved
     p += 10;
-    // 36-byte matrix
-    p += 36;
-    // 24 bytes pre-defined (preview/poster/selection/current)
+    // 36-byte movie display matrix (QTFF p. 33), nine big-endian
+    // i32 entries in row order `[a b u; c d v; tx ty w]`.
+    need(payload, p, 36, "mvhd matrix")?;
+    let mut matrix = [0i32; 9];
+    for m in matrix.iter_mut() {
+        *m = read_u32(&payload[p..]) as i32;
+        p += 4;
+    }
+    // The six QuickTime preview/poster/selection/current time fields
+    // (QTFF pp. 33–34; ISO BMFF §8.2.2 calls the same 24 bytes
+    // `pre_defined` and zeroes them).
+    need(payload, p, 24 + 4, "mvhd preview/poster/selection fields")?;
+    let preview_time = read_u32(&payload[p..]);
+    let preview_duration = read_u32(&payload[p + 4..]);
+    let poster_time = read_u32(&payload[p + 8..]);
+    let selection_time = read_u32(&payload[p + 12..]);
+    let selection_duration = read_u32(&payload[p + 16..]);
+    let current_time = read_u32(&payload[p + 20..]);
     p += 24;
-    need(payload, p, 4, "mvhd next_track_id")?;
     let next_track_id = read_u32(&payload[p..]);
 
     Ok(Mvhd {
@@ -352,6 +400,13 @@ pub fn parse_mvhd(payload: &[u8]) -> Result<Mvhd> {
         duration,
         rate,
         volume,
+        matrix,
+        preview_time,
+        preview_duration,
+        poster_time,
+        selection_time,
+        selection_duration,
+        current_time,
         next_track_id,
     })
 }
@@ -424,19 +479,27 @@ impl Tkhd {
     /// against `±1.0` and zero. Translation, scale, and the 2.30
     /// trailing column are ignored.
     pub fn rotation(&self) -> TrackRotation {
-        const ONE: i32 = 0x0001_0000;
-        const NEG_ONE: i32 = -0x0001_0000;
-        let a = self.matrix[0];
-        let b = self.matrix[1];
-        let c = self.matrix[3];
-        let d = self.matrix[4];
-        match (a, b, c, d) {
-            (ONE, 0, 0, ONE) => TrackRotation::None,
-            (0, ONE, NEG_ONE, 0) => TrackRotation::Rotate90,
-            (NEG_ONE, 0, 0, NEG_ONE) => TrackRotation::Rotate180,
-            (0, NEG_ONE, ONE, 0) => TrackRotation::Rotate270,
-            _ => TrackRotation::Other,
-        }
+        rotation_from_matrix(&self.matrix)
+    }
+}
+
+/// Shared matrix→rotation classification used by [`Tkhd::rotation`]
+/// and [`Mvhd::rotation`]. Looks only at the four 16.16 entries
+/// `[a, b, c, d]` against `±1.0` and zero; translation, scale, and
+/// the 2.30 trailing column are ignored.
+pub(crate) fn rotation_from_matrix(matrix: &[i32; 9]) -> TrackRotation {
+    const ONE: i32 = 0x0001_0000;
+    const NEG_ONE: i32 = -0x0001_0000;
+    let a = matrix[0];
+    let b = matrix[1];
+    let c = matrix[3];
+    let d = matrix[4];
+    match (a, b, c, d) {
+        (ONE, 0, 0, ONE) => TrackRotation::None,
+        (0, ONE, NEG_ONE, 0) => TrackRotation::Rotate90,
+        (NEG_ONE, 0, 0, NEG_ONE) => TrackRotation::Rotate180,
+        (0, NEG_ONE, ONE, 0) => TrackRotation::Rotate270,
+        _ => TrackRotation::Other,
     }
 }
 
@@ -916,6 +979,53 @@ mod tests {
         assert_eq!(mvhd.duration, 1200);
         assert_eq!(mvhd.rate, 0x0001_0000);
         assert_eq!(mvhd.next_track_id, 2);
+        // Zeroed matrix + preview/poster/selection/current fields
+        // surface verbatim.
+        assert_eq!(mvhd.matrix, [0i32; 9]);
+        assert_eq!(mvhd.preview_time, 0);
+        assert_eq!(mvhd.rotation(), TrackRotation::Other);
+    }
+
+    #[test]
+    fn mvhd_matrix_and_quicktime_time_fields_round_trip() {
+        // v0 mvhd carrying a 90°-rotation matrix and all six
+        // QuickTime preview/poster/selection/current fields
+        // (QTFF pp. 33–34).
+        let mut p = vec![0u8; 100];
+        p[14..16].copy_from_slice(&600u16.to_be_bytes());
+        // Matrix @ 36..72: 90° cw — a=0, b=1.0, c=-1.0, d=0, w=1.0.
+        p[40..44].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // b
+        p[48..52].copy_from_slice(&(-0x0001_0000i32).to_be_bytes()); // c
+        p[68..72].copy_from_slice(&0x4000_0000u32.to_be_bytes()); // w
+                                                                  // preview_time @ 72, preview_duration @ 76, poster_time @ 80,
+                                                                  // selection_time @ 84, selection_duration @ 88, current @ 92.
+        p[72..76].copy_from_slice(&120u32.to_be_bytes());
+        p[76..80].copy_from_slice(&240u32.to_be_bytes());
+        p[80..84].copy_from_slice(&360u32.to_be_bytes());
+        p[84..88].copy_from_slice(&480u32.to_be_bytes());
+        p[88..92].copy_from_slice(&500u32.to_be_bytes());
+        p[92..96].copy_from_slice(&510u32.to_be_bytes());
+        p[99] = 2;
+        let mvhd = parse_mvhd(&p).unwrap();
+        assert_eq!(mvhd.matrix[1], 0x0001_0000);
+        assert_eq!(mvhd.matrix[3], -0x0001_0000);
+        assert_eq!(mvhd.matrix[8], 0x4000_0000);
+        assert_eq!(mvhd.rotation(), TrackRotation::Rotate90);
+        assert_eq!(mvhd.preview_time, 120);
+        assert_eq!(mvhd.preview_duration, 240);
+        assert_eq!(mvhd.poster_time, 360);
+        assert_eq!(mvhd.selection_time, 480);
+        assert_eq!(mvhd.selection_duration, 500);
+        assert_eq!(mvhd.current_time, 510);
+        assert_eq!(mvhd.next_track_id, 2);
+    }
+
+    #[test]
+    fn mvhd_truncated_matrix_errors() {
+        // 40 bytes: enough for the fixed fields + rate/volume but not
+        // the matrix.
+        let p = vec![0u8; 40];
+        assert!(parse_mvhd(&p).is_err());
     }
 
     #[test]
