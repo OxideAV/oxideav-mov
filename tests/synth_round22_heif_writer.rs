@@ -437,12 +437,26 @@ fn heif_info_container_accepts(bytes: &[u8]) -> Option<bool> {
         return Some(false);
     }
     // Look for any positive signal the file structure was understood.
+    // Newer heif-info versions stop before listing images when the
+    // synthetic payload carries no real HEVC decoder config ("Invalid
+    // input: No 'hvcC' box") — but by then the tool has already parsed
+    // `ftyp`/`meta` and printed the brand/MIME summary, which is the
+    // container-level acceptance we test for.
     let positive = combined.contains("image:")
         || combined.contains("ID:")
         || combined.contains("primary")
         || combined.contains("hvc1")
-        || combined.contains("grid");
-    Some(positive || out.status.success())
+        || combined.contains("grid")
+        || combined.contains("main brand:")
+        || combined.contains("MIME type:");
+    let ok = positive || out.status.success();
+    if !ok {
+        eprintln!(
+            "heif-info gave no positive signal (exit {:?}): {combined}",
+            out.status
+        );
+    }
+    Some(ok)
 }
 
 fn temp_heic_path(bytes: &[u8], tag: &str) -> Option<std::path::PathBuf> {
