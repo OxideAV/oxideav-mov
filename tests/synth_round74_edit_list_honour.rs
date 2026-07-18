@@ -253,3 +253,39 @@ fn dwell_edit_maps_only_the_held_media_time_to_segment_start() {
         EditSegmentKind::Dwell { media_time: 60 }
     ));
 }
+
+// ─────────── round 417: typed elst surface on demux ───────────
+
+#[test]
+fn elst_version_and_summary_accessors_populate_on_demux() {
+    // 100-tick empty edit + 120-tick media @ media_time 30.
+    let bytes = build_qt(
+        &[(100, -1, 0x0001_0000), (120, 30, 0x0001_0000)],
+        220,
+        0x07,
+        0,
+    );
+    let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+    let d = MovDemuxer::open(cur).expect("open with edits");
+    let t = &d.tracks[0];
+    // The on-wire elst was version 0, and its presence is recorded.
+    assert_eq!(t.elst_version, Some(0));
+    // Leading empty edit = 100 movie ticks of start delay.
+    assert_eq!(t.edit_start_delay(), 100);
+    // First presenting edit trims media before tick 30.
+    assert_eq!(t.edit_media_start(), Some(30));
+    // Total declared presentation span.
+    assert_eq!(t.edit_total_duration(), 220);
+}
+
+#[test]
+fn elst_version_none_when_no_edts_atom() {
+    let bytes = build_qt(&[], 120, 0x07, 0);
+    let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+    let d = MovDemuxer::open(cur).expect("open no-elst");
+    let t = &d.tracks[0];
+    assert_eq!(t.elst_version, None);
+    assert_eq!(t.edit_start_delay(), 0);
+    assert_eq!(t.edit_media_start(), None);
+    assert_eq!(t.edit_total_duration(), 0);
+}

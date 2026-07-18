@@ -886,6 +886,13 @@ pub struct Track {
     /// `edts/elst` edit list, when present. Empty list means "no
     /// edits" — the track plays its media start-to-end.
     pub edits: EditList,
+    /// On-wire FullBox version of the track's `elst` atom (0 or 1),
+    /// `None` when the track carries no `edts/elst` at all. Lets a
+    /// caller distinguish a *zero-entry* `elst` from a missing edit
+    /// atom (both leave [`Track::edits`] empty and mean "entire media
+    /// is used", QTFF p. 47) and preserve the author's v0/v1 choice
+    /// when re-muxing.
+    pub elst_version: Option<u8>,
     /// `tref` references this track makes to other tracks
     /// (chapter / timecode / etc).
     pub references: Vec<TrackRef>,
@@ -1421,6 +1428,35 @@ impl Track {
     ) -> Option<i64> {
         let segs = self.edit_segments(movie_timescale, movie_duration);
         movie_pts_to_media_pts(&segs, movie_pts, movie_timescale, self.mdhd.time_scale)
+    }
+
+    /// Movie-timescale presentation *delay* declared by the track's
+    /// leading empty edits (QTFF p. 47 — "An empty edit is used to
+    /// offset the start time of a track"). Zero when the track's
+    /// first edit already presents media, or when there is no edit
+    /// list at all. See [`crate::edit::initial_empty_duration`].
+    pub fn edit_start_delay(&self) -> u64 {
+        crate::edit::initial_empty_duration(&self.edits)
+    }
+
+    /// Media-timescale tick at which the edited presentation begins —
+    /// the `media_time` of the first non-empty edit (the head-trim /
+    /// encoder-priming-skip point). `None` when no edit presents any
+    /// media; `Some(0)` for a list that starts at the media origin.
+    /// Tracks *without* an edit list present their entire media
+    /// (QTFF p. 47), which callers may treat as a start of `0`. See
+    /// [`crate::edit::first_presented_media_time`].
+    pub fn edit_media_start(&self) -> Option<i64> {
+        crate::edit::first_presented_media_time(&self.edits)
+    }
+
+    /// Saturating sum of the edit list's `track_duration`s in
+    /// movie-timescale ticks — the presentation span the list
+    /// declares, which QTFF p. 41 requires `tkhd.duration` to equal.
+    /// Zero when the track has no edit list. See
+    /// [`crate::edit::total_edit_duration`].
+    pub fn edit_total_duration(&self) -> u64 {
+        crate::edit::total_edit_duration(&self.edits)
     }
 }
 

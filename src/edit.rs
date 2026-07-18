@@ -23,6 +23,14 @@ use oxideav_core::{Error, Result};
 #[cfg(not(feature = "registry"))]
 use crate::standalone::{Error, Result};
 
+/// The `media_time` sentinel marking an *empty edit* (QTFF p. 47:
+/// "If this field is set to –1, it is an empty edit").
+pub const EMPTY_EDIT_MEDIA_TIME: i64 = -1;
+
+/// Unity playback rate in the `media_rate` 16.16 signed fixed-point
+/// encoding (QTFF p. 48). `0x0001_0000` = 1.0×.
+pub const MEDIA_RATE_ONE: i32 = 0x0001_0000;
+
 /// A single edit list entry.
 ///
 /// `media_time = -1` marks an *empty* edit (per QTFF p. 47); the
@@ -67,6 +75,63 @@ impl Edit {
 
 /// A track's edit list — the ordered sequence of [`Edit`] entries.
 pub type EditList = Vec<Edit>;
+
+/// A fully-typed `elst` atom: the FullBox header (version + flags)
+/// plus the entry table. [`parse_elst`] returns just the entries;
+/// use [`parse_elst_full`] when the on-wire version matters (e.g. a
+/// re-muxer preserving the author's v0/v1 choice, or distinguishing
+/// a *zero-entry* `elst` from a missing `edts` atom).
+///
+/// Per QTFF p. 47 the version byte selects the entry width: version
+/// 0 carries 32-bit `track_duration` + signed 32-bit `media_time`;
+/// version 1 (the ISO/IEC 14496-12 §8.6.6 extension) widens both to
+/// 64 bits. The three flag bytes are "space for future flags" and
+/// are surfaced verbatim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Elst {
+    /// FullBox version byte (0 or 1; anything else is rejected).
+    pub version: u8,
+    /// The 24-bit flags field, surfaced verbatim (QTFF p. 47 defines
+    /// no flag bits — "space for future … flags").
+    pub flags: u32,
+    /// The edit-list table in file order.
+    pub entries: EditList,
+}
+
+/// Movie-timescale duration of the presentation *delay* declared by
+/// the list's leading empty edits (QTFF p. 47: "An empty edit is
+/// used to offset the start time of a track" — the classic
+/// encoder-priming-skip / delayed-start idiom). Zero when the first
+/// edit already presents media. Saturating on hostile 64-bit sums.
+pub fn initial_empty_duration(edits: &[Edit]) -> u64 {
+    let mut total: u64 = 0;
+    for e in edits {
+        if !e.is_empty() {
+            break;
+        }
+        total = total.saturating_add(e.track_duration);
+    }
+    total
+}
+
+/// Media-timescale tick at which presentation begins — the
+/// `media_time` of the first non-empty edit (the head-trim point:
+/// media before this tick is never presented at the timeline start).
+/// `None` when the list has no presenting edit at all (all-empty or
+/// empty list).
+pub fn first_presented_media_time(edits: &[Edit]) -> Option<i64> {
+    edits.iter().find(|e| !e.is_empty()).map(|e| e.media_time)
+}
+
+/// Saturating sum of every entry's `track_duration` (movie-timescale
+/// ticks) — the total presentation span the list declares. QTFF
+/// p. 41 requires `tkhd.duration` to equal exactly this sum when an
+/// edit list is present.
+pub fn total_edit_duration(edits: &[Edit]) -> u64 {
+    edits
+        .iter()
+        .fold(0u64, |acc, e| acc.saturating_add(e.track_duration))
+}
 
 /// A resolved edit segment after walking an [`EditList`] and assigning
 /// movie-time bounds to each entry. Use [`resolve_edit_segments`] or
@@ -144,16 +209,24 @@ pub(crate) fn sat_i64(v: i128) -> i64 {
     }
 }
 
-/// Parse an `elst` payload.
+/// Parse an `elst` payload into just its entry table. Convenience
+/// wrapper over [`parse_elst_full`] for callers that don't need the
+/// FullBox header.
+pub fn parse_elst(payload: &[u8]) -> Result<EditList> {
+    parse_elst_full(payload).map(|e| e.entries)
+}
+
+/// Parse an `elst` payload, preserving the FullBox header.
 ///
 /// Layout per QTFF Figure 2-11 (p. 47): `[ver+flags=4][n=4]` followed
 /// by `n × {track_duration, media_time, media_rate}` triples; entry
 /// width is 12 for version-0, 20 for version-1 (ISO BMFF extension).
-pub fn parse_elst(payload: &[u8]) -> Result<EditList> {
+pub fn parse_elst_full(payload: &[u8]) -> Result<Elst> {
     if payload.len() < 8 {
         return Err(Error::invalid("MOV: elst payload < 8 bytes"));
     }
     let version = payload[0];
+    let flags = u32::from_be_bytes([0, payload[1], payload[2], payload[3]]);
     let n = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
     let body = &payload[8..];
     let entry_size = match version {
@@ -223,7 +296,11 @@ pub fn parse_elst(payload: &[u8]) -> Result<EditList> {
         };
         out.push(edit);
     }
-    Ok(out)
+    Ok(Elst {
+        version,
+        flags,
+        entries: out,
+    })
 }
 
 /// Resolve a parsed [`EditList`] into a sequence of [`EditSegment`]s
@@ -1314,6 +1391,78 @@ mod tests {
         ];
         assert_eq!(movie_pts_to_media_pts(&segs, 50, 100, 100), None);
         assert_eq!(movie_pts_to_media_pts(&segs, 150, 100, 100), None);
+    }
+
+    // ─────────── round 417: typed elst surface ───────────
+
+    #[test]
+    fn parse_elst_full_preserves_version_and_flags() {
+        let mut p = build_elst_v0(&[(100, -1, 0x0001_0000), (200, 0, 0x0001_0000)]);
+        // Set a (future) flag pattern in the 3 flag bytes.
+        p[1] = 0x01;
+        p[2] = 0x02;
+        p[3] = 0x03;
+        let full = parse_elst_full(&p).unwrap();
+        assert_eq!(full.version, 0);
+        assert_eq!(full.flags, 0x0001_0203);
+        assert_eq!(full.entries.len(), 2);
+        // The entries-only wrapper matches.
+        assert_eq!(parse_elst(&p).unwrap(), full.entries);
+    }
+
+    #[test]
+    fn parse_elst_full_zero_entry_list_distinct_from_missing() {
+        let p = build_elst_v0(&[]);
+        let full = parse_elst_full(&p).unwrap();
+        assert_eq!(full.version, 0);
+        assert!(full.entries.is_empty());
+    }
+
+    #[test]
+    fn edit_list_summary_helpers() {
+        let edits = vec![
+            Edit {
+                track_duration: 100,
+                media_time: EMPTY_EDIT_MEDIA_TIME,
+                media_rate: MEDIA_RATE_ONE,
+            },
+            Edit {
+                track_duration: 50,
+                media_time: -1,
+                media_rate: MEDIA_RATE_ONE,
+            },
+            Edit {
+                track_duration: 500,
+                media_time: 960,
+                media_rate: MEDIA_RATE_ONE,
+            },
+        ];
+        // Two leading empty edits sum to the start delay.
+        assert_eq!(initial_empty_duration(&edits), 150);
+        // The first presenting edit's media_time is the head trim.
+        assert_eq!(first_presented_media_time(&edits), Some(960));
+        // All three durations sum to the declared span.
+        assert_eq!(total_edit_duration(&edits), 650);
+        // No-presenting-edit and empty-list shapes.
+        assert_eq!(first_presented_media_time(&edits[..2]), None);
+        assert_eq!(first_presented_media_time(&[]), None);
+        assert_eq!(initial_empty_duration(&[]), 0);
+        assert_eq!(total_edit_duration(&[]), 0);
+        // Saturating sums on hostile 64-bit durations.
+        let hostile = vec![
+            Edit {
+                track_duration: u64::MAX,
+                media_time: -1,
+                media_rate: MEDIA_RATE_ONE,
+            },
+            Edit {
+                track_duration: u64::MAX,
+                media_time: 0,
+                media_rate: MEDIA_RATE_ONE,
+            },
+        ];
+        assert_eq!(initial_empty_duration(&hostile), u64::MAX);
+        assert_eq!(total_edit_duration(&hostile), u64::MAX);
     }
 
     // ─────────── round 417: saturating rescale on hostile 64-bit fields ───────────

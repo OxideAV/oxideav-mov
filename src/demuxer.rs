@@ -24,7 +24,7 @@ use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
 use crate::clip::{parse_clip, Clipping};
 use crate::cmov::parse_cmov;
 use crate::ctab::{parse_ctab, Ctab};
-use crate::edit::{parse_elst, EditList};
+use crate::edit::parse_elst_full;
 use crate::fragment::{parse_mfra, parse_mvex, resolve_traf_samples, Mehd, Tfra, TrexDefaults};
 use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
 use crate::header::{
@@ -3613,7 +3613,10 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
                 parse_mdia(r, child, &mut track)?;
             }
             t if t == &EDTS => {
-                track.edits = parse_edts(r, child)?;
+                if let Some(elst) = parse_edts(r, child)? {
+                    track.edits = elst.entries;
+                    track.elst_version = Some(elst.version);
+                }
             }
             t if t == &TREF => {
                 track.references = parse_tref(r, child)?;
@@ -3731,14 +3734,17 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
     Ok(track)
 }
 
-fn parse_edts<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<EditList> {
+fn parse_edts<R: Read + Seek + ?Sized>(
+    r: &mut R,
+    hdr: &AtomHeader,
+) -> Result<Option<crate::edit::Elst>> {
     let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
     r.seek(SeekFrom::Start(hdr.payload_offset))?;
-    let mut out = EditList::new();
+    let mut out = None;
     walk_children(r, Some(body_end), |r, child| {
         if child.fourcc == ELST {
             let body = read_payload(r, child)?;
-            out = parse_elst(&body)?;
+            out = Some(parse_elst_full(&body)?);
         }
         Ok(())
     })?;
