@@ -10,8 +10,8 @@
 //!
 //! The two `ffprobe`-cross-check tests are guarded by `which ffprobe`
 //! so they no-op (with a stderr note) when ffprobe isn't on `$PATH`.
-//! Per project policy: ffprobe is only used as a black-box oracle —
-//! we never link against libavformat.
+//! Per project policy: ffprobe is only used as a black-box oracle
+//! (opaque CLI invocation; input in, parsed summary out).
 
 #![cfg(feature = "registry")]
 
