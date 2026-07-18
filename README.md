@@ -52,7 +52,17 @@ Decoding stays in codec crates: this crate calls
   clamps the final duration. Per-sample mapping surfaces via
   `edited_timing_for` / `edit::edited_timing_for_sample`
   (`EditedTiming { pts, dts, duration }`), validated against an
-  ffprobe black-box oracle.
+  ffprobe black-box oracle. Opt-in `emit_never_presented(true)` keeps
+  decode-only media (trimmed heads/tails a presented frame depends on,
+  priming audio) instead of dropping it: such samples emit
+  **discard-flagged** with timing extrapolated from the nearest
+  presenting segment (negative edited pts for head trims), and an
+  edited seek landing on a never-presented sync sample reports its
+  extrapolated dts. Typed list surface: `parse_elst_full` (`Elst`
+  preserves the FullBox version/flags), `Track::elst_version`, and the
+  summary accessors `edit_start_delay` / `edit_media_start` /
+  `edit_total_duration` — all mappers saturate on hostile 64-bit
+  elst fields.
 - Track relationships: typed `tref` accessors for every QTFF reference
   kind (`chap`, `tmcd`, `sync`, `scpt`, `hint`, `ssrc`) plus the ISO
   BMFF §8.3.3.3 reference types `cdsc` (content-describes), `font`,

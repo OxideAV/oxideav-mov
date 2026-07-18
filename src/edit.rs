@@ -754,6 +754,119 @@ pub fn edited_timing_for_sample(
     None
 }
 
+/// Extrapolated edited-timeline timing for a sample **no edit
+/// presents** — the decode-only companion to
+/// [`edited_timing_for_sample`].
+///
+/// The edit list describes what is *presented*; media outside every
+/// segment is still often *required for decoding* (QTFF p. 47's
+/// empty-edit/priming discussion presumes the trimmed head samples
+/// exist — e.g. the sync sample a head-trimmed segment's first
+/// presented frame depends on, or encoder-priming audio). A demuxer
+/// that silently drops those samples starves the decoder, so the
+/// applied edit-list mode can instead emit them flagged
+/// *never-presented* (discard) with timing extrapolated from the
+/// nearest presenting segment:
+///
+/// * Pick the [`EditSegmentKind::Media`] segment (positive rate,
+///   non-zero span) whose consumed media window lies closest to
+///   `media_pts` (an exact containment would have been handled by
+///   [`edited_timing_for_sample`]; here every window misses). Ties
+///   prefer the earlier segment.
+/// * Linearly extend that segment's media→edited mapping to
+///   `media_pts`: a head-trimmed sample lands *before* the segment's
+///   edited start (negative pts are expected — the sample decodes
+///   but never displays), a tail-trimmed sample lands past its
+///   edited end.
+/// * `dts` keeps the rate-scaled composition offset; `duration` is
+///   the rate-scaled media duration (no clamp — nothing is
+///   presented).
+///
+/// Returns `None` when the resolved list contains no such Media
+/// segment at all (only empty edits / dwells / zero-length shifts) —
+/// there is no timeline to extrapolate against, and the caller
+/// should fall back to dropping the sample. All arithmetic
+/// saturates on hostile 64-bit input like the other mappers here.
+pub fn never_presented_timing_for_sample(
+    segments: &[EditSegment],
+    media_pts: i64,
+    media_dts: i64,
+    media_duration: i64,
+    movie_timescale: u32,
+    media_timescale: u32,
+) -> Option<EditedTiming> {
+    if media_timescale == 0 || movie_timescale == 0 {
+        return None;
+    }
+    let mvs = movie_timescale as i128;
+    let mds = media_timescale as i128;
+    const RATE_ONE: i128 = 0x0001_0000;
+    let movie_to_media = |v: i128| -> i128 { (v * mds + mvs / 2) / mvs };
+    let comp_offset = media_pts as i128 - media_dts as i128;
+    let p = media_pts as i128;
+
+    // Nearest presenting Media segment by media-window distance.
+    let mut best: Option<(i128, &EditSegment, i128, i128)> = None; // (distance, seg, media_start, rate_fp)
+    for seg in segments {
+        if let EditSegmentKind::Media {
+            media_time_start,
+            media_rate,
+        } = seg.kind
+        {
+            if media_rate <= 0 {
+                continue;
+            }
+            let rate_fp = media_rate as i128;
+            let seg_dur_movie = seg.movie_time_end as i128 - seg.movie_time_start as i128;
+            if seg_dur_movie <= 0 {
+                continue;
+            }
+            let num = seg_dur_movie * mds * rate_fp;
+            let denom = mvs * RATE_ONE;
+            let seg_dur_media = (num + denom / 2) / denom;
+            if seg_dur_media <= 0 {
+                continue;
+            }
+            let media_start = media_time_start as i128;
+            let media_end = media_start + seg_dur_media;
+            let distance = if p < media_start {
+                media_start - p
+            } else if p >= media_end {
+                p - media_end + 1
+            } else {
+                0
+            };
+            let better = match &best {
+                None => true,
+                Some((d, ..)) => distance < *d,
+            };
+            if better {
+                best = Some((distance, seg, media_start, rate_fp));
+            }
+        }
+    }
+    let (_, seg, media_start, rate_fp) = best?;
+    // Rate-scale a media-tick delta onto the edited timeline
+    // (half-up, sign-symmetric): Δedited = Δmedia × 65536 / rate.
+    let scale = |d: i128| -> i128 {
+        let n = d * RATE_ONE;
+        if n >= 0 {
+            (n + rate_fp / 2) / rate_fp
+        } else {
+            (n - rate_fp / 2) / rate_fp
+        }
+    };
+    let seg_start_edited = movie_to_media(seg.movie_time_start as i128);
+    let pts = seg_start_edited + scale(p - media_start);
+    let dts = pts - scale(comp_offset);
+    let duration = scale(media_duration.max(0) as i128).max(0);
+    Some(EditedTiming {
+        pts: sat_i64(pts),
+        dts: sat_i64(dts),
+        duration: sat_i64(duration),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1463,6 +1576,128 @@ mod tests {
         ];
         assert_eq!(initial_empty_duration(&hostile), u64::MAX);
         assert_eq!(total_edit_duration(&hostile), u64::MAX);
+    }
+
+    // ─────────── round 417: never-presented (discard) extrapolation ───────────
+
+    #[test]
+    fn never_presented_head_trim_extrapolates_negative_pts() {
+        // Single edit presenting media [60, 120) at unity rate,
+        // movie ts == media ts. A head sample at media 0 decodes but
+        // never displays: extrapolated pts = 0 - 60 = -60.
+        let edits = vec![Edit {
+            track_duration: 60,
+            media_time: 60,
+            media_rate: MEDIA_RATE_ONE,
+        }];
+        let segs = resolve_edit_segments(&edits, None);
+        // Not presented…
+        assert_eq!(edited_timing_for_sample(&segs, 0, 0, 30, 600, 600), None);
+        // …but extrapolable.
+        let t = never_presented_timing_for_sample(&segs, 0, 0, 30, 600, 600).unwrap();
+        assert_eq!(t.pts, -60);
+        assert_eq!(t.dts, -60);
+        assert_eq!(t.duration, 30);
+        // A ctts composition offset survives: pts -30, dts -40.
+        let t = never_presented_timing_for_sample(&segs, 30, 20, 30, 600, 600).unwrap();
+        assert_eq!(t.pts, -30);
+        assert_eq!(t.dts, -40);
+    }
+
+    #[test]
+    fn never_presented_tail_trim_extrapolates_past_segment_end() {
+        // Edit presents media [0, 60); the tail sample at media 90
+        // extrapolates to edited pts 90 (past the presentation end).
+        let edits = vec![Edit {
+            track_duration: 60,
+            media_time: 0,
+            media_rate: MEDIA_RATE_ONE,
+        }];
+        let segs = resolve_edit_segments(&edits, None);
+        let t = never_presented_timing_for_sample(&segs, 90, 90, 30, 600, 600).unwrap();
+        assert_eq!(t.pts, 90);
+        assert_eq!(t.duration, 30);
+    }
+
+    #[test]
+    fn never_presented_scales_by_segment_rate() {
+        // Rate-2.0 segment: 600 movie ticks consume media [0, 200)
+        // (movie ts 600, media ts 100). A media sample at 250 (past
+        // the window) extrapolates at the segment's rate: edited pts
+        // = 0 + 250/2 = 125; a 20-tick duration halves to 10.
+        let edits = vec![Edit {
+            track_duration: 600,
+            media_time: 0,
+            media_rate: 0x0002_0000,
+        }];
+        let segs = resolve_edit_segments(&edits, None);
+        let t = never_presented_timing_for_sample(&segs, 250, 250, 20, 600, 100).unwrap();
+        assert_eq!(t.pts, 125);
+        assert_eq!(t.duration, 10);
+    }
+
+    #[test]
+    fn never_presented_picks_nearest_presenting_segment() {
+        // Two presenting segments: media [0, 50) then [1000, 1050)
+        // (after a 100-tick empty edit between them; the second
+        // presenting segment starts at movie tick 150). A sample at
+        // media 990 is nearer the second window and extrapolates
+        // against it: seg start (movie 150) + (990 - 1000) = 140.
+        let edits = vec![
+            Edit {
+                track_duration: 50,
+                media_time: 0,
+                media_rate: MEDIA_RATE_ONE,
+            },
+            Edit {
+                track_duration: 100,
+                media_time: -1,
+                media_rate: MEDIA_RATE_ONE,
+            },
+            Edit {
+                track_duration: 50,
+                media_time: 1000,
+                media_rate: MEDIA_RATE_ONE,
+            },
+        ];
+        let segs = resolve_edit_segments(&edits, None);
+        let t = never_presented_timing_for_sample(&segs, 990, 990, 10, 600, 600).unwrap();
+        assert_eq!(t.pts, 140);
+        // A sample at media 60 is nearer the first window and
+        // extrapolates past its end: 0 + 60 = 60.
+        let t = never_presented_timing_for_sample(&segs, 60, 60, 10, 600, 600).unwrap();
+        assert_eq!(t.pts, 60);
+    }
+
+    #[test]
+    fn never_presented_returns_none_without_presenting_segment() {
+        // Dwell-only and empty-only lists give no timeline to
+        // extrapolate against.
+        let dwell = vec![Edit {
+            track_duration: 600,
+            media_time: 100,
+            media_rate: 0,
+        }];
+        let segs = resolve_edit_segments(&dwell, None);
+        assert_eq!(
+            never_presented_timing_for_sample(&segs, 0, 0, 10, 600, 600),
+            None
+        );
+        let empty = vec![Edit {
+            track_duration: 600,
+            media_time: -1,
+            media_rate: MEDIA_RATE_ONE,
+        }];
+        let segs = resolve_edit_segments(&empty, None);
+        assert_eq!(
+            never_presented_timing_for_sample(&segs, 0, 0, 10, 600, 600),
+            None
+        );
+        // Zero timescales are rejected outright.
+        assert_eq!(
+            never_presented_timing_for_sample(&[], 0, 0, 0, 0, 600),
+            None
+        );
     }
 
     // ─────────── round 417: saturating rescale on hostile 64-bit fields ───────────

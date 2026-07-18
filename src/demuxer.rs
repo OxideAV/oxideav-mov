@@ -214,6 +214,13 @@ pub struct MovDemuxer {
     /// [`MovDemuxer::apply_edit_lists`]; the default (`false`)
     /// preserves the historical media-timeline packet contract.
     apply_edits: bool,
+    /// When `true` (and `apply_edits` is on), samples no edit
+    /// presents are emitted flagged **discard** with extrapolated
+    /// timing instead of silently dropped, so decoders receive the
+    /// decode-only media (trimmed head samples a presented frame
+    /// depends on, encoder-priming audio). Opt in via
+    /// [`MovDemuxer::emit_never_presented`].
+    emit_never_presented: bool,
     /// Per-track resolved edit segments, cached when
     /// [`MovDemuxer::apply_edit_lists`] enables the edited timeline
     /// (parallel to `tracks`; empty while the mode is off).
@@ -1027,6 +1034,7 @@ impl MovDemuxer {
             samples,
             next: 0,
             apply_edits: false,
+            emit_never_presented: false,
             edited_segments: Vec::new(),
             trex_defaults,
             mehd: mehd_box,
@@ -1783,6 +1791,70 @@ impl MovDemuxer {
     /// edited-timeline packet contract on this demuxer.
     pub fn edit_lists_applied(&self) -> bool {
         self.apply_edits
+    }
+
+    /// Opt in (or back out) of **discard-flagged never-presented
+    /// media** in the applied edit-list mode.
+    ///
+    /// The edit list describes what is *presented*; media outside
+    /// every segment is still often *required for decoding* — the
+    /// sync sample a head-trimmed segment's first presented frame
+    /// depends on, or the encoder-priming audio an empty edit skips
+    /// (QTFF p. 47). With the applied mode alone those samples are
+    /// dropped, starving a real decoder. With this switch also
+    /// enabled, `next_packet()` instead emits them with the packet
+    /// **discard flag** set (`Packet::is_discard`) and timing
+    /// extrapolated from the nearest presenting segment (a
+    /// head-trimmed sample lands at a *negative* edited pts — it
+    /// decodes before the presentation starts) — see
+    /// [`crate::edit::never_presented_timing_for_sample`]. Samples
+    /// with no presenting Media segment to extrapolate against
+    /// (dwell-only / all-empty lists) are still dropped.
+    ///
+    /// No effect while [`MovDemuxer::apply_edit_lists`] is off (the
+    /// raw media timeline emits everything anyway); the flag is
+    /// remembered and applies once the mode is enabled.
+    pub fn emit_never_presented(&mut self, enable: bool) {
+        self.emit_never_presented = enable;
+    }
+
+    /// `true` when [`MovDemuxer::emit_never_presented`] enabled
+    /// discard-flagged emission of never-presented samples.
+    pub fn never_presented_emitted(&self) -> bool {
+        self.emit_never_presented
+    }
+
+    /// Extrapolated edited-timeline timing for a sample of
+    /// `track_index` that **no edit presents** — the decode-only
+    /// companion of [`MovDemuxer::edited_timing_for`], used by the
+    /// applied mode when [`MovDemuxer::emit_never_presented`] is
+    /// enabled. Returns `None` when the track's resolved list has no
+    /// presenting Media segment to extrapolate against, the index is
+    /// out of range, or the file has no movie header. See
+    /// [`crate::edit::never_presented_timing_for_sample`].
+    pub fn never_presented_timing_for(
+        &self,
+        track_index: usize,
+        sample: &SampleEntry,
+    ) -> Option<crate::edit::EditedTiming> {
+        let track = self.tracks.get(track_index)?;
+        let mvhd = self.mvhd.as_ref()?;
+        let owned;
+        let segments: &[crate::EditSegment] = match self.edited_segments.get(track_index) {
+            Some(segs) if self.edited_segments.len() == self.tracks.len() => segs,
+            _ => {
+                owned = track.edit_segments(mvhd.time_scale, Some(mvhd.duration));
+                &owned
+            }
+        };
+        crate::edit::never_presented_timing_for_sample(
+            segments,
+            sample.pts(),
+            sample.dts as i64,
+            sample.duration as i64,
+            mvhd.time_scale,
+            track.mdhd.time_scale,
+        )
     }
 
     /// Project one sample of `track_index` onto the edited
@@ -2744,6 +2816,14 @@ impl MovDemuxer {
             }
             if let Some(t) = self.edited_timing_for(stream_index as usize, s) {
                 return Ok(t.dts);
+            }
+            // With discard emission on, a never-presented sample IS
+            // the next packet — honour the "next packet's dts equals
+            // this" contract with its extrapolated timing.
+            if self.emit_never_presented {
+                if let Some(t) = self.never_presented_timing_for(stream_index as usize, s) {
+                    return Ok(t.dts);
+                }
             }
         }
         // Every remaining sample is dropped by the edit list; the
@@ -4279,14 +4359,29 @@ impl Demuxer for MovDemuxer {
             if self.apply_edits {
                 // Applied edit-list mode (QTFF pp. 46–48 / ISO/IEC
                 // 14496-12 §8.6.6): timestamps live on the edited
-                // timeline; samples outside every edit are dropped.
-                let Some(t) = self.edited_timing_for(stream_idx as usize, &sample) else {
-                    continue;
+                // timeline. Samples outside every edit are dropped —
+                // unless `emit_never_presented` asked for them to be
+                // surfaced discard-flagged (decode-only media: the
+                // trimmed head samples a presented frame depends on).
+                let (t, discard) = match self.edited_timing_for(stream_idx as usize, &sample) {
+                    Some(t) => (t, false),
+                    None => {
+                        if !self.emit_never_presented {
+                            continue;
+                        }
+                        match self.never_presented_timing_for(stream_idx as usize, &sample) {
+                            Some(t) => (t, true),
+                            // No presenting segment to extrapolate
+                            // against — drop as before.
+                            None => continue,
+                        }
+                    }
                 };
                 let mut pkt = Packet::new(stream_idx, stream.time_base, data)
                     .with_dts(t.dts)
                     .with_pts(t.pts)
-                    .with_keyframe(sample.keyframe);
+                    .with_keyframe(sample.keyframe)
+                    .with_discard(discard);
                 if t.duration > 0 {
                     pkt = pkt.with_duration(t.duration);
                 }
