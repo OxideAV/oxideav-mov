@@ -220,11 +220,16 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
 - `set_edit_list(track_id, &[MuxEdit])` emits an `edts/elst` (QTFF
   p. 47 / §8.6.6) between `tkhd` and `mdia`. `MuxEdit::segment` is a
   unity-rate presentation segment; `MuxEdit::empty` is a head empty
-  edit (`media_time == -1`) for encoder-priming-skip or start-delay.
+  edit (`media_time == -1`) for encoder-priming-skip or start-delay;
+  `MuxEdit::dwell` holds one frame (`media_rate == 0`, §8.6.6.3) and
+  `MuxEdit::segment_with_rate` takes any positive 16.16 rate
+  (negative rates rejected per QTFF p. 48).
   The `elst` auto-promotes from v0 (32-bit) to v1 (64-bit) the moment a
   `track_duration` exceeds 4 GiB-ticks or a `media_time` leaves the
   signed-32-bit range; entries round-trip through the read-side
   `parse_elst`. No `edts` is written when a track has no edit list.
+  The fragmented path emits the same `edts` into the init-segment
+  `trak`, so a fragmented presentation keeps its edits.
 - `with_fragmentation(ByDuration | ByFrameCount)` +
   `encode_fragmented_to_vec()` emit a fragmented MP4 / fMP4 / DASH
   segment stream (init segment + one media segment per fragment).

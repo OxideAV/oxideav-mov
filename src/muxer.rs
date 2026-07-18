@@ -351,8 +351,10 @@ pub struct MuxEdit {
     /// Relative playback rate as a 16.16 signed fixed-point number
     /// (`0x0001_0000` = unity 1.0×). `0` marks a *dwell* (hold the
     /// frame at `media_time`); QTFF p. 48 otherwise requires a
-    /// strictly-positive rate. The muxer writes the value verbatim so a
-    /// caller may emit a dwell (`0`) or a non-unity rate.
+    /// strictly-positive rate. Zero and any positive value are
+    /// written verbatim; negative rates are rejected by
+    /// [`MovMuxer::set_edit_list`]. See [`MuxEdit::dwell`] /
+    /// [`MuxEdit::segment_with_rate`].
     pub media_rate: i32,
 }
 
@@ -377,6 +379,38 @@ impl MuxEdit {
             track_duration,
             media_time: -1,
             media_rate: 0x0001_0000,
+        }
+    }
+
+    /// A *dwell*: hold the single media frame at `media_time`
+    /// (media-timescale ticks) on screen for `track_duration`
+    /// (movie-timescale ticks). The on-wire signal is `media_rate ==
+    /// 0` (ISO/IEC 14496-12 §8.6.6.3; QTFF p. 48 declares 0 illegal
+    /// but QuickTime-lineage files carry it — the read side
+    /// classifies it as [`crate::edit::EditSegmentKind::Dwell`]
+    /// either way).
+    pub fn dwell(track_duration: u64, media_time: i64) -> Self {
+        Self {
+            track_duration,
+            media_time,
+            media_rate: 0,
+        }
+    }
+
+    /// A presentation segment at an arbitrary 16.16 fixed-point
+    /// `media_rate` ([`crate::edit::MEDIA_RATE_ONE`] = 1.0×): the
+    /// segment consumes `rate × track_duration`-worth of media across
+    /// `track_duration` movie ticks (QTFF Chapter 5 "Playing With
+    /// Edit Lists" pp. 226–227 — 600 movie ticks at rate 2.0 consume
+    /// 1200 media ticks). Rates must be strictly positive here; use
+    /// [`MuxEdit::dwell`] for the rate-0 hold and [`MuxEdit::empty`]
+    /// for the no-media edit ([`MovMuxer::set_edit_list`] rejects
+    /// negative rates, which QTFF p. 48 forbids).
+    pub fn segment_with_rate(track_duration: u64, media_time: i64, media_rate: i32) -> Self {
+        Self {
+            track_duration,
+            media_time,
+            media_rate,
         }
     }
 }
@@ -1632,12 +1666,16 @@ impl MovMuxer {
     /// Validation (entries are otherwise written verbatim):
     /// * `media_time` may be `-1` (the empty-edit sentinel) or any
     ///   non-negative value; any other negative value is rejected.
+    /// * `media_rate` may be `0` (a dwell, [`MuxEdit::dwell`]) or any
+    ///   positive 16.16 value; negative rates are rejected (QTFF
+    ///   p. 48 forbids them and the read path drops such segments).
     /// * `track_duration` must be representable; the only hard limit is
     ///   the version-1 64-bit field, so no overflow check is needed.
     ///
-    /// The fragmented write path ([`encode_fragmented_to_vec`]) ignores
-    /// edit lists — fMP4 segments carry presentation timing in the
-    /// init-segment `moov`; a follow-up can emit the init-`trak` `edts`.
+    /// The fragmented write path ([`encode_fragmented_to_vec`]) emits
+    /// the same `edts > elst` into the **init-segment** `trak` (the
+    /// `moof`s only index samples, so the edit list must ride the
+    /// init `moov` to reach players).
     ///
     /// [`encode_fragmented_to_vec`]: MovMuxer::encode_fragmented_to_vec
     /// Write this audio track's `stsd` entry as a QTFF
@@ -1815,6 +1853,17 @@ impl MovMuxer {
             return Err(Error::invalid(format!(
                 "MOV muxer: edit {i} has media_time {} (only -1 is a legal negative value: the empty-edit sentinel)",
                 e.media_time
+            )));
+        }
+        // QTFF p. 48: the media rate "cannot be 0 or negative" — with
+        // the ISO/IEC 14496-12 §8.6.6.3 carve-out that 0 signals a
+        // dwell. Negative rates have no defined semantics on either
+        // side, and the read path rejects such segments per-segment,
+        // so refuse to write one.
+        if let Some((i, e)) = edits.iter().enumerate().find(|(_, e)| e.media_rate < 0) {
+            return Err(Error::invalid(format!(
+                "MOV muxer: edit {i} has negative media_rate {} (QTFF p. 48 forbids negative rates; use 0 for a dwell)",
+                e.media_rate
             )));
         }
         self.tracks[idx].edits = edits.to_vec();
@@ -4805,6 +4854,14 @@ fn build_init_trak(t: &TrackWrite, track_id: u32, _movie_ts: u32) -> Vec<u8> {
     let mut trak = Vec::new();
     // tkhd: declare duration = 0 (set by fragments).
     push_atom(&mut trak, *b"tkhd", &build_init_tkhd(t, track_id));
+    // edts > elst between tkhd and mdia, exactly as on the
+    // non-fragmented path (QTFF p. 46, Figure 2-8) — a fragmented
+    // presentation carries its edit list in the init-segment `moov`
+    // (the `moof`s only index samples), so priming-skip / start-delay
+    // edits set via `set_edit_list` must land here to reach players.
+    if !t.edits.is_empty() {
+        push_atom(&mut trak, *b"edts", &build_edts(&t.edits));
+    }
     push_atom(&mut trak, *b"mdia", &build_init_mdia(t));
     trak
 }
