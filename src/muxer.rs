@@ -1091,6 +1091,26 @@ struct TrackWrite {
     /// (QTFF p. 101 / p. 102) and [`MovMuxer::set_audio_entry_v1`]
     /// (ISO/IEC 14496-12:2015 §12.2.3). Ignored on non-audio tracks.
     audio_description: AudioDescriptionWrite,
+    /// Track display matrix override for `tkhd` (QTFF p. 42). `None`
+    /// ⇒ identity. Set via [`MovMuxer::set_track_matrix`].
+    tkhd_matrix: Option<[i32; 9]>,
+    /// `tkhd` layer — the track's front-to-back compositing order
+    /// (QTFF p. 42: tracks with lower layer values are displayed in
+    /// front). Default 0. Set via [`MovMuxer::set_track_layer`].
+    tkhd_layer: i16,
+    /// `tkhd` alternate_group id (QTFF p. 42: tracks sharing a
+    /// non-zero value are mutual alternates; only one plays at a
+    /// time). Default 0 (no group). Set via
+    /// [`MovMuxer::set_track_alternate_group`].
+    tkhd_alternate_group: i16,
+    /// `tkhd` volume override (8.8 fixed-point). `None` ⇒ the kind
+    /// default (1.0 for audio, 0 for everything else). Set via
+    /// [`MovMuxer::set_track_volume`].
+    tkhd_volume: Option<i16>,
+    /// `tkhd` 24-bit flags override (QTFF p. 42: enabled 0x1 /
+    /// in-movie 0x2 / in-preview 0x4 / in-poster 0x8). `None` ⇒ the
+    /// historical default 0x7. Set via [`MovMuxer::set_track_flags`].
+    tkhd_flags: Option<u32>,
 }
 
 /// The packed `mdhd.language` value for `"und"` (undetermined) — the
@@ -1395,6 +1415,11 @@ impl MovMuxer {
             track_selection: None,
             track_groups: Vec::new(),
             audio_description: AudioDescriptionWrite::V0,
+            tkhd_matrix: None,
+            tkhd_layer: 0,
+            tkhd_alternate_group: 0,
+            tkhd_volume: None,
+            tkhd_flags: None,
         });
         self.tracks.len() as u32
     }
@@ -2600,6 +2625,71 @@ impl MovMuxer {
         self.movie_times[5] = current_time;
     }
 
+    /// Override a track's `tkhd` display matrix (QTFF p. 42; layout
+    /// `[a b u; c d v; tx ty w]`, first 8 entries 16.16 fixed-point,
+    /// trailing column 2.30) — e.g. one of the four coarse-rotation
+    /// matrices a rotated camera recording carries. `None` restores
+    /// the identity default. Round-trips onto [`crate::Tkhd::matrix`]
+    /// / [`crate::Tkhd::rotation`]. Honoured on the non-fragmented
+    /// and fragmented (init-`trak`) paths.
+    pub fn set_track_matrix(&mut self, track_id: u32, matrix: Option<[i32; 9]>) -> Result<()> {
+        let idx = self.track_index(track_id, "set_track_matrix")?;
+        self.tracks[idx].tkhd_matrix = matrix;
+        Ok(())
+    }
+
+    /// Set a track's `tkhd` layer — its front-to-back compositing
+    /// order (QTFF p. 42: "tracks with lower layer values are
+    /// displayed in front of tracks with higher layer values").
+    /// Default 0. Round-trips onto [`crate::Tkhd::layer`].
+    pub fn set_track_layer(&mut self, track_id: u32, layer: i16) -> Result<()> {
+        let idx = self.track_index(track_id, "set_track_layer")?;
+        self.tracks[idx].tkhd_layer = layer;
+        Ok(())
+    }
+
+    /// Set a track's `tkhd` alternate-group id (QTFF p. 42: tracks
+    /// sharing a non-zero value are alternates for one another — only
+    /// one member plays at a time, chosen by language/quality/etc).
+    /// Default 0 = not part of any alternate group. Pairs with
+    /// [`MovMuxer::set_track_selection`], whose `tsel` switch-group
+    /// semantics operate *within* an alternate group. Round-trips
+    /// onto [`crate::Tkhd::alternate_group`] and the demuxer's
+    /// `alternate_groups()` fold.
+    pub fn set_track_alternate_group(&mut self, track_id: u32, group: i16) -> Result<()> {
+        let idx = self.track_index(track_id, "set_track_alternate_group")?;
+        self.tracks[idx].tkhd_alternate_group = group;
+        Ok(())
+    }
+
+    /// Override a track's `tkhd` volume (8.8 fixed-point; 1.0 =
+    /// `0x0100`). The default is the QTFF convention: 1.0 for audio
+    /// tracks, 0 for everything else. Round-trips onto
+    /// [`crate::Tkhd::volume`].
+    pub fn set_track_volume(&mut self, track_id: u32, volume: i16) -> Result<()> {
+        let idx = self.track_index(track_id, "set_track_volume")?;
+        self.tracks[idx].tkhd_volume = Some(volume);
+        Ok(())
+    }
+
+    /// Override a track's 24-bit `tkhd` flags (QTFF p. 42: `0x1`
+    /// enabled, `0x2` in-movie, `0x4` in-preview, `0x8` in-poster;
+    /// the historical default is `0x7`). Values past 24 bits are
+    /// rejected — the field shares its word with the version byte.
+    /// Round-trips onto [`crate::Tkhd::flags`] and the demuxer's
+    /// `presentation_tracks()` filter (a track without `0x1 | 0x2`
+    /// drops out of the default presentation).
+    pub fn set_track_flags(&mut self, track_id: u32, flags: u32) -> Result<()> {
+        let idx = self.track_index(track_id, "set_track_flags")?;
+        if flags > 0x00FF_FFFF {
+            return Err(Error::invalid(format!(
+                "MOV muxer: set_track_flags value {flags:#x} exceeds the 24-bit tkhd flags field"
+            )));
+        }
+        self.tracks[idx].tkhd_flags = Some(flags);
+        Ok(())
+    }
+
     /// Attach track-level user-data metadata to a previously-added
     /// track, emitted as a `udta` that is the last child of the track's
     /// `trak` (QTFF pp. 36–38 / ISO/IEC 14496-12 §8.10.1).
@@ -3149,7 +3239,7 @@ fn build_mvhd(m: &MovMuxer) -> Vec<u8> {
     p
 }
 
-/// Serialise a movie display matrix into a 36-byte `mvhd` slot:
+/// Serialise a display matrix into a 36-byte `mvhd` / `tkhd` slot:
 /// the caller's override verbatim, or the identity matrix
 /// (a=1.0, d=1.0 in 16.16; w=1.0 in 2.30).
 fn write_movie_matrix(slot: &mut [u8], matrix: Option<&[i32; 9]>) {
@@ -3431,26 +3521,37 @@ fn build_tkhd(t: &TrackWrite, track_id: u32, movie_ts: u32) -> Vec<u8> {
     // ISO/IEC 14496-12 §8.3.2 — version 0 (32-bit times). 84 bytes
     // payload. Offsets cited from QTFF p. 41.
     let mut p = vec![0u8; 84];
-    // version=0; flags = enabled(1) + in_movie(2) + in_preview(4) = 7.
-    p[3] = 0x07;
+    // version=0; 24-bit flags — the caller override or the historical
+    // default enabled(1) + in_movie(2) + in_preview(4) = 7 (QTFF p. 42).
+    let flags = t.tkhd_flags.unwrap_or(0x07);
+    p[1] = (flags >> 16) as u8;
+    p[2] = (flags >> 8) as u8;
+    p[3] = flags as u8;
     // creation_time @ 4..8, modification_time @ 8..12 left zero.
     p[12..16].copy_from_slice(&track_id.to_be_bytes());
     // 4 bytes reserved @ 16..20.
     let dur = track_movie_duration(t, movie_ts).min(u32::MAX as u64) as u32;
     p[20..24].copy_from_slice(&dur.to_be_bytes());
     // 8 bytes reserved @ 24..32.
-    // layer @ 32..34 = 0, alternate_group @ 34..36 = 0.
-    // volume @ 36..38: 1.0 for audio tracks, 0 for visual per spec.
-    if matches!(t.kind, MuxTrackKind::Audio { .. }) {
-        p[36..38].copy_from_slice(&0x0100i16.to_be_bytes());
-    }
+    // layer @ 32..34 (front-to-back compositing order) and
+    // alternate_group @ 34..36 (QTFF p. 42), both default 0.
+    p[32..34].copy_from_slice(&t.tkhd_layer.to_be_bytes());
+    p[34..36].copy_from_slice(&t.tkhd_alternate_group.to_be_bytes());
+    // volume @ 36..38: the caller override, else 1.0 for audio
+    // tracks and 0 for visual per spec.
+    let volume = t
+        .tkhd_volume
+        .unwrap_or(if matches!(t.kind, MuxTrackKind::Audio { .. }) {
+            0x0100
+        } else {
+            0
+        });
+    p[36..38].copy_from_slice(&volume.to_be_bytes());
     // 2 bytes reserved @ 38..40.
-    // Identity 9-element matrix @ 40..76 (a=1.0, d=1.0, w=1.0).
-    p[40..44].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // a
-    p[56..60].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // d
-    p[72..76].copy_from_slice(&0x4000_0000u32.to_be_bytes()); // w (2.30)
-                                                              // width / height @ 76..84: 16.16 fixed-point, in pixels for video,
-                                                              // zero for audio.
+    // 9-element display matrix @ 40..76 — override or identity.
+    write_movie_matrix(&mut p[40..76], t.tkhd_matrix.as_ref());
+    // width / height @ 76..84: 16.16 fixed-point, in pixels for video,
+    // zero for audio.
     let (w_fp, h_fp) = match &t.kind {
         MuxTrackKind::Video { width, height, .. } => {
             ((*width as u32) << 16, (*height as u32) << 16)
@@ -4946,16 +5047,24 @@ fn build_init_trak(t: &TrackWrite, track_id: u32, _movie_ts: u32) -> Vec<u8> {
 
 fn build_init_tkhd(t: &TrackWrite, track_id: u32) -> Vec<u8> {
     let mut p = vec![0u8; 84];
-    p[3] = 0x07; // flags
+    let flags = t.tkhd_flags.unwrap_or(0x07);
+    p[1] = (flags >> 16) as u8;
+    p[2] = (flags >> 8) as u8;
+    p[3] = flags as u8;
     p[12..16].copy_from_slice(&track_id.to_be_bytes());
     // duration = 0 for fragmented init segments.
     p[20..24].copy_from_slice(&0u32.to_be_bytes());
-    if matches!(t.kind, MuxTrackKind::Audio { .. }) {
-        p[36..38].copy_from_slice(&0x0100i16.to_be_bytes());
-    }
-    p[40..44].copy_from_slice(&0x0001_0000u32.to_be_bytes());
-    p[56..60].copy_from_slice(&0x0001_0000u32.to_be_bytes());
-    p[72..76].copy_from_slice(&0x4000_0000u32.to_be_bytes());
+    p[32..34].copy_from_slice(&t.tkhd_layer.to_be_bytes());
+    p[34..36].copy_from_slice(&t.tkhd_alternate_group.to_be_bytes());
+    let volume = t
+        .tkhd_volume
+        .unwrap_or(if matches!(t.kind, MuxTrackKind::Audio { .. }) {
+            0x0100
+        } else {
+            0
+        });
+    p[36..38].copy_from_slice(&volume.to_be_bytes());
+    write_movie_matrix(&mut p[40..76], t.tkhd_matrix.as_ref());
     let (w_fp, h_fp) = match &t.kind {
         MuxTrackKind::Video { width, height, .. } => {
             ((*width as u32) << 16, (*height as u32) << 16)
@@ -5351,6 +5460,11 @@ mod tests {
             track_selection: None,
             track_groups: Vec::new(),
             audio_description: AudioDescriptionWrite::V0,
+            tkhd_matrix: None,
+            tkhd_layer: 0,
+            tkhd_alternate_group: 0,
+            tkhd_volume: None,
+            tkhd_flags: None,
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -5413,6 +5527,11 @@ mod tests {
             track_selection: None,
             track_groups: Vec::new(),
             audio_description: AudioDescriptionWrite::V0,
+            tkhd_matrix: None,
+            tkhd_layer: 0,
+            tkhd_alternate_group: 0,
+            tkhd_volume: None,
+            tkhd_flags: None,
         }
     }
 
@@ -5874,6 +5993,11 @@ mod tests {
             track_selection: None,
             track_groups: Vec::new(),
             audio_description: AudioDescriptionWrite::V0,
+            tkhd_matrix: None,
+            tkhd_layer: 0,
+            tkhd_alternate_group: 0,
+            tkhd_volume: None,
+            tkhd_flags: None,
         };
         assert!(build_stss(&t).is_none());
     }
@@ -5917,6 +6041,11 @@ mod tests {
             track_selection: None,
             track_groups: Vec::new(),
             audio_description: AudioDescriptionWrite::V0,
+            tkhd_matrix: None,
+            tkhd_layer: 0,
+            tkhd_alternate_group: 0,
+            tkhd_volume: None,
+            tkhd_flags: None,
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -5988,6 +6117,11 @@ mod tests {
             track_selection: None,
             track_groups: Vec::new(),
             audio_description: AudioDescriptionWrite::V0,
+            tkhd_matrix: None,
+            tkhd_layer: 0,
+            tkhd_alternate_group: 0,
+            tkhd_volume: None,
+            tkhd_flags: None,
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -6050,6 +6184,11 @@ mod tests {
             track_selection: None,
             track_groups: Vec::new(),
             audio_description: AudioDescriptionWrite::V0,
+            tkhd_matrix: None,
+            tkhd_layer: 0,
+            tkhd_alternate_group: 0,
+            tkhd_volume: None,
+            tkhd_flags: None,
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

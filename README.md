@@ -497,6 +497,13 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   `set_movie_current_time` fill the six QuickTime `mvhd` time fields
   (QTFF pp. 33–34). Round-trip onto `Mvhd`; honoured on the
   fragmented init `moov` too.
+- Per-track `tkhd` overrides (QTFF p. 42): `set_track_matrix`
+  (rotated-recording display matrix), `set_track_layer`
+  (compositing order), `set_track_alternate_group` (pairs with
+  `tsel`), `set_track_volume` (8.8 fixed-point), and
+  `set_track_flags` (enabled / in-movie / in-preview / in-poster —
+  a disabled track drops out of `presentation_tracks()`). All
+  round-trip onto `Tkhd` and hold on the fragmented init path.
 - `with_compressed_movie_resource()` (opt-in) compresses the trailing
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.
