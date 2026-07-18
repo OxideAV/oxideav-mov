@@ -2776,8 +2776,10 @@ impl MovDemuxer {
             return fallback;
         }
         // Edited media ticks → movie ticks (half-up), the inverse of
-        // the applied mode's movie→media rescale.
-        let movie_pts = ((fallback as i128 * mvs as i128 + mds as i128 / 2) / mds as i128) as i64;
+        // the applied mode's movie→media rescale. Saturating: hostile
+        // timescale ratios can push the product past `i64`.
+        let movie_pts =
+            crate::edit::sat_i64((fallback as i128 * mvs as i128 + mds as i128 / 2) / mds as i128);
         let owned;
         let segments: &[crate::EditSegment] = match self.edited_segments.get(track_index) {
             Some(segs) if self.edited_segments.len() == self.tracks.len() => segs,
@@ -2806,7 +2808,9 @@ impl MovDemuxer {
             }
             match seg.kind {
                 crate::EditSegmentKind::Empty => continue,
-                crate::EditSegmentKind::Dwell { media_time } => return media_time as i64,
+                crate::EditSegmentKind::Dwell { media_time } => {
+                    return crate::edit::sat_i64(media_time as i128)
+                }
                 crate::EditSegmentKind::Media {
                     media_time_start,
                     media_rate,
@@ -2814,14 +2818,16 @@ impl MovDemuxer {
                     if media_rate <= 0 {
                         continue;
                     }
-                    return media_time_start as i64;
+                    return crate::edit::sat_i64(media_time_start as i128);
                 }
             }
         }
         for seg in segments.iter().rev() {
             match seg.kind {
                 crate::EditSegmentKind::Empty => continue,
-                crate::EditSegmentKind::Dwell { media_time } => return media_time as i64,
+                crate::EditSegmentKind::Dwell { media_time } => {
+                    return crate::edit::sat_i64(media_time as i128)
+                }
                 crate::EditSegmentKind::Media {
                     media_time_start,
                     media_rate,
@@ -2830,7 +2836,7 @@ impl MovDemuxer {
                         continue;
                     }
                     let span = media_span(seg, media_rate as i128).max(1);
-                    return (media_time_start as i128 + span - 1) as i64;
+                    return crate::edit::sat_i64(media_time_start as i128 + span - 1);
                 }
             }
         }

@@ -127,6 +127,23 @@ pub enum EditSegmentKind {
     },
 }
 
+/// Saturating `i128 → i64` narrowing used by every mapper in this
+/// module. Edit-list fields are attacker-controlled 64-bit values
+/// (`elst` v1 carries full `u64` durations and `i64` media times), so
+/// intermediate products routinely leave the `i64` range on hostile
+/// input; clamping to the representable bounds keeps every mapping
+/// total (no wrap-around, no panic) while preserving ordering.
+#[inline]
+pub(crate) fn sat_i64(v: i128) -> i64 {
+    if v > i64::MAX as i128 {
+        i64::MAX
+    } else if v < i64::MIN as i128 {
+        i64::MIN
+    } else {
+        v as i64
+    }
+}
+
 /// Parse an `elst` payload.
 ///
 /// Layout per QTFF Figure 2-11 (p. 47): `[ver+flags=4][n=4]` followed
@@ -331,7 +348,7 @@ pub fn media_pts_to_movie_pts(
             EditSegmentKind::Empty => continue,
             EditSegmentKind::Dwell { media_time } => {
                 if media_pts as i128 == media_time as i128 {
-                    return Some(seg.movie_time_start as i64);
+                    return Some(sat_i64(seg.movie_time_start as i128));
                 }
             }
             EditSegmentKind::Media {
@@ -365,7 +382,7 @@ pub fn media_pts_to_movie_pts(
                 // == media_time_start` exclusively.
                 if seg_dur_media == 0 {
                     if media_pts as i128 == media_start {
-                        return Some(seg.movie_time_start as i64);
+                        return Some(sat_i64(seg.movie_time_start as i128));
                     }
                     continue;
                 }
@@ -375,7 +392,7 @@ pub fn media_pts_to_movie_pts(
                     let num = delta_media * mvs * RATE_ONE;
                     let denom = mds * rate_fp;
                     let delta_movie = (num + denom / 2) / denom;
-                    return Some(seg.movie_time_start as i64 + delta_movie as i64);
+                    return Some(sat_i64(seg.movie_time_start as i128 + delta_movie));
                 }
             }
         }
@@ -479,7 +496,7 @@ pub fn movie_pts_to_media_pts(
         }
         match seg.kind {
             EditSegmentKind::Empty => return None,
-            EditSegmentKind::Dwell { media_time } => return Some(media_time as i64),
+            EditSegmentKind::Dwell { media_time } => return Some(sat_i64(media_time as i128)),
             EditSegmentKind::Media {
                 media_time_start,
                 media_rate,
@@ -498,7 +515,7 @@ pub fn movie_pts_to_media_pts(
                 let denom = mvs * RATE_ONE;
                 let delta_media = (num + denom / 2) / denom;
                 let media = media_time_start as i128 + delta_media;
-                return Some(media as i64);
+                return Some(sat_i64(media));
             }
         }
     }
@@ -598,9 +615,9 @@ pub fn edited_timing_for_sample(
                 let start = movie_to_media(seg.movie_time_start as i128);
                 let end = movie_to_media(seg.movie_time_end as i128);
                 return Some(EditedTiming {
-                    pts: start as i64,
-                    dts: (start - comp_offset) as i64,
-                    duration: (end - start).max(0) as i64,
+                    pts: sat_i64(start),
+                    dts: sat_i64(start - comp_offset),
+                    duration: sat_i64((end - start).max(0)),
                 });
             }
             EditSegmentKind::Media {
@@ -650,9 +667,9 @@ pub fn edited_timing_for_sample(
                 let end_media = (p + (media_duration.max(0) as i128)).min(media_end);
                 let duration = (scale(end_media - media_start) - scale(p - media_start)).max(0);
                 return Some(EditedTiming {
-                    pts: pts as i64,
-                    dts: dts as i64,
-                    duration: duration as i64,
+                    pts: sat_i64(pts),
+                    dts: sat_i64(dts),
+                    duration: sat_i64(duration),
                 });
             }
         }
@@ -1297,6 +1314,102 @@ mod tests {
         ];
         assert_eq!(movie_pts_to_media_pts(&segs, 50, 100, 100), None);
         assert_eq!(movie_pts_to_media_pts(&segs, 150, 100, 100), None);
+    }
+
+    // ─────────── round 417: saturating rescale on hostile 64-bit fields ───────────
+
+    #[test]
+    fn forward_mapper_saturates_on_giant_movie_window() {
+        // A v1-scale segment whose movie-time bounds exceed i64::MAX
+        // (track_duration is a free u64 on wire). Mapping a media_pts
+        // inside must clamp to i64::MAX, never wrap negative or panic.
+        let segs = vec![EditSegment {
+            movie_time_start: u64::MAX - 10,
+            movie_time_end: u64::MAX,
+            kind: EditSegmentKind::Media {
+                media_time_start: 0,
+                media_rate: 0x0001_0000,
+            },
+        }];
+        assert_eq!(media_pts_to_movie_pts(&segs, 5, 100, 100), Some(i64::MAX));
+        // Dwell at a past-i64 movie start clamps the same way.
+        let segs = vec![EditSegment {
+            movie_time_start: u64::MAX - 1,
+            movie_time_end: u64::MAX,
+            kind: EditSegmentKind::Dwell { media_time: 7 },
+        }];
+        assert_eq!(media_pts_to_movie_pts(&segs, 7, 100, 100), Some(i64::MAX));
+    }
+
+    #[test]
+    fn inverse_mapper_saturates_on_giant_media_time() {
+        // media_time is a free i64 on wire (v1); a dwell holding a
+        // past-i64-range u64 tick and a Media segment whose
+        // media_time_start pushes the sum past i64::MAX both clamp.
+        let segs = vec![EditSegment {
+            movie_time_start: 0,
+            movie_time_end: 100,
+            kind: EditSegmentKind::Dwell {
+                media_time: u64::MAX,
+            },
+        }];
+        assert_eq!(movie_pts_to_media_pts(&segs, 50, 100, 100), Some(i64::MAX));
+        let segs = vec![EditSegment {
+            movie_time_start: 0,
+            movie_time_end: 100,
+            kind: EditSegmentKind::Media {
+                media_time_start: u64::MAX - 3,
+                media_rate: 0x0001_0000,
+            },
+        }];
+        assert_eq!(movie_pts_to_media_pts(&segs, 99, 100, 100), Some(i64::MAX));
+    }
+
+    #[test]
+    fn edited_timing_saturates_on_giant_movie_window() {
+        // Dwell whose movie window sits past i64::MAX: pts/duration
+        // clamp; dts (pts - comp_offset) stays clamped too.
+        let segs = vec![EditSegment {
+            movie_time_start: u64::MAX - 100,
+            movie_time_end: u64::MAX,
+            kind: EditSegmentKind::Dwell { media_time: 42 },
+        }];
+        let t = edited_timing_for_sample(&segs, 42, 42, 1, 100, 100).unwrap();
+        assert_eq!(t.pts, i64::MAX);
+        assert_eq!(t.dts, i64::MAX);
+        assert!(t.duration >= 0);
+        // Media segment past i64::MAX: same contract.
+        let segs = vec![EditSegment {
+            movie_time_start: u64::MAX - 100,
+            movie_time_end: u64::MAX,
+            kind: EditSegmentKind::Media {
+                media_time_start: 0,
+                media_rate: 0x0001_0000,
+            },
+        }];
+        let t = edited_timing_for_sample(&segs, 10, 10, 1, 100, 100).unwrap();
+        assert_eq!(t.pts, i64::MAX);
+        assert!(t.duration >= 0);
+    }
+
+    #[test]
+    fn tiny_rate_giant_delta_saturates_forward_mapping() {
+        // media_rate = 1 (≈ 1/65536×) blows the Δmovie product up by
+        // 65536²; combined with a large media delta the result leaves
+        // i64 and must clamp.
+        let segs = vec![EditSegment {
+            movie_time_start: 0,
+            movie_time_end: u64::MAX,
+            kind: EditSegmentKind::Media {
+                media_time_start: 0,
+                media_rate: 1,
+            },
+        }];
+        // Window: u64::MAX movie ticks × (mds/mvs = 1/90000) × rate
+        // 1/65536 ≈ 3.1e9 media ticks. media_pts 3e9 sits inside;
+        // Δmovie = 3e9 × 90000 × 65536 ≈ 1.8e19 > i64::MAX → clamp.
+        let got = media_pts_to_movie_pts(&segs, 3_000_000_000, 90_000, 1);
+        assert_eq!(got, Some(i64::MAX));
     }
 
     #[test]
