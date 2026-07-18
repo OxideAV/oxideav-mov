@@ -535,7 +535,9 @@ bytes through `MovDemuxer::open`, drains up to 256 packets, touches
 every file-scope and per-track accessor, exercises the edit-list
 mapper at boundary PTS values, re-runs the seek path, then flips on
 the applied edit-list mode for a second drain + edited-seek pass
-(probing `edited_pts_to_media_pts` at boundary values). Alias
+(probing `edited_pts_to_media_pts` at boundary values), and a third
+pass with discard emission on (`emit_never_presented`) plus the
+typed elst summary accessors. Alias
 resolution is excluded so a fuzz input can't reach the network or
 filesystem. A daily 30-minute run is scheduled.
 

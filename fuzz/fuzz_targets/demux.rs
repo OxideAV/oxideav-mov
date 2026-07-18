@@ -420,4 +420,28 @@ fuzz_target!(|data: &[u8]| {
             break;
         }
     }
+
+    // Round-417 never-presented (discard) emission + typed elst
+    // surface. The extrapolation mapper
+    // (`never_presented_timing_for_sample`) joins the `next_packet`
+    // hot path when the switch is on, and must survive the same
+    // attacker-controlled edit lists as the presented-path mapper —
+    // plus the summary accessors' saturating sums over hostile
+    // 64-bit `track_duration` / `media_time` fields.
+    dmx.emit_never_presented(true);
+    let _ = dmx.never_presented_emitted();
+    for ti in 0..ntracks {
+        if let Some(t) = dmx.tracks.get(ti) {
+            let _ = t.elst_version;
+            let _ = t.edit_start_delay();
+            let _ = t.edit_media_start();
+            let _ = t.edit_total_duration();
+        }
+    }
+    let _ = dmx.seek_to(0, 0);
+    for _ in 0..MAX_PACKETS_PER_INPUT {
+        if dmx.next_packet().is_err() {
+            break;
+        }
+    }
 });

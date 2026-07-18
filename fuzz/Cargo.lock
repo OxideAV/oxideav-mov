@@ -96,9 +96,9 @@ checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 
 [[package]]
 name = "oxideav-core"
-version = "0.1.26"
+version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "068fc43174e7aa261fab5a399a6bf206ec3daf324e8df7fb17ecbcba2146a663"
+checksum = "a54aa1325a68336d9ddd71f4ff1c6b24a0084edae63c04677248f99ceb6479b2"
 dependencies = [
  "bytemuck",
  "serde_json",
