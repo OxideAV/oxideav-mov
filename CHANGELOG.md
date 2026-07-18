@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-mov/compare/v0.0.4...v0.0.5) - 2026-07-18
+
+### Other
+
+- reword a round-19 policy comment to name no external implementations
+- tkhd write-side headroom — matrix, layer, alternate group, volume, flags
+- extend demux target to the discard-emission + typed elst surface
+- mvhd movie matrix + QuickTime preview/poster/selection fields
+- ffprobe black-box parity suite for edit-list timelines
+- edts/elst full-semantics parity — dwell/rate constructors, negative-rate validation, fragmented init edts
+- discard-flagged never-presented media in applied edit mode
+- typed elst surface — FullBox header, list summaries, Track accessors
+- saturating i64 narrowing across all timeline mappers
+- accept brand/MIME summary as heif-info container-parse signal
+- doc(hidden) the CodecResolverShim internal alias; public-surface audit
+- byte-str spellings for language/FourCC literals
+- neutralise decorative writer-name comments in src
+- fuzz sound-description surfaces; fix two hostile-allocation OOMs
+- write-side SoundDescriptionV2 (QTFF 2012-08-14 pp. 181-182)
+- typed sound-description extension atoms (QTFF 2012-08-14 pp. 183-187)
+- read SoundDescriptionV2 + lpcm flags (QTFF 2012-08-14 pp. 181-183)
+- refuse local bytes for external dref samples (QTFF p. 65)
+- fuzz the applied edit-list surface
+- derive tkhd/mvhd durations from edit lists (QTFF p. 41)
+- write-side SoundDescriptionV1 + ISO AudioSampleEntryV1/srat/chnl
+- read ISO AudioSampleEntryV1 + srat + chnl (ISO/IEC 14496-12 s12.2)
+- edited-timeline seek under applied edit lists
+- applied edit-list packet timing (opt-in edited timeline)
+- fix video stsd fixed-body field offsets (QTFF p. 92)
+- add CI / crates.io / docs.rs / MIT-license badges
+- MovMuxer write-side Track Group box (trgr)
+- MovMuxer write-side Track Selection box (tsel)
+- MovMuxer write-side Track Kind box (kind)
+- MovMuxer write-side Track Matte atom (matt > kmat)
+- MovMuxer write-side Track Clipping atom (clip > crgn)
+- MovMuxer write-side Track Load Settings atom (load)
+- MovMuxer write-side per-sample auxiliary sample-table boxes (sdtp/stdp/padb/stsh/subs)
+- MovMuxer write-side Compact Sample Size Box (stz2)
+- MovMuxer write-side ISO BMFF hint track (hmhd + protocol stsd)
+- MovMuxer write-side ISO BMFF timed-text track (stxt)
+- MovMuxer write-side ISO BMFF subtitle track (stpp/sbtt)
+- MovMuxer write-side ISO BMFF timed-metadata track (metx/mett/urim)
+- MovMuxer write-side gmhd/gmin + gmhd/text matrix override
+- MovMuxer write-side per-track language (mdhd.language + elng)
+- MovMuxer write-side chapter / text track (MuxTrackKind::Text)
+- MovMuxer write-side time-code track (MuxTrackKind::Timecode)
+- MovMuxer write-side custom dref (Data Reference Box)
+- MovMuxer write-side tapt (Track Aperture Modes box)
+- MovMuxer write-side tref (Track Reference Box)
+- README + CHANGELOG + crate-root export for visual-extension write path
+- MovMuxer write-side visual sample-description extensions (pasp/colr/clap/fiel/gama)
+- serialisers for pasp/clap/colr/fiel visual sample-description extensions
+- README + CHANGELOG — round 364 write-side sgpd / sbgp / cslg
+- MovMuxer write-side classic sbgp (SampleToGroupBox) form
+- MovMuxer write-side cslg (CompositionToDecodeBox) — auto + explicit
+- MovMuxer write-side sgpd (SampleGroupDescriptionBox) — sibling of csgp
+- parse ISO BMFF SimpleTextSampleEntry (stxt) on text-handler tracks
+- typed QuickTime Text Sample Description (text format in stsd)
+- neutralise reference-impl naming in sgpd v0 doc-comment
+- classify ISO BMFF tref reference types (cdsc/font/hind/vdep/vplx/subt)
+- classify media-header box + parse elng Extended Language Tag
+- demuxer per-sample 'tele'/'sap '/'rash'/'alst' lookups + fixture test
+- typed sgpd 'rash' RateShare + 'alst' AlternativeStartup entries (§10.2.2.2 / §10.3.2)
+- typed sgpd 'tele' / 'sap ' sample-group entries (§10.5.2 / §10.6.2)
+- Round 347 — track-scope Apple QuickTime Metadata (trak/meta) write path
+- Round 347 — MovMuxer write-side Apple QuickTime Metadata (moov/meta keys/ilst)
+- Round 344 — ISO BMFF subtitle sample entries (stpp/sbtt)
+- Round 344 — Hint Media Header Box (hmhd) parsing
+- Round 344 — ISO BMFF timed-metadata sample entries (metx/mett/urim)
+- Round 340 — README: timecode-track sample-data decode + start_timecode
+- Round 340 — start_timecode: resolve a track's starting timecode (QTFF p. 222)
+- Round 340 — honour structured tmcd source-reference name (QTFF p. 224)
+- Round 340 — Timecode Sample Data decoding (QTFF p. 108)
+- Round 334 — MovMuxer write-side user-data metadata (udta) emission
+- Round 329 — MovMuxer write-side edit list (edts > elst) emission
+- Sound Sample Description version-1 read path (QTFF p. 101)
+- Round 319 — MovMuxer write-side csgp (CompactSampleToGroupBox) emission
+- Round 315 — MovMuxer write-side ctts composition-offset emission
+- refresh to current status, drop per-round changelog cruft
+
 ### Other
 
 - Round 417 — **`tkhd` write-side headroom** (QTFF p. 42): the track header's display matrix, layer, alternate_group, volume, and 24-bit flags were hardcoded on write (identity / 0 / 0 / kind-default / 0x7) even though the demuxer surfaces all five typed. New granular setters, each honoured on the non-fragmented and fragmented (init-`trak`) paths: `set_track_matrix(Option<[i32;9]>)` (rotated-recording authoring; round-trips `Tkhd::rotation`), `set_track_layer` (front-to-back compositing order), `set_track_alternate_group` (mutual-alternates id — pairs with the existing `tsel` switch-group support, whose semantics operate *within* an alternate group; round-trips the demuxer's `alternate_groups()` fold), `set_track_volume` (8.8 fixed-point override of the audio-1.0/visual-0 default), and `set_track_flags` (enabled / in-movie / in-preview / in-poster bits — a track written without `0x1` drops out of `presentation_tracks()`; values past 24 bits rejected). 5 round-trip/validation tests
