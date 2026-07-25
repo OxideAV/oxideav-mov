@@ -1251,6 +1251,32 @@ pub enum ChunkStrategy {
     InterleaveByMovieTicks(u32),
 }
 
+/// Where the non-fragmented write path places the `moov` atom relative
+/// to the `mdat`.
+///
+/// QTFF's "Optimizing … for Web Playback" section (p. 365): "The
+/// important change that took place to allow this [progressive
+/// playback] to happen was for QuickTime to place global movie
+/// information at the beginning of the file. Originally, this
+/// information was at the end of the file." Atom order at the top
+/// level is otherwise free — [`crate::MovDemuxer`] accepts both and
+/// reports the layout via
+/// [`is_faststart`](crate::MovDemuxer::is_faststart).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MoovPlacement {
+    /// `ftyp` + `mdat` + `moov` — the historical default. Chunk
+    /// offsets are independent of the `moov` size, and the compressed
+    /// movie resource (`cmov`) option is available.
+    #[default]
+    AfterMdat,
+    /// `ftyp` + `moov` + `mdat` — "faststart": a front-to-back reader
+    /// has the complete sample tables before any sample bytes. Chunk
+    /// offsets are resolved by a fixed-point sizing pass over the
+    /// `moov`'s own length. Incompatible with
+    /// [`MovMuxer::with_compressed_movie_resource`].
+    BeforeMdat,
+}
+
 /// One resolved `mdat` chunk belonging to a track: an absolute file
 /// offset (what `stco`/`co64` store, ISO/IEC 14496-12 §8.7.5 / QTFF
 /// p. 78) plus the number of consecutive media-order samples laid down
@@ -1313,6 +1339,10 @@ pub struct MovMuxer {
     /// one-chunk-per-track layout. No effect on the fragmented path
     /// (fragment slicing is governed by [`FragmentationMode`]).
     chunk_strategy: ChunkStrategy,
+    /// Where the non-fragmented write path places `moov` relative to
+    /// `mdat` (see [`MoovPlacement`]). Defaults to the historical
+    /// mdat-first layout. No effect on the fragmented path.
+    moov_placement: MoovPlacement,
     /// When `true`, the non-fragmented write path losslessly compresses
     /// the serialized movie resource and emits it as a
     /// `moov > cmov > dcom + cmvd` tree (QTFF p. 81, "Allowing QuickTime
@@ -1360,6 +1390,7 @@ impl MovMuxer {
             tracks: Vec::new(),
             fragmentation: None,
             chunk_strategy: ChunkStrategy::default(),
+            moov_placement: MoovPlacement::default(),
             compress_movie_resource: false,
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
@@ -1412,6 +1443,27 @@ impl MovMuxer {
     /// Return the configured non-fragmented chunking rule.
     pub fn chunk_strategy(&self) -> ChunkStrategy {
         self.chunk_strategy
+    }
+
+    /// Select where the non-fragmented write path places the `moov`
+    /// atom (see [`MoovPlacement`]). [`MoovPlacement::BeforeMdat`] is
+    /// the "faststart" web-playback layout (QTFF p. 365); the default
+    /// keeps the historical `ftyp` + `mdat` + `moov` order.
+    pub fn with_moov_placement(mut self, placement: MoovPlacement) -> Self {
+        self.moov_placement = placement;
+        self
+    }
+
+    /// Convenience for
+    /// `with_moov_placement(MoovPlacement::BeforeMdat)` — emit the
+    /// "faststart" layout (`ftyp` + `moov` + `mdat`).
+    pub fn with_faststart(self) -> Self {
+        self.with_moov_placement(MoovPlacement::BeforeMdat)
+    }
+
+    /// Return the configured `moov` placement.
+    pub fn moov_placement(&self) -> MoovPlacement {
+        self.moov_placement
     }
 
     /// Opt-in lossless compression of the movie resource on the
@@ -2921,6 +2973,9 @@ impl MovMuxer {
         } else {
             8
         };
+        if self.moov_placement == MoovPlacement::BeforeMdat {
+            return self.encode_faststart(&segments, ftyp_size, mdat_body_len, mdat_header_len);
+        }
         let mdat_payload_offset = ftyp_size + mdat_header_len;
 
         // Resolve every chunk's / aux slab's absolute file offset by
@@ -2957,6 +3012,66 @@ impl MovMuxer {
             push_atom(&mut out, *b"moov", &moov);
         }
         Ok(out)
+    }
+
+    /// Faststart emission: `ftyp` + `moov` + `mdat`, the "global movie
+    /// information at the beginning of the file" layout QTFF's
+    /// "Optimizing … for Web Playback" section (p. 365) credits with
+    /// enabling progressive playback — a reader that consumes the file
+    /// front-to-back has the complete sample tables before any sample
+    /// bytes arrive.
+    ///
+    /// Chunk offsets are file-absolute, so they now depend on the
+    /// `moov`'s own byte size — which in turn depends only on the
+    /// *widths* chosen for the offset-bearing boxes (`stco` vs `co64`,
+    /// `saio` v0 vs v1), never on the offset values themselves. The
+    /// sizing loop exploits that: build a candidate `moov`, recompute
+    /// the mdat base from its size, and repeat until the size is
+    /// stable. Widths only ever widen as offsets grow, so the loop is
+    /// monotone and converges in a handful of iterations.
+    fn encode_faststart(
+        &self,
+        segments: &[MdatSegment],
+        ftyp_size: u64,
+        mdat_body_len: u64,
+        mdat_header_len: u64,
+    ) -> Result<Vec<u8>> {
+        if self.compress_movie_resource {
+            // A zlib-compressed movie resource's size depends on the
+            // byte *values* of the chunk offsets it contains, so the
+            // fixed-point sizing above has no stable solution. QTFF's
+            // own compressed-movie layout (p. 81) is described with the
+            // movie data preceding the compressed resource.
+            return Err(Error::invalid(
+                "MOV muxer: moov-before-mdat placement cannot be combined with \
+                 a compressed movie resource (cmov) — the compressed size would \
+                 depend on the chunk offsets it stores",
+            ));
+        }
+        let mut moov_atom_len: u64 = 0;
+        for _ in 0..8 {
+            let base = ftyp_size + moov_atom_len + mdat_header_len;
+            let (chunks, aux_offsets) = self.layout_segments(segments, base);
+            let need_co64 = chunks.iter().flatten().any(|c| c.offset > u32::MAX as u64);
+            let moov = build_moov(self, &chunks, need_co64, &aux_offsets);
+            let new_len = moov.len() as u64 + 8;
+            if new_len == moov_atom_len {
+                let mut out = Vec::with_capacity(
+                    (ftyp_size + moov_atom_len + mdat_header_len + mdat_body_len) as usize,
+                );
+                out.extend_from_slice(&build_ftyp());
+                push_atom(&mut out, *b"moov", &moov);
+                emit_mdat_header(&mut out, mdat_body_len);
+                self.emit_segments(&mut out, segments);
+                return Ok(out);
+            }
+            moov_atom_len = new_len;
+        }
+        // Unreachable in practice: each iteration either stabilises or
+        // widens at least one offset field, and there are finitely many.
+        Err(Error::invalid(
+            "MOV muxer: faststart moov sizing did not converge",
+        ))
     }
 
     /// Plan the non-fragmented `mdat` payload as an ordered segment
