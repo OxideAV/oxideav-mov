@@ -1222,6 +1222,36 @@ pub enum FragmentationMode {
     ByFrameCount(u32),
 }
 
+/// One resolved `mdat` chunk belonging to a track: an absolute file
+/// offset (what `stco`/`co64` store, ISO/IEC 14496-12 §8.7.5 / QTFF
+/// p. 78) plus the number of consecutive media-order samples laid down
+/// there (what the matching `stsc` run describes, §8.7.4 / QTFF p. 76).
+#[derive(Clone, Copy, Debug)]
+struct TrackChunk {
+    /// Absolute file offset of the chunk's first sample byte.
+    offset: u64,
+    /// Number of consecutive samples (in media order) in this chunk.
+    sample_count: u32,
+}
+
+/// One planned span of the non-fragmented `mdat` payload, in file
+/// order, before absolute offsets are assigned. The layout pass walks
+/// the segment list once, accumulating a cursor, to resolve every
+/// [`TrackChunk`] offset and aux-slab offset; the emit pass walks the
+/// same list writing bytes, so the two can never disagree.
+enum MdatSegment {
+    /// A run of consecutive samples from one track.
+    Chunk {
+        track_idx: usize,
+        first_sample: usize,
+        sample_count: usize,
+    },
+    /// A track's complete sample-auxiliary-information slab
+    /// (§8.7.8/§8.7.9) — always contiguous so the single-entry `saio`
+    /// (§8.7.9.3) can address it.
+    AuxSlab { track_idx: usize },
+}
+
 /// Writer-side counterpart of [`crate::demuxer::MovDemuxer`]. Builds a
 /// non-fragmented MOV/MP4 carrying one or more video/audio tracks; the
 /// emitted file is structurally accepted by `ffprobe -of json` and
@@ -2834,19 +2864,8 @@ impl MovMuxer {
         //    sample order immediately after the track's sample data so a
         //    single-entry `saio` (§8.7.9.3) addresses the whole slab.
         let ftyp_size: u64 = 28;
-        let track_sample_bytes =
-            |t: &TrackWrite| -> u64 { t.samples.iter().map(|s| s.data.len() as u64).sum::<u64>() };
-        let track_aux_bytes = |t: &TrackWrite| -> u64 {
-            t.sample_aux
-                .as_ref()
-                .map(|a| a.per_sample.iter().map(|b| b.len() as u64).sum::<u64>())
-                .unwrap_or(0)
-        };
-        let mdat_body_len: u64 = self
-            .tracks
-            .iter()
-            .map(|t| track_sample_bytes(t) + track_aux_bytes(t))
-            .sum();
+        let segments = self.plan_mdat_segments()?;
+        let mdat_body_len: u64 = segments.iter().map(|s| self.segment_len(s)).sum();
         let mdat_header_len: u64 = if mdat_body_len + 8 > u32::MAX as u64 {
             16
         } else {
@@ -2854,41 +2873,20 @@ impl MovMuxer {
         };
         let mdat_payload_offset = ftyp_size + mdat_header_len;
 
-        // Per-track chunk offset = where the track's sample data
-        // begins; the aux slab (if any) starts at
-        // `chunk_offset + track_sample_bytes`. Both are absolute file
-        // offsets — exactly what `stco`/`co64` and the §8.7.9.3
-        // Sample-Table-scope `saio` require.
-        let mut chunk_offsets = Vec::with_capacity(self.tracks.len());
-        let mut aux_offsets: Vec<Option<u64>> = Vec::with_capacity(self.tracks.len());
-        let mut cursor = mdat_payload_offset;
-        for t in &self.tracks {
-            chunk_offsets.push(cursor);
-            cursor += track_sample_bytes(t);
-            if t.sample_aux.is_some() {
-                aux_offsets.push(Some(cursor));
-            } else {
-                aux_offsets.push(None);
-            }
-            cursor += track_aux_bytes(t);
-        }
-        let need_co64 = chunk_offsets.iter().any(|&o| o > u32::MAX as u64);
+        // Resolve every chunk's / aux slab's absolute file offset by
+        // walking the planned segments once. `stco`/`co64` and the
+        // §8.7.9.3 Sample-Table-scope `saio` all require absolute
+        // offsets.
+        let (chunks, aux_offsets) = self.layout_segments(&segments, mdat_payload_offset);
+        let need_co64 = chunks.iter().flatten().any(|c| c.offset > u32::MAX as u64);
 
         // ── Pass 2: emit bytes.
-        let mut out = Vec::with_capacity((cursor + 4096) as usize);
+        let mut out =
+            Vec::with_capacity((ftyp_size + mdat_header_len + mdat_body_len + 4096) as usize);
         out.extend_from_slice(&build_ftyp());
         emit_mdat_header(&mut out, mdat_body_len);
-        for t in &self.tracks {
-            for s in &t.samples {
-                out.extend_from_slice(&s.data);
-            }
-            if let Some(aux) = &t.sample_aux {
-                for blob in &aux.per_sample {
-                    out.extend_from_slice(blob);
-                }
-            }
-        }
-        let moov = build_moov(self, &chunk_offsets, need_co64, &aux_offsets);
+        self.emit_segments(&mut out, &segments);
+        let moov = build_moov(self, &chunks, need_co64, &aux_offsets);
         if self.compress_movie_resource {
             // QTFF p. 30: the complete movie resource is the full `moov`
             // atom (its 8-byte header included). p. 81: compress that
@@ -2909,6 +2907,102 @@ impl MovMuxer {
             push_atom(&mut out, *b"moov", &moov);
         }
         Ok(out)
+    }
+
+    /// Plan the non-fragmented `mdat` payload as an ordered segment
+    /// list: one chunk per track (all of the track's samples), tracks
+    /// back-to-back in `add_track` order, each track's aux slab (if
+    /// any) directly after its sample data — the historical round-19
+    /// layout.
+    fn plan_mdat_segments(&self) -> Result<Vec<MdatSegment>> {
+        let mut segs = Vec::with_capacity(self.tracks.len() * 2);
+        for (track_idx, t) in self.tracks.iter().enumerate() {
+            segs.push(MdatSegment::Chunk {
+                track_idx,
+                first_sample: 0,
+                sample_count: t.samples.len(),
+            });
+            if t.sample_aux.is_some() {
+                segs.push(MdatSegment::AuxSlab { track_idx });
+            }
+        }
+        Ok(segs)
+    }
+
+    /// Byte length of one planned `mdat` segment.
+    fn segment_len(&self, seg: &MdatSegment) -> u64 {
+        match seg {
+            MdatSegment::Chunk {
+                track_idx,
+                first_sample,
+                sample_count,
+            } => self.tracks[*track_idx].samples[*first_sample..*first_sample + *sample_count]
+                .iter()
+                .map(|s| s.data.len() as u64)
+                .sum(),
+            MdatSegment::AuxSlab { track_idx } => self.tracks[*track_idx]
+                .sample_aux
+                .as_ref()
+                .map(|a| a.per_sample.iter().map(|b| b.len() as u64).sum())
+                .unwrap_or(0),
+        }
+    }
+
+    /// Walk the planned segments once from `base` (the absolute file
+    /// offset of the first `mdat` payload byte), assigning absolute
+    /// offsets: returns the per-track chunk lists (in per-track chunk
+    /// order — segments preserve each track's media order) and the
+    /// per-track aux-slab offsets.
+    fn layout_segments(
+        &self,
+        segments: &[MdatSegment],
+        base: u64,
+    ) -> (Vec<Vec<TrackChunk>>, Vec<Option<u64>>) {
+        let mut chunks: Vec<Vec<TrackChunk>> = vec![Vec::new(); self.tracks.len()];
+        let mut aux_offsets: Vec<Option<u64>> = vec![None; self.tracks.len()];
+        let mut cursor = base;
+        for seg in segments {
+            match seg {
+                MdatSegment::Chunk {
+                    track_idx,
+                    sample_count,
+                    ..
+                } => chunks[*track_idx].push(TrackChunk {
+                    offset: cursor,
+                    sample_count: *sample_count as u32,
+                }),
+                MdatSegment::AuxSlab { track_idx } => aux_offsets[*track_idx] = Some(cursor),
+            }
+            cursor += self.segment_len(seg);
+        }
+        (chunks, aux_offsets)
+    }
+
+    /// Append the planned segments' bytes to `out`, in segment order —
+    /// the mirror of [`MovMuxer::layout_segments`].
+    fn emit_segments(&self, out: &mut Vec<u8>, segments: &[MdatSegment]) {
+        for seg in segments {
+            match seg {
+                MdatSegment::Chunk {
+                    track_idx,
+                    first_sample,
+                    sample_count,
+                } => {
+                    for s in &self.tracks[*track_idx].samples
+                        [*first_sample..*first_sample + *sample_count]
+                    {
+                        out.extend_from_slice(&s.data);
+                    }
+                }
+                MdatSegment::AuxSlab { track_idx } => {
+                    if let Some(aux) = &self.tracks[*track_idx].sample_aux {
+                        for blob in &aux.per_sample {
+                            out.extend_from_slice(blob);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Emit the fragmented file to a writer.
@@ -3099,7 +3193,7 @@ fn emit_mdat_header(out: &mut Vec<u8>, body_len: u64) {
 
 fn build_moov(
     m: &MovMuxer,
-    chunk_offsets: &[u64],
+    chunks: &[Vec<TrackChunk>],
     need_co64: bool,
     aux_offsets: &[Option<u64>],
 ) -> Vec<u8> {
@@ -3110,7 +3204,7 @@ fn build_moov(
             t,
             (idx as u32) + 1,
             m.movie_timescale,
-            chunk_offsets[idx],
+            &chunks[idx],
             need_co64,
             aux_offsets[idx],
         );
@@ -3299,7 +3393,7 @@ fn build_trak(
     t: &TrackWrite,
     track_id: u32,
     movie_ts: u32,
-    chunk_offset: u64,
+    chunks: &[TrackChunk],
     need_co64: bool,
     aux_offset: Option<u64>,
 ) -> Vec<u8> {
@@ -3356,7 +3450,7 @@ fn build_trak(
     push_atom(
         &mut trak,
         *b"mdia",
-        &build_mdia(t, chunk_offset, need_co64, aux_offset),
+        &build_mdia(t, chunks, need_co64, aux_offset),
     );
     // Track-level user-data box as a trailing child of `trak` (QTFF
     // p. 41, Figure 2-3: `udta` is the trailing track-atom child). The
@@ -3573,7 +3667,7 @@ fn build_tkhd(t: &TrackWrite, track_id: u32, movie_ts: u32) -> Vec<u8> {
 
 fn build_mdia(
     t: &TrackWrite,
-    chunk_offset: u64,
+    chunks: &[TrackChunk],
     need_co64: bool,
     aux_offset: Option<u64>,
 ) -> Vec<u8> {
@@ -3588,7 +3682,7 @@ fn build_mdia(
     push_atom(
         &mut mdia,
         *b"minf",
-        &build_minf(t, chunk_offset, need_co64, aux_offset),
+        &build_minf(t, chunks, need_co64, aux_offset),
     );
     mdia
 }
@@ -3646,7 +3740,7 @@ fn build_hdlr(t: &TrackWrite) -> Vec<u8> {
 
 fn build_minf(
     t: &TrackWrite,
-    chunk_offset: u64,
+    chunks: &[TrackChunk],
     need_co64: bool,
     aux_offset: Option<u64>,
 ) -> Vec<u8> {
@@ -3690,7 +3784,7 @@ fn build_minf(
     push_atom(
         &mut minf,
         *b"stbl",
-        &build_stbl(t, chunk_offset, need_co64, aux_offset),
+        &build_stbl(t, chunks, need_co64, aux_offset),
     );
     minf
 }
@@ -3914,7 +4008,7 @@ fn build_subs(rows: &[SubSampleInfo]) -> Vec<u8> {
 
 fn build_stbl(
     t: &TrackWrite,
-    chunk_offset: u64,
+    chunks: &[TrackChunk],
     need_co64: bool,
     aux_offset: Option<u64>,
 ) -> Vec<u8> {
@@ -3938,12 +4032,12 @@ fn build_stbl(
     if let Some(stss_atom) = build_stss(t) {
         push_atom(&mut stbl, *b"stss", &stss_atom);
     }
-    push_atom(&mut stbl, *b"stsc", &build_stsc(t));
+    push_atom(&mut stbl, *b"stsc", &build_stsc(chunks));
     push_sample_size_atom(&mut stbl, t);
     if need_co64 {
-        push_atom(&mut stbl, *b"co64", &build_co64(chunk_offset));
+        push_atom(&mut stbl, *b"co64", &build_co64(chunks));
     } else {
-        push_atom(&mut stbl, *b"stco", &build_stco(chunk_offset as u32));
+        push_atom(&mut stbl, *b"stco", &build_stco(chunks));
     }
     // Optional per-sample dependency / priority / padding / shadow-sync /
     // sub-sample tables. Each is emitted only when the caller attached
@@ -4678,15 +4772,26 @@ fn build_stss(t: &TrackWrite) -> Option<Vec<u8>> {
     Some(p)
 }
 
-fn build_stsc(t: &TrackWrite) -> Vec<u8> {
-    // Single-chunk-per-track layout: one stsc entry covering all
-    // samples in chunk 1.
-    let mut p = Vec::with_capacity(8 + 12);
+fn build_stsc(chunks: &[TrackChunk]) -> Vec<u8> {
+    // Sample-to-chunk (ISO/IEC 14496-12 §8.7.4 / QTFF p. 76): the table
+    // is run-length compressed — one entry per run of consecutive
+    // chunks sharing the same samples-per-chunk value; each entry names
+    // the 1-based first chunk of its run. All samples use sample
+    // description 1 (the muxer emits a single stsd entry per track).
+    let mut entries: Vec<(u32, u32)> = Vec::new(); // (first_chunk, samples_per_chunk)
+    for (i, c) in chunks.iter().enumerate() {
+        if entries.last().map(|&(_, spc)| spc) != Some(c.sample_count) {
+            entries.push(((i as u32) + 1, c.sample_count));
+        }
+    }
+    let mut p = Vec::with_capacity(8 + entries.len() * 12);
     p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
-    p.extend_from_slice(&1u32.to_be_bytes()); // entry_count
-    p.extend_from_slice(&1u32.to_be_bytes()); // first_chunk
-    p.extend_from_slice(&(t.samples.len() as u32).to_be_bytes()); // samples_per_chunk
-    p.extend_from_slice(&1u32.to_be_bytes()); // sample_description_id
+    p.extend_from_slice(&(entries.len() as u32).to_be_bytes()); // entry_count
+    for (first_chunk, samples_per_chunk) in entries {
+        p.extend_from_slice(&first_chunk.to_be_bytes());
+        p.extend_from_slice(&samples_per_chunk.to_be_bytes());
+        p.extend_from_slice(&1u32.to_be_bytes()); // sample_description_id
+    }
     p
 }
 
@@ -4789,19 +4894,27 @@ fn build_stsz(t: &TrackWrite) -> Vec<u8> {
     }
 }
 
-fn build_stco(chunk_offset: u32) -> Vec<u8> {
-    let mut p = Vec::with_capacity(12);
+fn build_stco(chunks: &[TrackChunk]) -> Vec<u8> {
+    // Chunk Offset Box (ISO/IEC 14496-12 §8.7.5 / QTFF p. 78): one
+    // 32-bit absolute file offset per chunk, in chunk order.
+    let mut p = Vec::with_capacity(8 + chunks.len() * 4);
     p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
-    p.extend_from_slice(&1u32.to_be_bytes()); // entry_count
-    p.extend_from_slice(&chunk_offset.to_be_bytes());
+    p.extend_from_slice(&(chunks.len() as u32).to_be_bytes()); // entry_count
+    for c in chunks {
+        p.extend_from_slice(&(c.offset as u32).to_be_bytes());
+    }
     p
 }
 
-fn build_co64(chunk_offset: u64) -> Vec<u8> {
-    let mut p = Vec::with_capacity(16);
+fn build_co64(chunks: &[TrackChunk]) -> Vec<u8> {
+    // 64-bit chunk-offset form (ISO/IEC 14496-12 §8.7.5), used when
+    // any chunk starts beyond the 32-bit range.
+    let mut p = Vec::with_capacity(8 + chunks.len() * 8);
     p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
-    p.extend_from_slice(&1u32.to_be_bytes()); // entry_count
-    p.extend_from_slice(&chunk_offset.to_be_bytes());
+    p.extend_from_slice(&(chunks.len() as u32).to_be_bytes()); // entry_count
+    for c in chunks {
+        p.extend_from_slice(&c.offset.to_be_bytes());
+    }
     p
 }
 
@@ -6560,7 +6673,11 @@ mod tests {
             },
             SampleGroupBoxForm::Compact,
         ));
-        let stbl = build_stbl(&t, 0x40, false, None);
+        let chunks = [TrackChunk {
+            offset: 0x40,
+            sample_count: t.samples.len() as u32,
+        }];
+        let stbl = build_stbl(&t, &chunks, false, None);
         assert!(
             stbl.windows(4).any(|w| w == b"csgp"),
             "stbl must carry a csgp when an assignment is attached"
@@ -6568,9 +6685,68 @@ mod tests {
     }
 
     #[test]
+    fn stsc_run_length_compresses_equal_chunk_runs() {
+        // Chunks of 3,3,1,1,1 samples ⇒ two stsc runs: (first_chunk 1,
+        // spc 3) and (first_chunk 3, spc 1) — §8.7.4's run-length rule.
+        let chunks: Vec<TrackChunk> = [
+            (0x30u64, 3u32),
+            (0x90, 3),
+            (0xf0, 1),
+            (0x110, 1),
+            (0x130, 1),
+        ]
+        .iter()
+        .map(|&(offset, sample_count)| TrackChunk {
+            offset,
+            sample_count,
+        })
+        .collect();
+        let p = build_stsc(&chunks);
+        let entry_count = u32::from_be_bytes(p[4..8].try_into().unwrap());
+        assert_eq!(entry_count, 2);
+        let row = |i: usize| -> (u32, u32, u32) {
+            let b = &p[8 + i * 12..8 + (i + 1) * 12];
+            (
+                u32::from_be_bytes(b[0..4].try_into().unwrap()),
+                u32::from_be_bytes(b[4..8].try_into().unwrap()),
+                u32::from_be_bytes(b[8..12].try_into().unwrap()),
+            )
+        };
+        assert_eq!(row(0), (1, 3, 1));
+        assert_eq!(row(1), (3, 1, 1));
+    }
+
+    #[test]
+    fn stco_and_co64_list_every_chunk_offset_in_order() {
+        let chunks: Vec<TrackChunk> = [(0x30u64, 2u32), (0x60, 2), (0xa0, 1)]
+            .iter()
+            .map(|&(offset, sample_count)| TrackChunk {
+                offset,
+                sample_count,
+            })
+            .collect();
+        let p = build_stco(&chunks);
+        assert_eq!(u32::from_be_bytes(p[4..8].try_into().unwrap()), 3);
+        for (i, expect) in [0x30u32, 0x60, 0xa0].iter().enumerate() {
+            let got = u32::from_be_bytes(p[8 + i * 4..12 + i * 4].try_into().unwrap());
+            assert_eq!(got, *expect);
+        }
+        let p64 = build_co64(&chunks);
+        assert_eq!(u32::from_be_bytes(p64[4..8].try_into().unwrap()), 3);
+        for (i, expect) in [0x30u64, 0x60, 0xa0].iter().enumerate() {
+            let got = u64::from_be_bytes(p64[8 + i * 8..16 + i * 8].try_into().unwrap());
+            assert_eq!(got, *expect);
+        }
+    }
+
+    #[test]
     fn build_stbl_omits_csgp_when_none() {
         let t = track_with_offsets(&[0, 0, 0, 0]);
-        let stbl = build_stbl(&t, 0x40, false, None);
+        let chunks = [TrackChunk {
+            offset: 0x40,
+            sample_count: t.samples.len() as u32,
+        }];
+        let stbl = build_stbl(&t, &chunks, false, None);
         assert!(
             !stbl.windows(4).any(|w| w == b"csgp"),
             "stbl must carry no csgp when no assignment is attached"
