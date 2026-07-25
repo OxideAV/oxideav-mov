@@ -201,12 +201,22 @@ value is the edited dts of the first packet the mode will emit —
 
 ## Muxer
 
-`MovMuxer` emits a non-fragmented MOV/MP4 (`ftyp` + `mdat` + `moov`)
+`MovMuxer` emits a non-fragmented MOV/MP4
 carrying one or more video / audio / time-code / text / timed-metadata /
 subtitle / timed-text / hint tracks,
 round-tripping through `MovDemuxer` with sample count, sizes, payloads,
 and keyframe flags preserved. `stco` auto-promotes to `co64` when chunk offsets cross
-4 GiB. Per-sample composition offsets (`MuxSample.composition_offset`,
+4 GiB. Layout is configurable on both axes: `MoovPlacement`
+(`AfterMdat` default, or `BeforeMdat` — the "faststart" web-playback
+layout, QTFF p. 365, resolved by a fixed-point `moov` sizing pass and
+classified by the demuxer's `is_faststart()`) and `ChunkStrategy`
+(`SingleChunkPerTrack` default, or `InterleaveByMovieTicks` — the
+QTFF p. 358 time-ordered interleave with run-length `stsc` and one
+`stco`/`co64` entry per chunk). The registry write path is wired too:
+`ContainerRegistry::open_muxer("mov", …)` returns a `Muxer`-trait
+adapter that buffers packets, recovers durations from decode-time
+deltas and `ctts` offsets from pts − dts, and maps codec identities to
+case-correct QTFF sample-description FourCCs. Per-sample composition offsets (`MuxSample.composition_offset`,
 PTS − DTS) emit a `ctts` Composition Time to Sample Box (§8.6.1.3):
 omitted when every offset is zero, version 0 for an all-non-negative
 track, auto-promoted to version 1 (signed `int(32)`) the moment any

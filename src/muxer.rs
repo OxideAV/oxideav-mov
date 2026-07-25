@@ -1,12 +1,17 @@
-//! Round-19 write side: a non-fragmented `MovMuxer` that emits a
+//! Write side: a non-fragmented `MovMuxer` that emits a
 //! structurally-valid QuickTime / ISO BMFF file.
 //!
-//! Layout produced (round 19):
+//! Default layout (both axes configurable — [`MoovPlacement`] swaps
+//! `moov` before `mdat` for the faststart web-playback order, and
+//! [`ChunkStrategy`] switches the `mdat` body to the QTFF p. 358
+//! time-ordered interleave):
 //!
 //! ```text
 //! ┌─ ftyp           — major brand `qt  `, compat `qt  ` + `isom`
-//! ├─ mdat           — interleaved sample bytes (one chunk per track,
-//! │                   tracks emitted back-to-back in `add_track` order)
+//! ├─ mdat           — sample bytes (default: one chunk per track,
+//! │                   tracks emitted back-to-back in `add_track` order;
+//! │                   interleaved: time-ordered chunks of ≤ the
+//! │                   configured period, merged across tracks)
 //! └─ moov
 //!    ├─ mvhd        — movie header v0 (32-bit times)
 //!    ├─ trak …
@@ -45,12 +50,15 @@
 //! * `stco` / `co64`      — ISO/IEC 14496-12 §8.7.5.
 //! * `mdat`               — ISO/IEC 14496-12 §8.1.1.
 //!
-//! Round-19 scope deliberately stops short of edit lists, composition
-//! offsets (`ctts`), `mvex/trex` fragmentation, or the ProRes / HEVC /
-//! Opus codec-config blobs. Callers may pass a pre-built `extra`
-//! payload to a track to inject a codec-specific extension atom (e.g.
-//! `avcC` for H.264 in `avc1`); the muxer copies those bytes verbatim
-//! into the trailing slot of the `stsd` entry.
+//! Later rounds grew the write surface well past this skeleton: edit
+//! lists (`edts/elst`), composition offsets (`ctts` + `cslg`),
+//! `mvex/trex` fragmentation ([`MovMuxer::with_fragmentation`]),
+//! sample groups, sample-aux streams, metadata, and the layout axes
+//! above. Codec-config blobs stay caller-supplied: pass pre-built
+//! extension atoms as a track's `extra_stsd_atoms` (e.g. `avcC` for
+//! H.264 in `avc1`); the muxer copies those bytes verbatim into the
+//! trailing slot of the `stsd` entry — this is a container crate and
+//! sample data is opaque.
 
 #[cfg(feature = "registry")]
 use oxideav_core::{Error, Result};
@@ -1313,10 +1321,12 @@ enum MdatSegment {
 /// round-trips back through `MovDemuxer` with the same per-track
 /// sample count and per-sample sizes.
 ///
-/// This round produces the layout `ftyp + mdat + moov` (mdat-before-
-/// moov). The demuxer accepts both orderings; a follow-up round can
-/// add a faststart helper that swaps `moov` to before `mdat` after
-/// building the chunk-offset table.
+/// The default layout is `ftyp + mdat + moov` (mdat-before-moov);
+/// [`MovMuxer::with_faststart`] / [`MovMuxer::with_moov_placement`]
+/// swap `moov` in front for the QTFF p. 365 progressive-playback
+/// order, and [`MovMuxer::with_chunk_strategy`] selects between the
+/// one-chunk-per-track layout and the QTFF p. 358 time-ordered
+/// interleave. The demuxer accepts every combination.
 ///
 /// Round 20 also adds the fragmented-write path via
 /// [`MovMuxer::with_fragmentation`] + [`MovMuxer::write_to_fragmented`]:
