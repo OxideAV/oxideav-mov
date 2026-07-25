@@ -1222,6 +1222,35 @@ pub enum FragmentationMode {
     ByFrameCount(u32),
 }
 
+/// How the non-fragmented write path slices each track's samples into
+/// `mdat` chunks (QTFF "Interleaving Movie Data", p. 358).
+///
+/// The sample-table result is always consistent — `stsc` describes the
+/// runs (§8.7.4) and `stco`/`co64` list every chunk (§8.7.5) — so a
+/// conformant reader accepts either strategy; the choice only affects
+/// the physical byte order inside `mdat` and therefore the seek
+/// pattern a player needs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChunkStrategy {
+    /// One chunk per track, tracks laid back-to-back in `add_track`
+    /// order — the historical (round-19) layout. Fine for in-memory
+    /// consumers; a streaming player of a multi-track file must seek
+    /// between the far-apart per-track slabs.
+    #[default]
+    SingleChunkPerTrack,
+    /// Time-ordered interleave, the layout QTFF p. 358 prescribes for
+    /// "optimal movie playback": each track is cut into chunks of at
+    /// most this many **movie-timescale ticks** (converted to the
+    /// track's media timescale, minimum one sample per chunk), and the
+    /// chunks of all tracks are merged into `mdat` ordered by their
+    /// starting decode time, so data for a given movie time sits close
+    /// together in the file. The spec's worked example uses
+    /// half-second interleave runs — 300 ticks at the default
+    /// 600-tick movie timescale. Ties (equal start times) fall back to
+    /// `add_track` order. Must be > 0 (validated at encode time).
+    InterleaveByMovieTicks(u32),
+}
+
 /// One resolved `mdat` chunk belonging to a track: an absolute file
 /// offset (what `stco`/`co64` store, ISO/IEC 14496-12 §8.7.5 / QTFF
 /// p. 78) plus the number of consecutive media-order samples laid down
@@ -1279,6 +1308,11 @@ pub struct MovMuxer {
     /// a fragmented layout (`ftyp` + init-`moov` + N × `moof`+`mdat`)
     /// rather than the default non-fragmented `ftyp` + `mdat` + `moov`.
     fragmentation: Option<FragmentationMode>,
+    /// Chunking rule for the non-fragmented `mdat` (see
+    /// [`ChunkStrategy`]). Defaults to the historical
+    /// one-chunk-per-track layout. No effect on the fragmented path
+    /// (fragment slicing is governed by [`FragmentationMode`]).
+    chunk_strategy: ChunkStrategy,
     /// When `true`, the non-fragmented write path losslessly compresses
     /// the serialized movie resource and emits it as a
     /// `moov > cmov > dcom + cmvd` tree (QTFF p. 81, "Allowing QuickTime
@@ -1325,6 +1359,7 @@ impl MovMuxer {
             movie_timescale: 600,
             tracks: Vec::new(),
             fragmentation: None,
+            chunk_strategy: ChunkStrategy::default(),
             compress_movie_resource: false,
             metadata: Vec::new(),
             apple_metadata: Vec::new(),
@@ -1362,6 +1397,21 @@ impl MovMuxer {
     /// Return the configured fragmentation policy (if any).
     pub fn fragmentation_mode(&self) -> Option<FragmentationMode> {
         self.fragmentation
+    }
+
+    /// Select the non-fragmented `mdat` chunking rule (QTFF
+    /// "Interleaving Movie Data", p. 358). See [`ChunkStrategy`]; the
+    /// default is the historical one-chunk-per-track layout. The
+    /// fragmented write path ignores this setting — fragment slicing
+    /// is governed by [`MovMuxer::with_fragmentation`].
+    pub fn with_chunk_strategy(mut self, strategy: ChunkStrategy) -> Self {
+        self.chunk_strategy = strategy;
+        self
+    }
+
+    /// Return the configured non-fragmented chunking rule.
+    pub fn chunk_strategy(&self) -> ChunkStrategy {
+        self.chunk_strategy
     }
 
     /// Opt-in lossless compression of the movie resource on the
@@ -2910,18 +2960,126 @@ impl MovMuxer {
     }
 
     /// Plan the non-fragmented `mdat` payload as an ordered segment
-    /// list: one chunk per track (all of the track's samples), tracks
-    /// back-to-back in `add_track` order, each track's aux slab (if
-    /// any) directly after its sample data — the historical round-19
-    /// layout.
+    /// list, per the configured [`ChunkStrategy`].
+    ///
+    /// * [`ChunkStrategy::SingleChunkPerTrack`] — one chunk per track
+    ///   (all of the track's samples), tracks back-to-back in
+    ///   `add_track` order, each track's aux slab (if any) directly
+    ///   after its sample data: the historical round-19 layout.
+    /// * [`ChunkStrategy::InterleaveByMovieTicks`] — time-ordered
+    ///   interleave per QTFF p. 358; aux slabs follow the last chunk,
+    ///   one contiguous slab per track in `add_track` order (keeping
+    ///   the single-entry §8.7.9.3 `saio` contract).
     fn plan_mdat_segments(&self) -> Result<Vec<MdatSegment>> {
-        let mut segs = Vec::with_capacity(self.tracks.len() * 2);
-        for (track_idx, t) in self.tracks.iter().enumerate() {
+        match self.chunk_strategy {
+            ChunkStrategy::SingleChunkPerTrack => {
+                let mut segs = Vec::with_capacity(self.tracks.len() * 2);
+                for (track_idx, t) in self.tracks.iter().enumerate() {
+                    segs.push(MdatSegment::Chunk {
+                        track_idx,
+                        first_sample: 0,
+                        sample_count: t.samples.len(),
+                    });
+                    if t.sample_aux.is_some() {
+                        segs.push(MdatSegment::AuxSlab { track_idx });
+                    }
+                }
+                Ok(segs)
+            }
+            ChunkStrategy::InterleaveByMovieTicks(period) => self.plan_interleaved(period),
+        }
+    }
+
+    /// Time-ordered interleave plan (QTFF "Interleaving Movie Data",
+    /// p. 358): cut each track into chunks spanning at most `period`
+    /// movie-timescale ticks of decode time, then merge every track's
+    /// chunk list by ascending chunk start time (movie ticks,
+    /// round-half-up rescale from media ticks) so that data for a
+    /// given movie time sits close together in the file. Per-track
+    /// chunk order — and therefore per-track sample order — is
+    /// preserved, which keeps `stsc`/`stco` chunk numbering (§8.7.4 /
+    /// §8.7.5) monotone in file position.
+    fn plan_interleaved(&self, period: u32) -> Result<Vec<MdatSegment>> {
+        if period == 0 {
+            return Err(Error::invalid(
+                "MOV muxer: InterleaveByMovieTicks period must be > 0",
+            ));
+        }
+        // Per-track chunk lists, each entry annotated with the chunk's
+        // start time rescaled into movie ticks.
+        struct PlannedRun {
+            first_sample: usize,
+            sample_count: usize,
+            start_movie: u64,
+        }
+        let movie_ts = self.movie_timescale as u128;
+        let mut per_track: Vec<Vec<PlannedRun>> = Vec::with_capacity(self.tracks.len());
+        for t in &self.tracks {
+            let media_ts = t.media_timescale as u128;
+            // The interleave period in this track's media timescale,
+            // round-half-up, floored at 1 tick so zero-length periods
+            // can't loop forever.
+            let period_media: u64 =
+                (((period as u128) * media_ts + movie_ts / 2) / movie_ts).max(1) as u64;
+            let to_movie = |dts_media: u64| -> u64 {
+                ((dts_media as u128 * movie_ts + media_ts / 2) / media_ts) as u64
+            };
+            let mut runs: Vec<PlannedRun> = Vec::new();
+            let mut dts: u64 = 0; // decode time, media ticks
+            let mut chunk_start_dts: u64 = 0;
+            let mut first_sample: usize = 0;
+            for (i, s) in t.samples.iter().enumerate() {
+                dts = dts.saturating_add(s.duration as u64);
+                // Close the chunk once it spans the period (or at the
+                // end of the track).
+                let last = i + 1 == t.samples.len();
+                if last || dts - chunk_start_dts >= period_media {
+                    runs.push(PlannedRun {
+                        first_sample,
+                        sample_count: i + 1 - first_sample,
+                        start_movie: to_movie(chunk_start_dts),
+                    });
+                    first_sample = i + 1;
+                    chunk_start_dts = dts;
+                }
+            }
+            per_track.push(runs);
+        }
+        // K-way merge by (start_movie, track order). Walking cursors
+        // rather than sorting guarantees per-track order is preserved
+        // even when zero-duration samples make start times collide.
+        let mut cursors = vec![0usize; per_track.len()];
+        let total_runs: usize = per_track.iter().map(Vec::len).sum();
+        let mut segs = Vec::with_capacity(total_runs + self.tracks.len());
+        for _ in 0..total_runs {
+            let mut best: Option<usize> = None;
+            for (track_idx, runs) in per_track.iter().enumerate() {
+                if cursors[track_idx] >= runs.len() {
+                    continue;
+                }
+                let start = runs[cursors[track_idx]].start_movie;
+                let better = match best {
+                    None => true,
+                    Some(b) => start < per_track[b][cursors[b]].start_movie,
+                };
+                if better {
+                    best = Some(track_idx);
+                }
+            }
+            let track_idx = best.expect("run count and cursors agree");
+            let run = &per_track[track_idx][cursors[track_idx]];
             segs.push(MdatSegment::Chunk {
                 track_idx,
-                first_sample: 0,
-                sample_count: t.samples.len(),
+                first_sample: run.first_sample,
+                sample_count: run.sample_count,
             });
+            cursors[track_idx] += 1;
+        }
+        // Aux slabs after all sample chunks, one contiguous slab per
+        // track in `add_track` order — the single-entry `saio`
+        // (§8.7.9.3) requires each track's aux info to be contiguous
+        // in sample order, not adjacent to its sample data.
+        for (track_idx, t) in self.tracks.iter().enumerate() {
             if t.sample_aux.is_some() {
                 segs.push(MdatSegment::AuxSlab { track_idx });
             }
