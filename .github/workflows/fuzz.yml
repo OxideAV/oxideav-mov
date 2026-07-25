@@ -6,8 +6,11 @@ name: Fuzz
 # prefixed boxes, sample-table allocations driven by attacker-
 # supplied per-track counts, fragmented `moof/traf/trun` arithmetic,
 # the QTFF-only `gmhd/clip/matt/rmra/ctab/pnot` family, plus the
-# ISO BMFF-only `pdin/sidx/styp/prft` file-scope boxes. Single demux
-# target consumes the whole 30-minute budget.
+# ISO BMFF-only `pdin/sidx/styp/prft` file-scope boxes. Two targets
+# share the 30-minute budget: `demux` (arbitrary bytes must error or
+# parse, never panic) and the round-429 `mux` (structure-aware write-
+# side recipes must encode, re-demux, and round-trip byte-exactly
+# across every ChunkStrategy × MoovPlacement combination).
 
 on:
   schedule:

@@ -95,3 +95,19 @@ name = "demux"
 path = "fuzz_targets/demux.rs"
 test = false
 doc = false
+
+# Round 429: structure-aware write-side target — decodes the fuzz
+# bytes into a valid-by-construction mux recipe (tracks × samples ×
+# timescales × ChunkStrategy × MoovPlacement) and asserts the full
+# round-trip contract through the demuxer: encode succeeds, output
+# demuxes, per-track payload streams are byte-identical, resolved
+# sample offsets land in-bounds, and the faststart classification
+# matches the requested placement. Exercises the interleave planner's
+# period rescale across hostile timescale ratios, the k-way chunk
+# merge, the run-length stsc / multi-entry stco emission, and the
+# moov-before-mdat fixed-point sizing loop.
+[[bin]]
+name = "mux"
+path = "fuzz_targets/mux.rs"
+test = false
+doc = false
