@@ -765,3 +765,76 @@ fn external_movie_equals_self_contained_movie_payload_stream() {
         }
     }
 }
+
+/// Frame `body` as a `[size:u32][fourcc][body]` atom onto `out`.
+fn push_atom(out: &mut Vec<u8>, fourcc: [u8; 4], body: &[u8]) {
+    out.extend_from_slice(&((8 + body.len()) as u32).to_be_bytes());
+    out.extend_from_slice(&fourcc);
+    out.extend_from_slice(body);
+}
+
+#[test]
+fn reference_movie_chain_composes_with_external_data_resolution() {
+    // A thin QTFF *reference movie* (`moov/rmra`, no tracks) whose
+    // `rdrf` url points at an external-data movie; `open_with_aliases`
+    // follows the hop, and the resolved demuxer then resolves its
+    // per-track external `dref` through `set_data_reference_opener` —
+    // the two opt-in indirection layers compose.
+    let (file, locations, payloads) = sidecar();
+    let target = mixed_movie(&locations);
+
+    // Reference movie: ftyp + moov { mvhd, rmra { rmda { rdrf } } }.
+    let mut mvhd = vec![0u8; 100];
+    mvhd[12..16].copy_from_slice(&600u32.to_be_bytes()); // time_scale
+    let mut rdrf = Vec::new();
+    rdrf.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+    rdrf.extend_from_slice(b"url ");
+    let url = b"target://movie\0";
+    rdrf.extend_from_slice(&(url.len() as u32).to_be_bytes());
+    rdrf.extend_from_slice(url);
+    let mut rmda = Vec::new();
+    push_atom(&mut rmda, *b"rdrf", &rdrf);
+    let mut rmra = Vec::new();
+    push_atom(&mut rmra, *b"rmda", &rmda);
+    let mut moov = Vec::new();
+    push_atom(&mut moov, *b"mvhd", &mvhd);
+    push_atom(&mut moov, *b"rmra", &rmra);
+    let mut ref_movie = Vec::new();
+    let mut ftyp = Vec::new();
+    ftyp.extend_from_slice(b"qt  ");
+    ftyp.extend_from_slice(&0u32.to_be_bytes());
+    ftyp.extend_from_slice(b"qt  ");
+    push_atom(&mut ref_movie, *b"ftyp", &ftyp);
+    push_atom(&mut ref_movie, *b"moov", &moov);
+
+    let target2 = target.clone();
+    let mut d = MovDemuxer::open_with_aliases(
+        Box::new(Cursor::new(ref_movie)) as Box<dyn ReadSeek>,
+        move |u: &str| {
+            if u == "target://movie" {
+                Ok(Box::new(Cursor::new(target2.clone())) as Box<dyn ReadSeek>)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "unknown alias",
+                ))
+            }
+        },
+    )
+    .expect("alias hop resolves");
+    assert_eq!(d.tracks.len(), 2, "resolved target's tracks visible");
+    assert!(d.track_has_external_data(1));
+    d.set_data_reference_opener(move |_r| {
+        Ok(Box::new(Cursor::new(file.clone())) as Box<dyn ReadSeek>)
+    });
+    let mut audio = Vec::new();
+    loop {
+        match d.read_next() {
+            Ok((1, _s, data)) => audio.push(data),
+            Ok(_) => {}
+            Err(Error::Eof) => break,
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+    assert_eq!(audio, payloads);
+}
