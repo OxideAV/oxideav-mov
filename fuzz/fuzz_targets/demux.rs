@@ -74,7 +74,12 @@
 //! URL string, so a too-permissive opener would either reach out to
 //! the network or spin on file-system probes. The no-alias path
 //! still walks every `rmra/rmda/rmdr/rmcs` parser, so the *parse*
-//! side of the reference-movie surface is covered.
+//! side of the reference-movie surface is covered. The round-440
+//! external data-reference path IS exercised, but only through an
+//! opener that unconditionally fails without touching the
+//! filesystem or network — that walks the per-(track, dref-entry)
+//! resolution + sticky-failure cache against hostile dref tables
+//! while keeping the harness hermetic.
 
 use std::io::Cursor;
 
@@ -442,6 +447,35 @@ fuzz_target!(|data: &[u8]| {
     for _ in 0..MAX_PACKETS_PER_INPUT {
         if dmx.next_packet().is_err() {
             break;
+        }
+    }
+
+    // Round-440 external data-reference surface. Touch the per-track
+    // externality classifier, then attach an opener that always fails
+    // WITHOUT touching the filesystem or network (fuzz inputs must
+    // never reach either) and drain once more: samples behind a
+    // non-self dref entry now route through the resolution + sticky
+    // failure-cache path, which must survive hostile dref tables
+    // (dangling data_reference_index values, thousands of entries,
+    // url bodies that aren't UTF-8) for every emitted sample. Errors
+    // are recoverable per sample, so this drain continues on non-Eof
+    // errors to walk the whole (bounded) queue through the cache.
+    for ti in 0..ntracks {
+        let _ = dmx.track_has_external_data(ti);
+    }
+    let _ = dmx.has_data_reference_opener();
+    dmx.set_data_reference_opener(|_r| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "fuzz opener never resolves",
+        ))
+    });
+    let _ = dmx.seek_to(0, 0);
+    for _ in 0..MAX_PACKETS_PER_INPUT {
+        match dmx.next_packet() {
+            Ok(_) => {}
+            Err(oxideav_core::Error::Eof) => break,
+            Err(_) => {} // recoverable per-sample external errors
         }
     }
 });

@@ -29,7 +29,7 @@ use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;
 
 use oxideav_core::{Demuxer, ReadSeek};
-use oxideav_mov::{ChunkStrategy, MovDemuxer, MovMuxer, MoovPlacement, MuxSample, MuxTrackKind};
+use oxideav_mov::{ChunkStrategy, MoovPlacement, MovDemuxer, MovMuxer, MuxSample, MuxTrackKind};
 
 /// Bounded byte reader over the fuzz input.
 struct Recipe<'a> {
