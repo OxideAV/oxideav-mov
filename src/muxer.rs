@@ -109,6 +109,45 @@ pub struct MuxSample {
     pub composition_offset: i32,
 }
 
+/// Location of one sample inside an **external** media file.
+///
+/// QTFF's appendix "Defining Media Data Layouts" ("Using QuickTime
+/// Files and Media Layouts", 2012-08-14 edition): *"A QuickTime file
+/// can reference media data stored in a number of files, including the
+/// file itself"* — and it addresses that media *"by file offset,
+/// rather than by a data structuring mechanism of a particular file
+/// format"*, so the referenced file may be any format at all (a raw
+/// elementary stream, another movie's `mdat`, …). The chunk-offset
+/// table of an external track stores exactly these offsets: per the
+/// Chunk Offset Atoms section (QTFF p. 113) offsets are into the data
+/// stream the sample description's `data_reference_index` designates,
+/// and per the Media Atoms overview (p. 79) the sample tables give
+/// each sample's "byte offset from the data reference".
+///
+/// Used by [`MovMuxer::set_external_media`]; `offset` is the sample's
+/// first byte within the external file, `size` its byte length (what
+/// the `stsz`/`stz2` table will carry).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExternalSampleLocation {
+    /// Absolute byte offset of the sample within the external file.
+    pub offset: u64,
+    /// Sample length in bytes.
+    pub size: u32,
+}
+
+/// Internal record of a track marked external via
+/// [`MovMuxer::set_external_media`].
+#[derive(Clone, Debug)]
+struct ExternalMediaWrite {
+    /// 1-based index into the track's custom data-reference table
+    /// ([`MovMuxer::set_data_references`]) of the non-self entry the
+    /// media lives behind. Every sample entry's `data_reference_index`
+    /// is pointed here instead of at a self-reference.
+    data_reference_index: u16,
+    /// One location per sample, in sample (decode) order.
+    locations: Vec<ExternalSampleLocation>,
+}
+
 /// Per-track sample-auxiliary-information stream destined for a
 /// `stbl`-scope `saiz` + `saio` pair (ISO/IEC 14496-12 §8.7.8 /
 /// §8.7.9).
@@ -914,6 +953,22 @@ impl VisualExtensions {
     }
 }
 
+impl TrackWrite {
+    /// Byte length of sample `i` as the `stsz` / `stz2` table must
+    /// report it: the external location's declared size for a track
+    /// marked external ([`MovMuxer::set_external_media`] — such
+    /// samples carry no in-file `data`), else the in-file payload
+    /// length. `set_external_media` validates the location count
+    /// against the sample count, so the index is in range for both
+    /// sources.
+    fn sample_size(&self, i: usize) -> u32 {
+        match &self.external_media {
+            Some(ext) => ext.locations[i].size,
+            None => self.samples[i].data.len() as u32,
+        }
+    }
+}
+
 /// Internal per-track accumulator the muxer mutates as `add_track`
 /// is called. The actual layout pass runs in [`MovMuxer::write_to`].
 struct TrackWrite {
@@ -990,6 +1045,14 @@ struct TrackWrite {
     /// the sample entries point at). Set via
     /// [`MovMuxer::set_data_references`].
     data_references: Vec<DataReferenceWrite>,
+    /// When `Some`, this track's media bytes live in an **external**
+    /// file (QTFF appendix "Defining Media Data Layouts") — the muxer
+    /// writes none of its sample bytes into this file's `mdat`, the
+    /// chunk-offset table carries the caller-supplied offsets into the
+    /// external file, and every sample entry's `data_reference_index`
+    /// points at the designated non-self `dref` entry. Set via
+    /// [`MovMuxer::set_external_media`].
+    external_media: Option<ExternalMediaWrite>,
     /// Packed ISO-639-2/T media language for `mdhd.language` (QTFF
     /// p. 197 / ISO/IEC 14496-12 §8.4.2.3). Defaults to
     /// [`MDHD_LANGUAGE_UND`] (`"und"`). Set via
@@ -1540,6 +1603,7 @@ impl MovMuxer {
             track_references: Vec::new(),
             tapt: None,
             data_references: Vec::new(),
+            external_media: None,
             media_language: MDHD_LANGUAGE_UND,
             extended_language: None,
             gmin: None,
@@ -1598,6 +1662,13 @@ impl MovMuxer {
                     "MOV muxer: set_sample_aux unknown track id {track_id}"
                 ))
             })?;
+        if self.tracks[idx].external_media.is_some() {
+            return Err(Error::invalid(format!(
+                "MOV muxer: set_sample_aux track {track_id} is marked external \
+                 (set_external_media); the aux slab is laid into this file's mdat, \
+                 which an external track does not touch"
+            )));
+        }
         let want = self.tracks[idx].samples.len();
         if stream.per_sample.len() != want {
             return Err(Error::invalid(format!(
@@ -2152,11 +2223,16 @@ impl MovMuxer {
     /// replaces that with the supplied list — e.g. to declare external
     /// `url ` / `urn ` storage locations for a reference movie.
     ///
-    /// Because the muxer always writes the track's sample bytes into the
-    /// file's own `mdat`, the list must contain **exactly one**
-    /// [`DataReferenceWrite::SelfRef`]; the muxer points every sample
-    /// entry's `data_reference_index` at it (1-based, in list order).
-    /// An empty list, or one with zero or several self-refs, is
+    /// The list must contain **at most one**
+    /// [`DataReferenceWrite::SelfRef`]. A track whose sample bytes the
+    /// muxer lays into this file's own `mdat` (the default) needs
+    /// exactly one — the muxer points every sample entry's
+    /// `data_reference_index` at it (1-based, in list order); a table
+    /// with **no** self-reference is only valid for a track whose
+    /// media lives entirely in an external file, declared via
+    /// [`MovMuxer::set_external_media`] (the missing-SelfRef case is
+    /// validated at encode time so the two calls may come in either
+    /// order). An empty list, or one with several self-refs, is
     /// rejected and the track is left unchanged.
     ///
     /// The table round-trips through the read-side `parse_dref` onto
@@ -2175,16 +2251,120 @@ impl MovMuxer {
                     "MOV muxer: set_data_references unknown track id {track_id}"
                 ))
             })?;
+        if references.is_empty() {
+            return Err(Error::invalid(
+                "MOV muxer: set_data_references requires at least one entry \
+                 (QTFF p. 94: the dref carries the table the sample entries index)",
+            ));
+        }
         let self_refs = references
             .iter()
             .filter(|r| matches!(r, DataReferenceWrite::SelfRef))
             .count();
-        if self_refs != 1 {
+        if self_refs > 1 {
             return Err(Error::invalid(format!(
-                "MOV muxer: set_data_references requires exactly one SelfRef entry (the muxer writes samples in-file); got {self_refs}"
+                "MOV muxer: set_data_references allows at most one SelfRef entry; got {self_refs}"
             )));
         }
+        // Re-validate a previously-declared external marking: its
+        // 1-based index must still name a non-self entry of the new
+        // table.
+        if let Some(ext) = &self.tracks[idx].external_media {
+            check_external_dref_entry(references, ext.data_reference_index)?;
+        }
         self.tracks[idx].data_references = references.to_vec();
+        Ok(())
+    }
+
+    /// Declare a previously-added track's media as living in an
+    /// **external** file: the muxer writes none of its sample bytes
+    /// into this file's `mdat`; instead the chunk-offset table
+    /// (`stco` / `co64`) carries the caller-supplied byte offsets into
+    /// the external file and every sample entry's
+    /// `data_reference_index` points at `data_reference_index` — a
+    /// 1-based entry of the track's custom data-reference table
+    /// ([`MovMuxer::set_data_references`], which must have been set
+    /// first) that is **not** the self-reference (a `url ` / `urn `
+    /// naming the external storage).
+    ///
+    /// This is the QTFF appendix "Defining Media Data Layouts" shape:
+    /// a movie may reference media "stored in a number of files,
+    /// including the file itself", addressed "by file offset, rather
+    /// than by a data structuring mechanism of a particular file
+    /// format" — so the external file may be any format (a raw
+    /// elementary stream, another movie, …) and `locations` give each
+    /// sample's `(offset, size)` within it. Offsets past the 32-bit
+    /// range auto-promote the movie's chunk-offset boxes to `co64`.
+    /// Consecutive locations that are byte-contiguous coalesce into
+    /// one chunk (run-length `stsc`); non-contiguous locations each
+    /// open a new chunk.
+    ///
+    /// Requirements, validated here:
+    /// * `locations.len()` must equal the track's sample count — each
+    ///   [`MuxSample`] keeps supplying the timing / keyframe /
+    ///   composition-offset axes; the location supplies offset + size.
+    /// * Every one of the track's samples must carry **empty** `data`
+    ///   (the bytes live in the external file; supplying them here
+    ///   would be ambiguous).
+    /// * The track must not carry a sample-auxiliary stream
+    ///   ([`MovMuxer::set_sample_aux`]) — an aux slab is laid into
+    ///   *this* file's `mdat`, which an external track does not touch.
+    ///
+    /// Validated at encode time: the fragmented write path rejects
+    /// external tracks (movie-fragment data addressing is relative to
+    /// the fragment's own file). The read-side counterpart is
+    /// [`crate::demuxer::MovDemuxer::set_data_reference_opener`];
+    /// without an opener the demuxer surfaces such samples as
+    /// recoverable `Unsupported` errors.
+    ///
+    /// Calling again replaces the previous declaration.
+    pub fn set_external_media(
+        &mut self,
+        track_id: u32,
+        data_reference_index: u16,
+        locations: &[ExternalSampleLocation],
+    ) -> Result<()> {
+        let idx = (track_id as usize)
+            .checked_sub(1)
+            .filter(|&i| i < self.tracks.len())
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "MOV muxer: set_external_media unknown track id {track_id}"
+                ))
+            })?;
+        let t = &self.tracks[idx];
+        if t.data_references.is_empty() {
+            return Err(Error::invalid(
+                "MOV muxer: set_external_media requires a data-reference table — \
+                 call set_data_references with the external url /urn  entry first",
+            ));
+        }
+        check_external_dref_entry(&t.data_references, data_reference_index)?;
+        if locations.len() != t.samples.len() {
+            return Err(Error::invalid(format!(
+                "MOV muxer: set_external_media has {} locations but track {track_id} has {} samples",
+                locations.len(),
+                t.samples.len()
+            )));
+        }
+        if let Some(i) = t.samples.iter().position(|s| !s.data.is_empty()) {
+            return Err(Error::invalid(format!(
+                "MOV muxer: set_external_media track {track_id} sample {i} carries {} bytes of \
+                 in-file data; external samples must be added with empty data (the bytes live in \
+                 the external file)",
+                t.samples[i].data.len()
+            )));
+        }
+        if t.sample_aux.is_some() {
+            return Err(Error::invalid(format!(
+                "MOV muxer: set_external_media track {track_id} carries a sample-aux stream; \
+                 the aux slab is laid into this file's mdat, which an external track does not touch"
+            )));
+        }
+        self.tracks[idx].external_media = Some(ExternalMediaWrite {
+            data_reference_index,
+            locations: locations.to_vec(),
+        });
         Ok(())
     }
 
@@ -2963,6 +3143,7 @@ impl MovMuxer {
                 )));
             }
         }
+        self.validate_data_reference_tables()?;
 
         // ── Pass 1: predict the file layout to compute mdat chunk
         //    offsets per track. The `ftyp` is fixed at 28 bytes
@@ -3084,6 +3265,33 @@ impl MovMuxer {
         ))
     }
 
+    /// Cross-track validation of the data-reference tables, shared by
+    /// the non-fragmented and fragmented encode entry points. A track
+    /// that is *not* marked external must resolve a self-reference for
+    /// its sample entries to point at — either the implicit default
+    /// single-entry table (empty list) or a custom table carrying one
+    /// `SelfRef` (QTFF p. 94: the self-reference flag "indicates that
+    /// the media's data is in the same file as the movie atom").
+    fn validate_data_reference_tables(&self) -> Result<()> {
+        for (i, t) in self.tracks.iter().enumerate() {
+            if t.external_media.is_none()
+                && !t.data_references.is_empty()
+                && !t
+                    .data_references
+                    .iter()
+                    .any(|r| matches!(r, DataReferenceWrite::SelfRef))
+            {
+                return Err(Error::invalid(format!(
+                    "MOV muxer: track {} has a data-reference table with no SelfRef entry but \
+                     its samples are written into this file's mdat — add a SelfRef to the table \
+                     or declare the track external via set_external_media",
+                    i + 1
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Plan the non-fragmented `mdat` payload as an ordered segment
     /// list, per the configured [`ChunkStrategy`].
     ///
@@ -3100,6 +3308,12 @@ impl MovMuxer {
             ChunkStrategy::SingleChunkPerTrack => {
                 let mut segs = Vec::with_capacity(self.tracks.len() * 2);
                 for (track_idx, t) in self.tracks.iter().enumerate() {
+                    // External tracks contribute no mdat bytes — their
+                    // chunk offsets point into the external file and
+                    // are filled in by `layout_segments`.
+                    if t.external_media.is_some() {
+                        continue;
+                    }
                     segs.push(MdatSegment::Chunk {
                         track_idx,
                         first_sample: 0,
@@ -3140,6 +3354,13 @@ impl MovMuxer {
         let movie_ts = self.movie_timescale as u128;
         let mut per_track: Vec<Vec<PlannedRun>> = Vec::with_capacity(self.tracks.len());
         for t in &self.tracks {
+            // External tracks have no bytes in this file to interleave;
+            // their chunk lists come from the caller-supplied external
+            // locations in `layout_segments`.
+            if t.external_media.is_some() {
+                per_track.push(Vec::new());
+                continue;
+            }
             let media_ts = t.media_timescale as u128;
             // The interleave period in this track's media timescale,
             // round-half-up, floored at 1 tick so zero-length periods
@@ -3258,6 +3479,16 @@ impl MovMuxer {
             }
             cursor += self.segment_len(seg);
         }
+        // External tracks: chunk offsets are into the *external* file
+        // (QTFF p. 79 — each sample's "byte offset from the data
+        // reference"), independent of this file's layout. Contiguous
+        // locations coalesce into multi-sample chunks so the
+        // run-length `stsc` stays compact.
+        for (track_idx, t) in self.tracks.iter().enumerate() {
+            if let Some(ext) = &t.external_media {
+                chunks[track_idx] = coalesce_external_chunks(&ext.locations);
+            }
+        }
         (chunks, aux_offsets)
     }
 
@@ -3325,7 +3556,16 @@ impl MovMuxer {
                     i + 1
                 )));
             }
+            if t.external_media.is_some() {
+                return Err(Error::invalid(format!(
+                    "MOV muxer: track {} is marked external (set_external_media); the \
+                     fragmented write path addresses sample data relative to each \
+                     fragment's own file and does not support external data references",
+                    i + 1
+                )));
+            }
         }
+        self.validate_data_reference_tables()?;
         match mode {
             FragmentationMode::ByDuration(0) => {
                 return Err(Error::invalid(
@@ -4653,12 +4893,17 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
     //     [data_reference_index:2][per-mediatype body][optional extra atoms])+
     //
     // The sample entry's `data_reference_index` points (1-based) at the
-    // `dref` entry the sample chunk offsets are relative to. The muxer
-    // always lays samples into this file's own `mdat`, so the index is
-    // that of the self-reference entry: 1 for the default single-entry
-    // `dref`, else the 1-based position of the lone `SelfRef` in a
-    // custom table set via `set_data_references`.
-    let dri = self_ref_index(&t.data_references);
+    // `dref` entry the sample chunk offsets are relative to. For the
+    // default in-file layout that is the self-reference entry: 1 for
+    // the implicit single-entry `dref`, else the 1-based position of
+    // the lone `SelfRef` in a custom table set via
+    // `set_data_references`. A track marked external
+    // (`set_external_media`) instead points at its designated non-self
+    // entry — the `url `/`urn ` naming the external storage.
+    let dri = match &t.external_media {
+        Some(ext) => ext.data_reference_index,
+        None => self_ref_index(&t.data_references),
+    };
     let entry_body = match &t.kind {
         MuxTrackKind::Video {
             format,
@@ -4858,6 +5103,51 @@ fn build_stsd(t: &TrackWrite) -> Vec<u8> {
     stsd.extend_from_slice(&1u32.to_be_bytes()); // entry_count
     stsd.extend_from_slice(&entry_body);
     stsd
+}
+
+/// Validate that 1-based `index` names an entry of `refs` that is not
+/// the self-reference — the shape [`MovMuxer::set_external_media`]
+/// requires (an external track's sample entries must point at a
+/// `url ` / `urn ` naming the external storage).
+fn check_external_dref_entry(refs: &[DataReferenceWrite], index: u16) -> Result<()> {
+    let entry = index
+        .checked_sub(1)
+        .and_then(|i| refs.get(i as usize))
+        .ok_or_else(|| {
+            Error::invalid(format!(
+                "MOV muxer: external data_reference_index {index} is out of range for a \
+                 {}-entry data-reference table (indices are 1-based)",
+                refs.len()
+            ))
+        })?;
+    if matches!(entry, DataReferenceWrite::SelfRef) {
+        return Err(Error::invalid(format!(
+            "MOV muxer: external data_reference_index {index} names the SelfRef entry; \
+             an external track must point at a url /urn  entry naming the external storage"
+        )));
+    }
+    Ok(())
+}
+
+/// Coalesce per-sample external locations into [`TrackChunk`]s: a run
+/// of byte-contiguous locations (each starting exactly where the
+/// previous one ended) forms one chunk, matching the demuxer's
+/// within-chunk offset recovery (chunk offset + sum of preceding
+/// sample sizes). Any gap or backward jump opens a new chunk.
+fn coalesce_external_chunks(locations: &[ExternalSampleLocation]) -> Vec<TrackChunk> {
+    let mut out: Vec<TrackChunk> = Vec::new();
+    let mut expected_next: u64 = 0;
+    for l in locations {
+        match out.last_mut() {
+            Some(last) if l.offset == expected_next => last.sample_count += 1,
+            _ => out.push(TrackChunk {
+                offset: l.offset,
+                sample_count: 1,
+            }),
+        }
+        expected_next = l.offset.saturating_add(l.size as u64);
+    }
+    out
 }
 
 /// The 1-based `data_reference_index` a sample entry should carry —
@@ -5104,13 +5394,14 @@ fn build_stz2(t: &TrackWrite) -> Option<Vec<u8>> {
     if !t.compact_sample_size {
         return None;
     }
-    let first = t.samples[0].data.len();
-    if t.samples.iter().all(|s| s.data.len() == first) {
+    let n = t.samples.len();
+    let first = t.sample_size(0);
+    if (0..n).all(|i| t.sample_size(i) == first) {
         // Uniform ⇒ `stsz` carries a single sample_size and no table,
         // strictly smaller than any `stz2`.
         return None;
     }
-    let max = t.samples.iter().map(|s| s.data.len()).max().unwrap_or(0);
+    let max = (0..n).map(|i| t.sample_size(i)).max().unwrap_or(0);
     // Narrowest field that fits every size. 4-bit fits 0..=15, 8-bit
     // 0..=255; larger sizes fall back to the 32-bit `stsz` table.
     let field_size: u8 = if max <= 0x0F {
@@ -5120,8 +5411,8 @@ fn build_stz2(t: &TrackWrite) -> Option<Vec<u8>> {
     } else {
         return None;
     };
-    let count = t.samples.len() as u32;
-    let mut p = Vec::with_capacity(12 + t.samples.len());
+    let count = n as u32;
+    let mut p = Vec::with_capacity(12 + n);
     p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
     p.push(0); // reserved high byte (part of the 24-bit reserved)
     p.extend_from_slice(&0u16.to_be_bytes()); // reserved low 16 bits
@@ -5132,10 +5423,10 @@ fn build_stz2(t: &TrackWrite) -> Option<Vec<u8>> {
             // Two values per byte, MSB-first; odd count zero-pads the
             // final low nibble (§8.7.3.3.2).
             let mut i = 0;
-            while i < t.samples.len() {
-                let hi = (t.samples[i].data.len() as u8) & 0x0F;
-                let lo = if i + 1 < t.samples.len() {
-                    (t.samples[i + 1].data.len() as u8) & 0x0F
+            while i < n {
+                let hi = (t.sample_size(i) as u8) & 0x0F;
+                let lo = if i + 1 < n {
+                    (t.sample_size(i + 1) as u8) & 0x0F
                 } else {
                     0
                 };
@@ -5144,8 +5435,8 @@ fn build_stz2(t: &TrackWrite) -> Option<Vec<u8>> {
             }
         }
         8 => {
-            for s in &t.samples {
-                p.push(s.data.len() as u8);
+            for i in 0..n {
+                p.push(t.sample_size(i) as u8);
             }
         }
         _ => unreachable!(),
@@ -5156,9 +5447,10 @@ fn build_stz2(t: &TrackWrite) -> Option<Vec<u8>> {
 fn build_stsz(t: &TrackWrite) -> Vec<u8> {
     // Uniform sample size if every sample is the same length;
     // per-sample table otherwise.
-    let first = t.samples[0].data.len() as u32;
-    let uniform = t.samples.iter().all(|s| (s.data.len() as u32) == first);
-    let count = t.samples.len() as u32;
+    let n = t.samples.len();
+    let first = t.sample_size(0);
+    let uniform = (0..n).all(|i| t.sample_size(i) == first);
+    let count = n as u32;
     if uniform {
         let mut p = Vec::with_capacity(12);
         p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
@@ -5166,12 +5458,12 @@ fn build_stsz(t: &TrackWrite) -> Vec<u8> {
         p.extend_from_slice(&count.to_be_bytes());
         p
     } else {
-        let mut p = Vec::with_capacity(12 + (count as usize) * 4);
+        let mut p = Vec::with_capacity(12 + n * 4);
         p.extend_from_slice(&0u32.to_be_bytes());
         p.extend_from_slice(&0u32.to_be_bytes()); // sample_size = 0 ⇒ table follows
         p.extend_from_slice(&count.to_be_bytes());
-        for s in &t.samples {
-            p.extend_from_slice(&(s.data.len() as u32).to_be_bytes());
+        for i in 0..n {
+            p.extend_from_slice(&t.sample_size(i).to_be_bytes());
         }
         p
     }
@@ -5839,6 +6131,7 @@ mod tests {
             track_references: Vec::new(),
             tapt: None,
             data_references: Vec::new(),
+            external_media: None,
             media_language: MDHD_LANGUAGE_UND,
             extended_language: None,
             gmin: None,
@@ -5906,6 +6199,7 @@ mod tests {
             track_references: Vec::new(),
             tapt: None,
             data_references: Vec::new(),
+            external_media: None,
             media_language: MDHD_LANGUAGE_UND,
             extended_language: None,
             gmin: None,
@@ -6372,6 +6666,7 @@ mod tests {
             track_references: Vec::new(),
             tapt: None,
             data_references: Vec::new(),
+            external_media: None,
             media_language: MDHD_LANGUAGE_UND,
             extended_language: None,
             gmin: None,
@@ -6420,6 +6715,7 @@ mod tests {
             track_references: Vec::new(),
             tapt: None,
             data_references: Vec::new(),
+            external_media: None,
             media_language: MDHD_LANGUAGE_UND,
             extended_language: None,
             gmin: None,
@@ -6496,6 +6792,7 @@ mod tests {
             track_references: Vec::new(),
             tapt: None,
             data_references: Vec::new(),
+            external_media: None,
             media_language: MDHD_LANGUAGE_UND,
             extended_language: None,
             gmin: None,
@@ -6563,6 +6860,7 @@ mod tests {
             track_references: Vec::new(),
             tapt: None,
             data_references: Vec::new(),
+            external_media: None,
             media_language: MDHD_LANGUAGE_UND,
             extended_language: None,
             gmin: None,
@@ -7034,5 +7332,266 @@ mod tests {
             !stbl.windows(4).any(|w| w == b"csgp"),
             "stbl must carry no csgp when no assignment is attached"
         );
+    }
+
+    // ── Round 440: external-media authoring ──────────────────────────
+
+    /// n empty-data samples for an external track (timing only; the
+    /// bytes live in the external file).
+    fn external_samples(n: usize) -> Vec<MuxSample> {
+        (0..n)
+            .map(|_| MuxSample {
+                data: Vec::new(),
+                duration: 100,
+                keyframe: true,
+                composition_offset: 0,
+            })
+            .collect()
+    }
+
+    fn add_external_audio(m: &mut MovMuxer, n: usize) -> u32 {
+        m.add_track(
+            MuxTrackKind::Audio {
+                format: *b"twos",
+                channels: 1,
+                bits_per_sample: 16,
+                sample_rate: 8000,
+            },
+            8000,
+            external_samples(n),
+            &[],
+        )
+    }
+
+    #[test]
+    fn coalesce_external_chunks_merges_contiguous_runs() {
+        let locs = [
+            ExternalSampleLocation { offset: 0, size: 4 },
+            ExternalSampleLocation { offset: 4, size: 4 }, // contiguous
+            ExternalSampleLocation { offset: 8, size: 2 }, // contiguous
+            ExternalSampleLocation {
+                offset: 100,
+                size: 4,
+            }, // gap ⇒ new chunk
+            ExternalSampleLocation {
+                offset: 104,
+                size: 4,
+            }, // contiguous
+            ExternalSampleLocation {
+                offset: 50,
+                size: 4,
+            }, // backward ⇒ new chunk
+        ];
+        let chunks = coalesce_external_chunks(&locs);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!((chunks[0].offset, chunks[0].sample_count), (0, 3));
+        assert_eq!((chunks[1].offset, chunks[1].sample_count), (100, 2));
+        assert_eq!((chunks[2].offset, chunks[2].sample_count), (50, 1));
+    }
+
+    #[test]
+    fn set_external_media_requires_dref_table_first() {
+        let mut m = MovMuxer::new();
+        let a = add_external_audio(&mut m, 2);
+        let err = m.set_external_media(
+            a,
+            1,
+            &[
+                ExternalSampleLocation { offset: 0, size: 4 },
+                ExternalSampleLocation { offset: 4, size: 4 },
+            ],
+        );
+        assert!(err.is_err(), "no data-reference table set yet");
+    }
+
+    #[test]
+    fn set_external_media_rejects_self_ref_and_out_of_range_indices() {
+        let mut m = MovMuxer::new();
+        let a = add_external_audio(&mut m, 1);
+        m.set_data_references(
+            a,
+            &[
+                DataReferenceWrite::SelfRef,
+                DataReferenceWrite::Url("media.bin".into()),
+            ],
+        )
+        .unwrap();
+        let locs = [ExternalSampleLocation { offset: 0, size: 4 }];
+        assert!(
+            m.set_external_media(a, 1, &locs).is_err(),
+            "index 1 is the SelfRef"
+        );
+        assert!(
+            m.set_external_media(a, 0, &locs).is_err(),
+            "index 0 is out of spec"
+        );
+        assert!(
+            m.set_external_media(a, 3, &locs).is_err(),
+            "index 3 dangles"
+        );
+        assert!(
+            m.set_external_media(a, 2, &locs).is_ok(),
+            "index 2 is the url entry"
+        );
+    }
+
+    #[test]
+    fn set_external_media_rejects_location_count_mismatch_and_inline_data() {
+        let mut m = MovMuxer::new();
+        let a = add_external_audio(&mut m, 2);
+        m.set_data_references(a, &[DataReferenceWrite::Url("media.bin".into())])
+            .unwrap();
+        assert!(
+            m.set_external_media(a, 1, &[ExternalSampleLocation { offset: 0, size: 4 }])
+                .is_err(),
+            "1 location for 2 samples must error"
+        );
+        // A track whose samples carry in-file bytes cannot be external.
+        let mut m2 = MovMuxer::new();
+        let b = m2.add_track(
+            MuxTrackKind::Audio {
+                format: *b"twos",
+                channels: 1,
+                bits_per_sample: 16,
+                sample_rate: 8000,
+            },
+            8000,
+            vec![MuxSample {
+                data: vec![1, 2, 3],
+                duration: 100,
+                keyframe: true,
+                composition_offset: 0,
+            }],
+            &[],
+        );
+        m2.set_data_references(b, &[DataReferenceWrite::Url("media.bin".into())])
+            .unwrap();
+        assert!(
+            m2.set_external_media(b, 1, &[ExternalSampleLocation { offset: 0, size: 3 }])
+                .is_err(),
+            "non-empty sample data must error"
+        );
+    }
+
+    #[test]
+    fn external_track_conflicts_with_sample_aux_both_orders() {
+        let aux = SampleAuxStream {
+            aux_info_type: None,
+            aux_info_type_parameter: 0,
+            per_sample: vec![vec![1u8]],
+        };
+        let locs = [ExternalSampleLocation { offset: 0, size: 4 }];
+        // aux first, then external.
+        let mut m = MovMuxer::new();
+        let a = add_external_audio(&mut m, 1);
+        m.set_data_references(a, &[DataReferenceWrite::Url("media.bin".into())])
+            .unwrap();
+        m.set_sample_aux(a, aux.clone()).unwrap();
+        assert!(m.set_external_media(a, 1, &locs).is_err());
+        // external first, then aux.
+        let mut m2 = MovMuxer::new();
+        let b = add_external_audio(&mut m2, 1);
+        m2.set_data_references(b, &[DataReferenceWrite::Url("media.bin".into())])
+            .unwrap();
+        m2.set_external_media(b, 1, &locs).unwrap();
+        assert!(m2.set_sample_aux(b, aux).is_err());
+    }
+
+    #[test]
+    fn re_setting_dref_table_revalidates_external_marking() {
+        let mut m = MovMuxer::new();
+        let a = add_external_audio(&mut m, 1);
+        m.set_data_references(a, &[DataReferenceWrite::Url("media.bin".into())])
+            .unwrap();
+        m.set_external_media(a, 1, &[ExternalSampleLocation { offset: 0, size: 4 }])
+            .unwrap();
+        // Replacing the table so index 1 becomes the SelfRef must fail.
+        assert!(m
+            .set_data_references(
+                a,
+                &[
+                    DataReferenceWrite::SelfRef,
+                    DataReferenceWrite::Url("media.bin".into())
+                ]
+            )
+            .is_err());
+        // A replacement keeping index 1 external is fine.
+        assert!(m
+            .set_data_references(a, &[DataReferenceWrite::Url("other.bin".into())])
+            .is_ok());
+    }
+
+    #[test]
+    fn fragmented_encode_rejects_external_tracks() {
+        let mut m = MovMuxer::new().with_fragmentation(FragmentationMode::ByFrameCount(1));
+        let a = add_external_audio(&mut m, 1);
+        m.set_data_references(a, &[DataReferenceWrite::Url("media.bin".into())])
+            .unwrap();
+        m.set_external_media(a, 1, &[ExternalSampleLocation { offset: 0, size: 4 }])
+            .unwrap();
+        assert!(m.encode_fragmented_to_vec().is_err());
+    }
+
+    #[cfg(feature = "registry")]
+    #[test]
+    fn external_track_emits_no_mdat_bytes_and_external_offsets() {
+        // One external audio track: mdat must be empty, stco must carry
+        // the external offsets verbatim, and the sample entry's
+        // data_reference_index must point at the url entry.
+        let mut m = MovMuxer::new();
+        let a = add_external_audio(&mut m, 3);
+        m.set_data_references(a, &[DataReferenceWrite::Url("media.bin".into())])
+            .unwrap();
+        m.set_external_media(
+            a,
+            1,
+            &[
+                ExternalSampleLocation {
+                    offset: 16,
+                    size: 4,
+                },
+                ExternalSampleLocation {
+                    offset: 20,
+                    size: 4,
+                }, // contiguous
+                ExternalSampleLocation {
+                    offset: 64,
+                    size: 6,
+                }, // gap
+            ],
+        )
+        .unwrap();
+        let bytes = m.encode_to_vec().expect("encode");
+        // The mdat atom must be empty (header only, size 8) — no sample
+        // byte of the external track lands in this file.
+        let mdat_pos = bytes
+            .windows(4)
+            .position(|w| w == b"mdat")
+            .expect("mdat present");
+        let mdat_size = u32::from_be_bytes(bytes[mdat_pos - 4..mdat_pos].try_into().unwrap());
+        assert_eq!(mdat_size, 8, "external-only movie must have an empty mdat");
+        let mut d = MovDemuxer::open(Box::new(Cursor::new(bytes)) as Box<dyn ReadSeek>)
+            .expect("demux own output");
+        assert_eq!(d.tracks.len(), 1);
+        assert!(d.track_has_external_data(0));
+        assert_eq!(
+            d.tracks[0].data_references,
+            vec![crate::reference::DataReference::Url("media.bin".into())]
+        );
+        assert_eq!(d.tracks[0].sample_descriptions[0].data_reference_index, 1);
+        // Chunk offsets are into the external file: 2 chunks (16, 64).
+        let st = &d.tracks[0].sample_table;
+        assert_eq!(st.chunk_offsets, vec![16, 64]);
+        // Sizes come from the locations (0-based decode-order index).
+        assert_eq!(st.sample_size_at(0), Some(4));
+        assert_eq!(st.sample_size_at(2), Some(6));
+        // Reading the samples without an opener stays a recoverable
+        // per-sample Unsupported error.
+        for _ in 0..3 {
+            let err = d.read_next().expect_err("external sample without opener");
+            let msg = format!("{err}");
+            assert!(msg.contains("external"), "unexpected error text: {msg}");
+        }
+        assert!(matches!(d.read_next(), Err(Error::Eof)));
     }
 }

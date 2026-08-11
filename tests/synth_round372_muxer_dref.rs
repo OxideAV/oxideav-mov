@@ -183,11 +183,20 @@ fn samples_still_read_back_with_external_dref() {
 }
 
 #[test]
-fn zero_self_refs_rejected() {
+fn zero_self_refs_rejected_at_encode_for_in_file_track() {
+    // Round 440: a table with no self-ref is accepted at *set* time
+    // (it is the legal shape for a track later declared external via
+    // set_external_media) but a track whose samples are written into
+    // this file's mdat must still resolve a SelfRef at encode time.
     let mut m = MovMuxer::new();
     let v = add_video(&mut m);
-    let err = m.set_data_references(v, &[DataReferenceWrite::Url("http://example.com/".into())]);
-    assert!(err.is_err(), "a table with no self-ref must error");
+    m.set_data_references(v, &[DataReferenceWrite::Url("http://example.com/".into())])
+        .expect("no-SelfRef table is accepted at set time");
+    let err = m.encode_to_vec();
+    assert!(
+        err.is_err(),
+        "an in-file track with a no-SelfRef table must fail at encode"
+    );
 }
 
 #[test]
