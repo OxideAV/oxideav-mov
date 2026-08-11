@@ -181,12 +181,27 @@ Decoding stays in codec crates: this crate calls
 - Reference movies (`rmra/rmda/rmdr/rmcs`): parsed; alias resolution
   is opt-in (`open_with_aliases`) so the default `open` path can't
   reach the network / filesystem.
-- External data references (`dinf/dref`, §8.7.2): a sample whose
-  description points at a non-self `dref` entry yields a recoverable
-  `Unsupported` error instead of silently emitting local bytes;
-  local tracks in the same movie keep demuxing.
+- External data references (`dinf/dref`, QTFF p. 94 / §8.7.2): by
+  default a sample whose description points at a non-self `dref` entry
+  yields a recoverable `Unsupported` error instead of silently emitting
+  local bytes; local tracks in the same movie keep demuxing, and
   `sample_data_in_file` / `track_has_external_data` expose the
-  resolution.
+  classification. Opt-in **resolution** via
+  `set_data_reference_opener`: the opener receives the typed
+  `DataReference` (`url ` / `urn ` / `alis` / `rsrc`) and returns a
+  reader over the external file; sample bytes are then read at their
+  chunk-derived offsets within *that* file (QTFF pp. 79/113 — offsets
+  address the data stream the data reference designates, so the
+  external file may be any format at all, per the "Defining Media Data
+  Layouts" appendix). At most one opener call per `(track, dref-entry)`
+  — successes cache the reader, failures cache sticky per-sample
+  recoverable errors. The built-in `dref_file_opener(base_dir)` is a
+  sandboxed local-file policy: `file://` URLs, plus percent-decoded
+  plain-relative names joined to the caller's base directory (no
+  absolute paths, no `..` traversal, no drive/rooted shapes); foreign
+  schemes and Macintosh alias records are rejected. Seek, applied edit
+  lists, and every layout compose with resolution; the default `open`
+  still never touches the filesystem or network.
 
 ## Seek
 
@@ -400,10 +415,28 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
 - `set_data_references(track_id, &[DataReferenceWrite])` replaces a
   track's default single self-referencing `dref` (`url ` flags=1) with
   an explicit table — `DataReferenceWrite::{SelfRef, Url, Urn}` — to
-  declare external `url ` / `urn ` storage (reference movies). Must
-  contain exactly one `SelfRef`; the muxer points every sample entry's
-  `data_reference_index` at it. Round-trips through `parse_dref` onto
+  declare external `url ` / `urn ` storage. At most one `SelfRef`: a
+  track whose bytes land in this file's `mdat` needs exactly one (the
+  muxer points every sample entry's `data_reference_index` at it,
+  validated at encode time), while a table with none pairs with
+  `set_external_media`. Round-trips through `parse_dref` onto
   `Track::data_references`.
+- `set_external_media(track_id, dref_index, &[ExternalSampleLocation])`
+  authors an **external-data track** (QTFF "Defining Media Data
+  Layouts"): none of its sample bytes are written into this file's
+  `mdat` — samples are added with empty `data` (timing / keyframe /
+  ctts axes only) and each `ExternalSampleLocation { offset, size }`
+  places one sample inside the external file the designated non-self
+  `dref` entry names. Byte-contiguous locations coalesce into
+  multi-sample chunks (compact run-length `stsc`); `stco` carries the
+  external offsets verbatim, auto-promoting to `co64` past 4 GiB;
+  `stsz` / `stz2` sizes come from the locations. Composes with both
+  `MoovPlacement`s, interleaving (external tracks are excluded — they
+  have no bytes here to interleave), `cmov`, and edit lists; rejected
+  on the fragmented path and alongside `set_sample_aux`. The read-side
+  counterpart is `set_data_reference_opener`; a self-contained and an
+  external authoring of the same media present identical packet
+  streams once resolved.
 - `set_track_gmin(track_id, Gmin)` overrides the `gmhd/gmin` Generic
   Media Information header (QTFF p. 65) of a time-code / text track —
   the compositing `graphics_mode` (Table 4-2), the `opcolor` triple the
@@ -554,7 +587,10 @@ mapper at boundary PTS values, re-runs the seek path, then flips on
 the applied edit-list mode for a second drain + edited-seek pass
 (probing `edited_pts_to_media_pts` at boundary values), and a third
 pass with discard emission on (`emit_never_presented`) plus the
-typed elst summary accessors. Alias
+typed elst summary accessors, and a fourth pass that attaches an
+always-failing data-reference opener (never touching filesystem or
+network) so the external-media resolution + sticky-failure cache face
+hostile `dref` tables. Alias
 resolution is excluded so a fuzz input can't reach the network or
 filesystem. A daily 30-minute run is scheduled.
 
