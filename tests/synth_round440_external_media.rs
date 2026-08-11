@@ -514,3 +514,254 @@ fn applied_edit_lists_compose_with_external_resolution() {
     assert_eq!(pts, vec![0, 1024, 2048]);
     assert_eq!(data, payloads[1..].to_vec());
 }
+
+#[test]
+fn compressed_movie_resource_carries_external_track() {
+    // QTFF pp. 80-81: the whole movie resource (including the dref
+    // table and external chunk offsets) survives the cmov round-trip;
+    // external offsets are independent of this file's layout so the
+    // mdat-first ordering constraint is trivially satisfied.
+    let (file, locations, payloads) = sidecar();
+    let mut m = MovMuxer::new().with_compressed_movie_resource(true);
+    let audio: Vec<MuxSample> = (0..locations.len())
+        .map(|_| MuxSample {
+            data: Vec::new(),
+            duration: 1024,
+            keyframe: true,
+            composition_offset: 0,
+        })
+        .collect();
+    let a = m.add_track(
+        MuxTrackKind::Audio {
+            format: *b"twos",
+            channels: 1,
+            bits_per_sample: 16,
+            sample_rate: 8000,
+        },
+        8000,
+        audio,
+        &[],
+    );
+    m.set_data_references(a, &[DataReferenceWrite::Url("media.bin".into())])
+        .unwrap();
+    m.set_external_media(a, 1, &locations).unwrap();
+    let bytes = m.encode_to_vec().expect("encode");
+    assert!(bytes.windows(4).any(|w| w == b"cmov"), "cmov emitted");
+    let mut d = open(bytes);
+    assert!(d.compressed_movie_algorithm.is_some());
+    assert!(d.track_has_external_data(0));
+    d.set_data_reference_opener(move |_r| {
+        Ok(Box::new(Cursor::new(file.clone())) as Box<dyn ReadSeek>)
+    });
+    let mut audio_out = Vec::new();
+    loop {
+        match d.read_next() {
+            Ok((_, _, data)) => audio_out.push(data),
+            Err(Error::Eof) => break,
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+    assert_eq!(audio_out, payloads);
+}
+
+#[test]
+fn compact_sample_size_composes_with_external_locations() {
+    // stz2 sizes must come from the external locations (samples carry
+    // no in-file data): varying sizes 6/4/5/7 all fit the 4-bit form.
+    let (file, locations, payloads) = sidecar();
+    let mut m = MovMuxer::new();
+    let audio: Vec<MuxSample> = (0..locations.len())
+        .map(|_| MuxSample {
+            data: Vec::new(),
+            duration: 1024,
+            keyframe: true,
+            composition_offset: 0,
+        })
+        .collect();
+    let a = m.add_track(
+        MuxTrackKind::Audio {
+            format: *b"twos",
+            channels: 1,
+            bits_per_sample: 16,
+            sample_rate: 8000,
+        },
+        8000,
+        audio,
+        &[],
+    );
+    m.set_data_references(a, &[DataReferenceWrite::Url("media.bin".into())])
+        .unwrap();
+    m.set_external_media(a, 1, &locations).unwrap();
+    m.set_compact_sample_size(a, true).unwrap();
+    let bytes = m.encode_to_vec().expect("encode");
+    assert!(bytes.windows(4).any(|w| w == b"stz2"), "stz2 emitted");
+    let mut d = open(bytes);
+    use oxideav_mov::SampleSizeSource;
+    assert!(matches!(
+        d.sample_size_source(0),
+        Some(SampleSizeSource::Stz2 { field_size: 4 })
+    ));
+    d.set_data_reference_opener(move |_r| {
+        Ok(Box::new(Cursor::new(file.clone())) as Box<dyn ReadSeek>)
+    });
+    let mut audio_out = Vec::new();
+    loop {
+        match d.read_next() {
+            Ok((_, _, data)) => audio_out.push(data),
+            Err(Error::Eof) => break,
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+    assert_eq!(audio_out, payloads);
+}
+
+#[test]
+fn dangling_data_reference_index_stays_lenient_local_and_skips_opener() {
+    // Byte-patch the muxed movie's audio sample entry so its
+    // data_reference_index points past the 1-entry dref table. The
+    // long-standing `sample_data_in_file` contract treats a dangling
+    // index as *local* (every writer that emits a broken index stores
+    // its data locally), so the round-440 resolution path must never
+    // engage: no "external" errors, and the opener is never consulted
+    // even though one is attached.
+    let (_file, locations, _payloads) = sidecar();
+    let mut bytes = mixed_movie(&locations);
+    let pos = bytes
+        .windows(4)
+        .position(|w| w == b"twos")
+        .expect("twos entry");
+    // data_reference_index sits 8 bytes after the format FourCC.
+    bytes[pos + 10] = 0;
+    bytes[pos + 11] = 9; // dangling: table has 1 entry
+    let mut d = open(bytes);
+    assert!(
+        !d.track_has_external_data(1),
+        "a dangling index classifies as local"
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls2 = Arc::clone(&calls);
+    d.set_data_reference_opener(move |_r| {
+        calls2.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(Cursor::new(Vec::new())) as Box<dyn ReadSeek>)
+    });
+    loop {
+        match d.read_next() {
+            Ok(_) => {}
+            Err(Error::Eof) => break,
+            Err(e) => {
+                // Reads resolve against *this* file's bytes (the
+                // lenient-local contract); whether a given offset is
+                // readable depends on the file layout, but no error
+                // may mention the external path.
+                let msg = format!("{e}");
+                assert!(!msg.contains("external"), "external path engaged: {msg}");
+            }
+        }
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a dangling index never reaches the opener"
+    );
+}
+
+#[test]
+fn truncated_external_file_yields_recoverable_error() {
+    let (file, locations, payloads) = sidecar();
+    // Cut the sidecar short mid-way through the third payload: samples
+    // 1-2 read fine, sample 3 truncates, sample 4 is past EOF.
+    let cut = locations[2].offset as usize + 2;
+    let short = file[..cut].to_vec();
+    let mut d = open(mixed_movie(&locations));
+    d.set_data_reference_opener(move |_r| {
+        Ok(Box::new(Cursor::new(short.clone())) as Box<dyn ReadSeek>)
+    });
+    let mut audio = Vec::new();
+    let mut errors = 0usize;
+    loop {
+        match d.read_next() {
+            Ok((1, _s, data)) => audio.push(data),
+            Ok(_) => {}
+            Err(Error::Eof) => break,
+            Err(e) => {
+                assert!(format!("{e}").contains("truncated"), "unexpected: {e}");
+                errors += 1;
+            }
+        }
+    }
+    assert_eq!(audio, payloads[..2].to_vec());
+    assert_eq!(errors, 2, "samples 3 and 4 truncate recoverably");
+}
+
+#[test]
+fn external_movie_equals_self_contained_movie_payload_stream() {
+    // The same media authored (a) self-contained and (b) externally
+    // must present identical per-track payload streams once resolved.
+    let (file, locations, payloads) = sidecar();
+    let mut self_contained = MovMuxer::new();
+    let sc_samples: Vec<MuxSample> = payloads
+        .iter()
+        .map(|p| MuxSample {
+            data: p.clone(),
+            duration: 1024,
+            keyframe: true,
+            composition_offset: 0,
+        })
+        .collect();
+    self_contained.add_track(
+        MuxTrackKind::Audio {
+            format: *b"twos",
+            channels: 1,
+            bits_per_sample: 16,
+            sample_rate: 8000,
+        },
+        8000,
+        sc_samples,
+        &[],
+    );
+    let mut d_sc = open(self_contained.encode_to_vec().expect("encode"));
+
+    let mut ext = MovMuxer::new();
+    let ext_samples: Vec<MuxSample> = (0..locations.len())
+        .map(|_| MuxSample {
+            data: Vec::new(),
+            duration: 1024,
+            keyframe: true,
+            composition_offset: 0,
+        })
+        .collect();
+    let a = ext.add_track(
+        MuxTrackKind::Audio {
+            format: *b"twos",
+            channels: 1,
+            bits_per_sample: 16,
+            sample_rate: 8000,
+        },
+        8000,
+        ext_samples,
+        &[],
+    );
+    ext.set_data_references(a, &[DataReferenceWrite::Url("media.bin".into())])
+        .unwrap();
+    ext.set_external_media(a, 1, &locations).unwrap();
+    let mut d_ext = open(ext.encode_to_vec().expect("encode"));
+    d_ext.set_data_reference_opener(move |_r| {
+        Ok(Box::new(Cursor::new(file.clone())) as Box<dyn ReadSeek>)
+    });
+
+    loop {
+        let a = d_sc.next_packet();
+        let b = d_ext.next_packet();
+        match (a, b) {
+            (Ok(pa), Ok(pb)) => {
+                assert_eq!(pa.data, pb.data);
+                assert_eq!(pa.pts, pb.pts);
+                assert_eq!(pa.dts, pb.dts);
+                assert_eq!(pa.duration, pb.duration);
+                assert_eq!(pa.flags.keyframe, pb.flags.keyframe);
+            }
+            (Err(Error::Eof), Err(Error::Eof)) => break,
+            (a, b) => panic!("streams diverge: {a:?} vs {b:?}"),
+        }
+    }
+}
