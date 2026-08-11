@@ -78,7 +78,9 @@ pub use cmov::{
     CMVD_MIN_BODY_LEN, DCOM_ALG_ZLIB, DCOM_BODY_LEN,
 };
 pub use ctab::{parse_ctab, ColorTableEntry, Ctab};
-pub use demuxer::{open_file_url, MovDemuxer, MAX_ALIAS_DEPTH};
+pub use demuxer::{
+    dref_file_opener, open_file_url, DataReferenceOpener, MovDemuxer, MAX_ALIAS_DEPTH,
+};
 pub use derived::{
     build_grid_layout, build_overlay_layout, compute_post_transform_extent, image_layout_for,
     parse_grid, parse_overlay, parse_overlay_with_source_count, parse_tmap_payload,

@@ -257,8 +257,41 @@ pub struct MovDemuxer {
     /// optional `mfra` is absent. Drives the fragmented-seek path in
     /// [`MovDemuxer::seek_to_impl`] (§8.8.10.3).
     pub tfra_indexes: Vec<Tfra>,
+    /// Caller-supplied opener resolving a **non-self** data reference
+    /// (QTFF p. 94 / ISO/IEC 14496-12 §8.7.2 — a `dref` entry whose
+    /// self-reference flag is clear) to a readable byte stream over
+    /// the external file it names. `None` (the default) keeps the
+    /// historical behaviour: samples whose description points at
+    /// external media surface recoverable `Unsupported` errors and the
+    /// demuxer can never reach the filesystem or network on its own.
+    /// Set via [`MovDemuxer::set_data_reference_opener`].
+    dref_opener: Option<DataReferenceOpener>,
+    /// Cache of resolved external sources keyed by `(track_index,
+    /// 1-based dref entry index)` — the opener runs at most once per
+    /// distinct data reference; failures are sticky so a hostile file
+    /// with thousands of samples cannot hammer the opener.
+    external_sources: std::collections::HashMap<(usize, u16), ExternalSource>,
     #[cfg(feature = "registry")]
     streams: Vec<StreamInfo>,
+}
+
+/// Boxed callback [`MovDemuxer::set_data_reference_opener`] stores: it
+/// receives the parsed [`DataReference`](crate::reference::DataReference)
+/// of a track's `dref` table and returns a positioned-at-anywhere
+/// reader over the external file's bytes (sample chunk offsets are
+/// absolute within that file — QTFF p. 113: chunk offsets index "into
+/// the containing file" of the data stream the reference designates).
+pub type DataReferenceOpener =
+    Box<dyn FnMut(&crate::reference::DataReference) -> std::io::Result<Box<dyn ReadSeek>> + Send>;
+
+/// One cached external-media resolution.
+enum ExternalSource {
+    /// The opener produced a reader; every sample behind this data
+    /// reference reads from it.
+    Open(Box<dyn ReadSeek>),
+    /// The opener failed (or the reference kind is one it rejects);
+    /// the failure text replays in every affected sample's error.
+    Failed(String),
 }
 
 impl MovDemuxer {
@@ -1041,6 +1074,8 @@ impl MovDemuxer {
             leva: leva_box,
             fragment_sequence_numbers,
             tfra_indexes,
+            dref_opener: None,
+            external_sources: std::collections::HashMap::new(),
             #[cfg(feature = "registry")]
             streams,
         })
@@ -1587,20 +1622,113 @@ impl MovDemuxer {
         let (stream_idx, sample) = self.samples[self.next];
         self.next += 1;
         if !self.sample_data_in_file(stream_idx as usize, &sample) {
+            let dri = self.tracks[stream_idx as usize]
+                .sample_descriptions
+                .get(sample.sample_description_id.saturating_sub(1) as usize)
+                .map(|sd| sd.data_reference_index)
+                .unwrap_or(0);
+            if self.dref_opener.is_some() {
+                // Round 440: an attached opener resolves the external
+                // file; the sample's chunk-derived offset is a byte
+                // offset within *that* file (QTFF p. 79 — each
+                // sample's "byte offset from the data reference").
+                let reader = self.external_source(stream_idx as usize, dri)?;
+                let buf = read_exact_bounded_from(
+                    reader.as_mut(),
+                    sample.offset,
+                    sample.size as u64,
+                    "external sample data",
+                )?;
+                return Ok((stream_idx, sample, buf));
+            }
             return Err(unsupported_error(format!(
                 "MOV: sample {} of track {} references external media \
-                 (non-self dref entry {}); resolve the data reference externally",
-                sample.index,
-                stream_idx,
-                self.tracks[stream_idx as usize]
-                    .sample_descriptions
-                    .get(sample.sample_description_id.saturating_sub(1) as usize)
-                    .map(|sd| sd.data_reference_index)
-                    .unwrap_or(0),
+                 (non-self dref entry {dri}); attach set_data_reference_opener \
+                 or resolve the data reference externally",
+                sample.index, stream_idx,
             )));
         }
         let buf = self.read_exact_bounded(sample.offset, sample.size as u64, "sample data")?;
         Ok((stream_idx, sample, buf))
+    }
+
+    /// Attach an opener that resolves **external data references**: a
+    /// track whose sample description points at a non-self `dref`
+    /// entry (QTFF p. 94 — the self-reference flag clear "indicates"
+    /// the media is *not* "in the same file as the movie atom") stops
+    /// yielding per-sample `Unsupported` errors and instead reads each
+    /// sample's bytes from the stream the opener returns for that
+    /// entry, at the sample's chunk-derived offset (offsets are
+    /// absolute within the external file — QTFF pp. 79 / 113). This is
+    /// the QTFF appendix "Defining Media Data Layouts" shape: the
+    /// external file may be any format at all, since samples are
+    /// addressed "by file offset, rather than by a data structuring
+    /// mechanism of a particular file format".
+    ///
+    /// Security model matches [`MovDemuxer::open_with_aliases`]: the
+    /// default [`open`](MovDemuxer::open) path can never touch the
+    /// filesystem or network — resolution requires this explicit
+    /// opt-in, and *how* a [`DataReference`](crate::reference::DataReference)
+    /// (`url ` / `urn ` / `alis` / `rsrc`) maps to a byte stream is
+    /// entirely the opener's policy (QTFF says a `url ` "can be
+    /// absolute or relative" but leaves resolution to the player; see
+    /// [`dref_file_opener`] for a sandboxed local-file policy).
+    ///
+    /// The opener runs **at most once** per distinct `(track,
+    /// dref-entry)` pair: successes cache the reader, failures cache
+    /// the error text and replay it as a recoverable per-sample
+    /// `Unsupported` error — local tracks in the same movie keep
+    /// demuxing either way. Attaching a new opener clears the cache.
+    /// The opener is intentionally not consulted for `rmra` reference
+    /// movies ([`open_with_aliases`](MovDemuxer::open_with_aliases)
+    /// owns that path) nor by the fuzz surface.
+    pub fn set_data_reference_opener<F>(&mut self, opener: F)
+    where
+        F: FnMut(&crate::reference::DataReference) -> std::io::Result<Box<dyn ReadSeek>>
+            + Send
+            + 'static,
+    {
+        self.dref_opener = Some(Box::new(opener));
+        self.external_sources.clear();
+    }
+
+    /// Whether a data-reference opener is attached (see
+    /// [`MovDemuxer::set_data_reference_opener`]).
+    pub fn has_data_reference_opener(&self) -> bool {
+        self.dref_opener.is_some()
+    }
+
+    /// Resolve (with caching) the external source behind 1-based
+    /// `dref` entry `dri` of `track_idx`. Requires an attached opener;
+    /// a missing table entry or an opener failure caches as a sticky
+    /// failure whose text replays in every affected sample's
+    /// recoverable `Unsupported` error.
+    fn external_source(&mut self, track_idx: usize, dri: u16) -> Result<&mut Box<dyn ReadSeek>> {
+        let key = (track_idx, dri);
+        #[allow(clippy::map_entry)] // two-phase: the opener needs &mut self borrows split
+        if !self.external_sources.contains_key(&key) {
+            let dref = dri
+                .checked_sub(1)
+                .and_then(|i| self.tracks.get(track_idx)?.data_references.get(i as usize))
+                .cloned();
+            let slot = match (dref, self.dref_opener.as_mut()) {
+                (Some(r), Some(opener)) => match opener(&r) {
+                    Ok(reader) => ExternalSource::Open(reader),
+                    Err(e) => ExternalSource::Failed(e.to_string()),
+                },
+                (None, _) => ExternalSource::Failed(format!(
+                    "dref entry {dri} not present in the track's data-reference table"
+                )),
+                (_, None) => ExternalSource::Failed("no data-reference opener attached".into()),
+            };
+            self.external_sources.insert(key, slot);
+        }
+        match self.external_sources.get_mut(&key).expect("just inserted") {
+            ExternalSource::Open(reader) => Ok(reader),
+            ExternalSource::Failed(msg) => Err(unsupported_error(format!(
+                "MOV: track {track_idx} external media (dref entry {dri}) unresolved: {msg}"
+            ))),
+        }
     }
 
     /// Seek to `offset` and read exactly `size` declared bytes with an
@@ -1610,16 +1738,7 @@ impl MovDemuxer {
     /// instead of pre-allocating the declared amount up front. Errors
     /// with `Error::invalid` naming `what` on a short read.
     fn read_exact_bounded(&mut self, offset: u64, size: u64, what: &str) -> Result<Vec<u8>> {
-        self.input.seek(SeekFrom::Start(offset))?;
-        let mut buf = Vec::new();
-        (&mut self.input).take(size).read_to_end(&mut buf)?;
-        if (buf.len() as u64) < size {
-            return Err(Error::invalid(format!(
-                "MOV: {what} truncated: declared {size} bytes, {} available",
-                buf.len()
-            )));
-        }
-        Ok(buf)
+        read_exact_bounded_from(self.input.as_mut(), offset, size, what)
     }
 
     /// Whether a sample's media bytes live in **this** file: its
@@ -3150,6 +3269,29 @@ impl MovDemuxer {
     }
 }
 
+/// Seek to `offset` in `input` and read exactly `size` declared bytes
+/// with an allocation that grows only as data actually arrives — the
+/// free-function form of [`MovDemuxer::read_exact_bounded`], shared by
+/// the in-file (`mdat`) and external-data (round 440) sample reads so
+/// hostile size fields hit end-of-input instead of pre-allocating.
+fn read_exact_bounded_from(
+    input: &mut dyn ReadSeek,
+    offset: u64,
+    size: u64,
+    what: &str,
+) -> Result<Vec<u8>> {
+    input.seek(SeekFrom::Start(offset))?;
+    let mut buf = Vec::new();
+    (&mut *input).take(size).read_to_end(&mut buf)?;
+    if (buf.len() as u64) < size {
+        return Err(Error::invalid(format!(
+            "MOV: {what} truncated: declared {size} bytes, {} available",
+            buf.len()
+        )));
+    }
+    Ok(buf)
+}
+
 /// Build an "unsupported" error in a way that works under both the
 /// `registry` (uses `oxideav_core::Error::unsupported`) and standalone
 /// (uses our local `Error::Unsupported`) builds.
@@ -3218,6 +3360,116 @@ pub fn open_file_url(url: &str) -> std::io::Result<Box<dyn ReadSeek>> {
     })?;
     let f = std::fs::File::open(&path)?;
     Ok(Box::new(f))
+}
+
+/// Built-in **local-file** policy for
+/// [`MovDemuxer::set_data_reference_opener`]: resolves `url ` (and
+/// `urn ` location) data references to local files, everything else
+/// to `Unsupported`.
+///
+/// QTFF ("Reference Movies" chapter) says a `url ` data reference
+/// "can be absolute or relative, and can specify any protocol that
+/// QuickTime supports" — but leaves *how* a player resolves it to the
+/// player. This helper implements a deliberately narrow, sandboxed
+/// policy:
+///
+/// * `file://` URLs (and the legacy `file:` shape) resolve through
+///   the same rules as [`open_file_url`] — absolute local paths only,
+///   non-`localhost` hosts rejected.
+/// * A **relative** URL (no `scheme:` prefix, not an absolute path)
+///   resolves against `base_dir` — conventionally the directory the
+///   movie file itself lives in, which is where authoring tools place
+///   sidecar media files. It is percent-decoded, then rejected unless
+///   every path component is a plain name: no leading `/`, no `..`
+///   traversal, no rooted or drive-prefixed shapes — so a hostile
+///   movie cannot escape the caller-designated directory. With
+///   `base_dir == None` every relative URL is rejected.
+/// * Any other scheme (`http://`, `rtsp://`, …), `alis` / `rsrc`
+///   Macintosh alias records (their binary layout is Alias-Manager
+///   territory, outside the QTFF spec), and self-references are
+///   rejected with [`std::io::ErrorKind::Unsupported`].
+///
+/// Wire it in via:
+///
+/// ```ignore
+/// use oxideav_mov::{dref_file_opener, MovDemuxer};
+/// let f = std::fs::File::open("/path/to/movie.mov")?;
+/// let mut dem = MovDemuxer::open(Box::new(f))?;
+/// dem.set_data_reference_opener(dref_file_opener(Some("/path/to".into())));
+/// ```
+pub fn dref_file_opener(
+    base_dir: Option<std::path::PathBuf>,
+) -> impl FnMut(&crate::reference::DataReference) -> std::io::Result<Box<dyn ReadSeek>> {
+    use crate::reference::DataReference;
+    move |r: &DataReference| {
+        let unsupported = |msg: String| std::io::Error::new(std::io::ErrorKind::Unsupported, msg);
+        let url = match r {
+            DataReference::Url(u) => u.as_str(),
+            // ISO BMFF §8.7.2: a urn's optional location tells where
+            // to find the resource; apply the same URL policy to it.
+            DataReference::Urn { location, .. } if !location.is_empty() => location.as_str(),
+            DataReference::Urn { .. } => {
+                return Err(unsupported(
+                    "MOV: dref_file_opener: urn  reference carries no location".into(),
+                ))
+            }
+            DataReference::Alias(_) | DataReference::Resource(_) => {
+                return Err(unsupported(
+                    "MOV: dref_file_opener: Macintosh alias records are not resolvable \
+                     from the QTFF spec alone; bring your own opener"
+                        .into(),
+                ))
+            }
+            DataReference::SelfRef => {
+                return Err(unsupported(
+                    "MOV: dref_file_opener: self-reference reached the external opener".into(),
+                ))
+            }
+            DataReference::Other(t, _) => {
+                return Err(unsupported(format!(
+                    "MOV: dref_file_opener: unknown data-reference type {:?}",
+                    String::from_utf8_lossy(t)
+                )))
+            }
+        };
+        // file:// (and legacy file:) URLs go through the absolute-path
+        // rules shared with the rmra alias opener.
+        if url.len() >= 5 && url[..5].eq_ignore_ascii_case("file:") {
+            return open_file_url(url);
+        }
+        // Any other scheme is out of policy.
+        if url.contains("://") {
+            return Err(unsupported(format!(
+                "MOV: dref_file_opener: non-file scheme in '{url}'"
+            )));
+        }
+        // Relative form: sandbox-join against the caller's base dir.
+        let Some(base) = base_dir.as_ref() else {
+            return Err(unsupported(format!(
+                "MOV: dref_file_opener: relative data reference '{url}' with no base_dir"
+            )));
+        };
+        let decoded = percent_decode_to_bytes(url)
+            .and_then(|b| String::from_utf8(b).ok())
+            .ok_or_else(|| {
+                unsupported(format!(
+                    "MOV: dref_file_opener: malformed percent-encoding in '{url}'"
+                ))
+            })?;
+        let rel = std::path::Path::new(&decoded);
+        let sandboxed = rel.components().all(|c| {
+            matches!(c, std::path::Component::Normal(n) if !n.to_string_lossy().starts_with('\\'))
+        }) && !decoded.starts_with('/')
+            && !decoded.contains('\\');
+        if !sandboxed || decoded.is_empty() {
+            return Err(unsupported(format!(
+                "MOV: dref_file_opener: relative data reference '{decoded}' escapes or is \
+                 not a plain relative path (absolute, '..', or rooted components rejected)"
+            )));
+        }
+        let f = std::fs::File::open(base.join(rel))?;
+        Ok(Box::new(f) as Box<dyn ReadSeek>)
+    }
 }
 
 /// Decode a `file://`-scheme URL into a filesystem path, returning
