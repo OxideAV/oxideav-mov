@@ -287,7 +287,11 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   by the `mfro` size trailer (§8.8.11) — so the demuxer's tfra-driven
   fragmented seek engages on our own output, external-data tracks
   included (a `tfra` locates samples structurally, independent of
-  where their bytes live).
+  where their bytes live). Opt-in `with_fragment_decode_times()`
+  emits a `tfdt` (§8.8.12) in every `traf` — the absolute
+  `baseMediaDecodeTime` of its first sample, v0→v1 auto-promotion —
+  so a media segment stays correctly timed when decoded without its
+  predecessors (the streaming mid-stream-join shape).
 - `set_sample_aux(track_id, SampleAuxStream)` writes `saiz` / `saio`
   on both the non-fragmented (`stbl`-scope, absolute offset) and
   fragmented (`traf`-scope, moof-relative offset) paths — e.g. for

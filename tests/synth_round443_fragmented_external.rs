@@ -967,3 +967,134 @@ fn fragments_without_sync_samples_contribute_no_tfra_entry() {
     assert_eq!(d.tfra_indexes[0].entries.len(), 1);
     assert_eq!(d.tfra_indexes[0].entries[0].time, 0);
 }
+
+// ───────── tfdt write path (§8.8.12) ─────────
+
+#[test]
+fn fragment_decode_times_are_opt_in_and_round_trip() {
+    let (_file, locations, _payloads) = sidecar();
+    // Default off: no tfdt anywhere.
+    for trafs in &walk_moofs(&fragmented_mixed(&locations, 2)) {
+        assert!(trafs.iter().all(|t| t.tfdt.is_none()));
+    }
+    // Opted in: every traf carries its track's running baseline.
+    let mut m = MovMuxer::new()
+        .with_fragmentation(FragmentationMode::ByFrameCount(2))
+        .with_fragment_decode_times();
+    m.add_track(
+        MuxTrackKind::Video {
+            format: *b"raw ",
+            width: 2,
+            height: 2,
+        },
+        600,
+        video_samples(4),
+        &[],
+    );
+    let a = m.add_track(
+        MuxTrackKind::Audio {
+            format: *b"twos",
+            channels: 1,
+            bits_per_sample: 16,
+            sample_rate: 8000,
+        },
+        8000,
+        external_audio_samples(locations.len()),
+        &[],
+    );
+    m.set_data_references(a, &[DataReferenceWrite::Url("media.bin".into())])
+        .expect("table");
+    m.set_external_media(a, 1, &locations).expect("external");
+    let bytes = m.encode_fragmented_to_vec().expect("encode");
+    let moofs = walk_moofs(&bytes);
+    assert_eq!(moofs.len(), 2);
+    // Video: fragments start at dts 0 and 200; external audio at 0
+    // and 3*1024 (samples 0..3 land in fragment 1).
+    assert_eq!(moofs[0][0].tfdt, Some(0));
+    assert_eq!(moofs[0][1].tfdt, Some(0));
+    assert_eq!(moofs[1][0].tfdt, Some(200));
+    assert_eq!(moofs[1][1].tfdt, Some(3 * 1024));
+}
+
+#[test]
+fn tfdt_keeps_a_mid_stream_segment_correctly_timed() {
+    // The streaming resume shape: init segment + ONLY the second
+    // media segment. With tfdt the surviving fragment keeps its
+    // absolute timeline; without it the demuxer's running cursor
+    // restarts at zero.
+    fn strip_first_media_segment(bytes: &[u8]) -> Vec<u8> {
+        // Layout: ftyp, moov, moof, mdat, moof, mdat[, mfra]. Keep
+        // ftyp+moov, drop the first moof+mdat pair.
+        let mut r = Cursor::new(bytes.to_vec());
+        let mut spans = Vec::new(); // (fourcc, start, end)
+        let mut pos = 0u64;
+        while let Some(hdr) = read_atom_header(&mut r).expect("hdr") {
+            let end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
+            spans.push((hdr.fourcc, pos, end));
+            pos = end;
+            r.seek(SeekFrom::Start(end)).expect("seek");
+        }
+        let mut out = Vec::new();
+        let mut dropped_moof = false;
+        let mut dropped_mdat = false;
+        for (fourcc, start, end) in spans {
+            let is_first_moof = &fourcc == b"moof" && !dropped_moof;
+            let is_first_mdat = &fourcc == b"mdat" && !dropped_mdat;
+            if is_first_moof {
+                dropped_moof = true;
+                continue;
+            }
+            if is_first_mdat {
+                dropped_mdat = true;
+                continue;
+            }
+            out.extend_from_slice(&bytes[start as usize..end as usize]);
+        }
+        out
+    }
+
+    let build = |with_tfdt: bool| -> Vec<u8> {
+        let mut m = MovMuxer::new().with_fragmentation(FragmentationMode::ByFrameCount(2));
+        if with_tfdt {
+            m = m.with_fragment_decode_times();
+        }
+        m.add_track(
+            MuxTrackKind::Video {
+                format: *b"raw ",
+                width: 2,
+                height: 2,
+            },
+            600,
+            video_samples(4),
+            &[],
+        );
+        m.encode_fragmented_to_vec().expect("encode")
+    };
+
+    // With tfdt: the surviving fragment's samples keep dts 200/300.
+    let mut d = open(strip_first_media_segment(&build(true)));
+    let mut dts = Vec::new();
+    loop {
+        match d.read_next() {
+            Ok((0, s, _)) => dts.push(s.dts),
+            Ok(_) => {}
+            Err(Error::Eof) => break,
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+    assert_eq!(dts, vec![200, 300], "tfdt anchors the absolute timeline");
+
+    // Without tfdt: the running cursor restarts at zero — the
+    // timeline is lost (this is exactly what §8.8.12 exists to fix).
+    let mut d = open(strip_first_media_segment(&build(false)));
+    let mut dts = Vec::new();
+    loop {
+        match d.read_next() {
+            Ok((0, s, _)) => dts.push(s.dts),
+            Ok(_) => {}
+            Err(Error::Eof) => break,
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+    assert_eq!(dts, vec![0, 100]);
+}

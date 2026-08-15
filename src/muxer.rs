@@ -1415,6 +1415,14 @@ pub struct MovMuxer {
     /// historical output shape carries none). Set via
     /// [`MovMuxer::with_fragment_index`].
     write_fragment_index: bool,
+    /// When `true`, every `traf` carries a `tfdt` (Track Fragment
+    /// Decode Time Box, ISO/IEC 14496-12 §8.8.12) declaring the
+    /// absolute `baseMediaDecodeTime` of its first sample — so a
+    /// media segment stays correctly timed even when earlier
+    /// segments are unavailable. Defaults to `false` (optional box;
+    /// historical output shape preserved). Set via
+    /// [`MovMuxer::with_fragment_decode_times`].
+    write_decode_times: bool,
     /// Chunking rule for the non-fragmented `mdat` (see
     /// [`ChunkStrategy`]). Defaults to the historical
     /// one-chunk-per-track layout. No effect on the fragmented path
@@ -1471,6 +1479,7 @@ impl MovMuxer {
             tracks: Vec::new(),
             fragmentation: None,
             write_fragment_index: false,
+            write_decode_times: false,
             chunk_strategy: ChunkStrategy::default(),
             moov_placement: MoovPlacement::default(),
             compress_movie_resource: false,
@@ -1547,6 +1556,34 @@ impl MovMuxer {
     /// random-access index (see [`MovMuxer::with_fragment_index`]).
     pub fn writes_fragment_index(&self) -> bool {
         self.write_fragment_index
+    }
+
+    /// Opt-in per-`traf` **Track Fragment Decode Time Boxes**
+    /// (`tfdt`, ISO/IEC 14496-12 §8.8.12) on the fragmented write
+    /// path.
+    ///
+    /// When enabled, every `traf` declares the absolute
+    /// `baseMediaDecodeTime` of its first sample ("the sum of the
+    /// decode durations of all earlier samples in the media",
+    /// §8.8.12.3) in `mdhd.time_scale` ticks, written between `tfhd`
+    /// and the first `trun` per the §8.8.6.2 order. The box
+    /// auto-promotes from version 0 (32-bit) to version 1 (64-bit)
+    /// when the baseline leaves the 32-bit range. A media segment
+    /// then stays correctly timed even when decoded without its
+    /// predecessors (the streaming resume / mid-stream join shape);
+    /// the demuxer's `moof` walk prefers a present `tfdt` over its
+    /// running per-track cursor, so values round-trip. Off by
+    /// default: the box is optional and the historical output shape
+    /// is preserved byte-for-byte.
+    pub fn with_fragment_decode_times(mut self) -> Self {
+        self.write_decode_times = true;
+        self
+    }
+
+    /// Return whether the fragmented write path emits per-`traf`
+    /// `tfdt` boxes (see [`MovMuxer::with_fragment_decode_times`]).
+    pub fn writes_fragment_decode_times(&self) -> bool {
+        self.write_decode_times
     }
 
     /// Select the non-fragmented `mdat` chunking rule (QTFF
@@ -3695,7 +3732,15 @@ impl MovMuxer {
                     None => traf_plans.push(TrafPlan::Local { data_offset: 0 }),
                 }
             }
-            let moof_size = measure_moof(sequence_number, fragment, &traf_plans);
+            // Per-traf `tfdt` baselines (§8.8.12, opt-in): the
+            // running per-track DTS at fragment entry — captured
+            // before the bookkeeping below advances the cursors, and
+            // before sizing (the value picks the box's v0/v1 width).
+            let tfdts: Vec<Option<u64>> = fragment
+                .iter()
+                .map(|r| self.write_decode_times.then(|| track_dts[r.track_idx]))
+                .collect();
+            let moof_size = measure_moof(sequence_number, fragment, &traf_plans, &tfdts);
             let mut cumulative_in_mdat: u64 = 0;
             for (run, plan) in fragment.iter().zip(traf_plans.iter_mut()) {
                 if let TrafPlan::Local { data_offset } = plan {
@@ -3721,7 +3766,13 @@ impl MovMuxer {
                 }
             }
             // Emit the moof with the real offsets.
-            let moof = build_moof(sequence_number, fragment, &traf_plans, &traf_saio_offsets);
+            let moof = build_moof(
+                sequence_number,
+                fragment,
+                &traf_plans,
+                &traf_saio_offsets,
+                &tfdts,
+            );
             debug_assert_eq!(
                 (moof.len() as u64) + 8,
                 moof_size,
@@ -6270,17 +6321,29 @@ fn build_trun_rows(data_offset: i32, rows: &[TrunRow]) -> Vec<u8> {
 /// traf uses `default-base-is-moof` + one moof-relative `trun`; an
 /// external track's traf uses an explicit `base_data_offset` into the
 /// external file + one `trun` per byte-contiguous location run.
-fn build_traf(run: &FragmentRun<'_>, plan: &TrafPlan, saio_offset: u64) -> Vec<u8> {
+fn build_traf(
+    run: &FragmentRun<'_>,
+    plan: &TrafPlan,
+    saio_offset: u64,
+    tfdt: Option<u64>,
+) -> Vec<u8> {
     let track_id = (run.track_idx as u32) + 1;
     let mut traf = Vec::new();
     match plan {
         TrafPlan::Local { data_offset } => {
             push_atom(&mut traf, *b"tfhd", &build_tfhd(track_id));
+            // §8.8.6.2 order: [tfhd][tfdt?][trun ...].
+            if let Some(base_decode_time) = tfdt {
+                push_atom(&mut traf, *b"tfdt", &build_tfdt(base_decode_time));
+            }
             push_atom(&mut traf, *b"trun", &build_trun(run.samples, *data_offset));
         }
         TrafPlan::External { base, runs } => {
             let locs = run.ext_locations.unwrap_or(&[]);
             push_atom(&mut traf, *b"tfhd", &build_tfhd_external(track_id, *base));
+            if let Some(base_decode_time) = tfdt {
+                push_atom(&mut traf, *b"tfdt", &build_tfdt(base_decode_time));
+            }
             for r in runs {
                 push_atom(
                     &mut traf,
@@ -6324,15 +6387,39 @@ fn build_moof(
     fragment: &[FragmentRun<'_>],
     plans: &[TrafPlan],
     saio_offsets: &[u64],
+    tfdts: &[Option<u64>],
 ) -> Vec<u8> {
     debug_assert_eq!(fragment.len(), plans.len());
     debug_assert_eq!(fragment.len(), saio_offsets.len());
+    debug_assert_eq!(fragment.len(), tfdts.len());
     let mut moof = Vec::new();
     push_atom(&mut moof, *b"mfhd", &build_mfhd(sequence_number));
-    for ((run, plan), &saio_offset) in fragment.iter().zip(plans).zip(saio_offsets) {
-        push_atom(&mut moof, *b"traf", &build_traf(run, plan, saio_offset));
+    for (((run, plan), &saio_offset), &tfdt) in
+        fragment.iter().zip(plans).zip(saio_offsets).zip(tfdts)
+    {
+        push_atom(
+            &mut moof,
+            *b"traf",
+            &build_traf(run, plan, saio_offset, tfdt),
+        );
     }
     moof
+}
+
+/// Build a `tfdt` (Track Fragment Decode Time Box) payload per
+/// ISO/IEC 14496-12 §8.8.12.2: version 0 (32-bit
+/// `baseMediaDecodeTime`) auto-promoting to version 1 (64-bit) when
+/// the baseline leaves the 32-bit range.
+fn build_tfdt(base_media_decode_time: u64) -> Vec<u8> {
+    let mut p = Vec::with_capacity(12);
+    if base_media_decode_time > u32::MAX as u64 {
+        p.extend_from_slice(&(1u32 << 24).to_be_bytes()); // v1
+        p.extend_from_slice(&base_media_decode_time.to_be_bytes());
+    } else {
+        p.extend_from_slice(&0u32.to_be_bytes()); // v0
+        p.extend_from_slice(&(base_media_decode_time as u32).to_be_bytes());
+    }
+    p
 }
 
 /// Build a `tfra` (Track Fragment Random Access Box) payload per
@@ -6386,7 +6473,12 @@ fn build_mfhd(sequence_number: u32) -> Vec<u8> {
 /// for the supplied fragment. Used by the two-pass build to compute
 /// each track's `trun.data_offset` (which depends on the moof's
 /// total byte length).
-fn measure_moof(sequence_number: u32, fragment: &[FragmentRun<'_>], plans: &[TrafPlan]) -> u64 {
+fn measure_moof(
+    sequence_number: u32,
+    fragment: &[FragmentRun<'_>],
+    plans: &[TrafPlan],
+    tfdts: &[Option<u64>],
+) -> u64 {
     // Sizing pass runs with the local trafs' data_offset still at its
     // placeholder 0. `trun`'s data_offset is a fixed 4-byte slot, so
     // its value never affects the size; external trafs' plans are
@@ -6398,7 +6490,9 @@ fn measure_moof(sequence_number: u32, fragment: &[FragmentRun<'_>], plans: &[Tra
     // pass matches the emit pass (pinned by the `debug_assert_eq!` on
     // `moof_size` in `encode_fragmented_to_vec`).
     let placeholder_saio: Vec<u64> = vec![0; fragment.len()];
-    let moof = build_moof(sequence_number, fragment, plans, &placeholder_saio);
+    // `tfdt` baselines are real values (their magnitude picks the
+    // box's v0/v1 width), known before sizing.
+    let moof = build_moof(sequence_number, fragment, plans, &placeholder_saio, tfdts);
     8 + moof.len() as u64
 }
 
