@@ -805,3 +805,165 @@ fn fragmented_external_track_keeps_composition_offsets() {
     let expect: Vec<(i32, Vec<u8>)> = cts.iter().copied().zip(payloads).collect();
     assert_eq!(seen, expect);
 }
+
+// ───────── mfra/tfra/mfro write path (§8.8.9–§8.8.11) ─────────
+
+#[test]
+fn fragment_index_is_opt_in_and_omitted_by_default() {
+    let (_file, locations, _payloads) = sidecar();
+    let bytes = fragmented_mixed(&locations, 2);
+    assert!(
+        !bytes.windows(4).any(|w| w == b"mfra"),
+        "historical output shape carries no mfra"
+    );
+}
+
+#[test]
+fn fragment_index_round_trips_and_drives_fragmented_seek() {
+    // Video keyframes at samples 0 and 2 (one per fragment); external
+    // audio all-sync. with_fragment_index appends mfra/tfra/mfro.
+    let (file, locations, payloads) = sidecar();
+    let mut m = MovMuxer::new()
+        .with_fragmentation(FragmentationMode::ByFrameCount(2))
+        .with_fragment_index();
+    m.add_track(
+        MuxTrackKind::Video {
+            format: *b"raw ",
+            width: 2,
+            height: 2,
+        },
+        600,
+        video_samples(4),
+        &[],
+    );
+    let a = m.add_track(
+        MuxTrackKind::Audio {
+            format: *b"twos",
+            channels: 1,
+            bits_per_sample: 16,
+            sample_rate: 8000,
+        },
+        8000,
+        external_audio_samples(locations.len()),
+        &[],
+    );
+    m.set_data_references(a, &[DataReferenceWrite::Url("media.bin".into())])
+        .expect("table");
+    m.set_external_media(a, 1, &locations).expect("external");
+    let bytes = m.encode_fragmented_to_vec().expect("encode");
+
+    // Wire shape: locate the real moof positions, then check the
+    // parsed tfra entries point exactly at them; the trailing mfro
+    // carries the full mfra length.
+    let mut moof_positions = Vec::new();
+    let mut mfra_extent = None;
+    {
+        let mut r = Cursor::new(bytes.clone());
+        let mut pos = 0u64;
+        while let Some(hdr) = read_atom_header(&mut r).expect("hdr") {
+            let end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
+            if &hdr.fourcc == b"moof" {
+                moof_positions.push(pos);
+            }
+            if &hdr.fourcc == b"mfra" {
+                mfra_extent = Some((pos, end));
+            }
+            pos = end;
+            r.seek(SeekFrom::Start(end)).expect("seek");
+        }
+    }
+    assert_eq!(moof_positions.len(), 2);
+    let (mfra_start, mfra_end) = mfra_extent.expect("mfra present");
+    assert_eq!(mfra_end, bytes.len() as u64, "mfra is the last box");
+    // §8.8.11: the final 4 bytes of the file are mfro's size word =
+    // the whole mfra box length.
+    let mfro_size = u32::from_be_bytes(bytes[bytes.len() - 4..].try_into().unwrap()) as u64;
+    assert_eq!(mfro_size, mfra_end - mfra_start);
+
+    let d = open(bytes);
+    assert_eq!(d.tfra_indexes.len(), 2, "one tfra per track");
+    let video_tfra = d
+        .tfra_indexes
+        .iter()
+        .find(|t| t.track_id == 1)
+        .expect("video tfra");
+    // Keyframes at samples 0 and 2 (pts 0 and 200), one per fragment.
+    assert_eq!(video_tfra.entries.len(), 2);
+    assert_eq!(video_tfra.entries[0].time, 0);
+    assert_eq!(video_tfra.entries[0].moof_offset, moof_positions[0]);
+    assert_eq!(
+        (
+            video_tfra.entries[0].traf_number,
+            video_tfra.entries[0].trun_number,
+            video_tfra.entries[0].sample_number
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(video_tfra.entries[1].time, 200);
+    assert_eq!(video_tfra.entries[1].moof_offset, moof_positions[1]);
+    let audio_tfra = d
+        .tfra_indexes
+        .iter()
+        .find(|t| t.track_id == 2)
+        .expect("audio tfra");
+    // All-sync audio: first sample of each fragment (samples 0..3 /
+    // sample 3 per the time-window slicing).
+    assert_eq!(audio_tfra.entries.len(), 2);
+    assert_eq!(audio_tfra.entries[0].time, 0);
+    assert_eq!(audio_tfra.entries[1].time, 3 * 1024);
+    assert_eq!(audio_tfra.entries[1].moof_offset, moof_positions[1]);
+
+    // The tfra-driven fragmented seek engages on our own output and
+    // composes with external resolution.
+    let mut d = d;
+    d.set_data_reference_opener(move |_r| {
+        Ok(Box::new(Cursor::new(file.clone())) as Box<dyn ReadSeek>)
+    });
+    use oxideav_core::Demuxer;
+    let landed = d.seek_to(1, 3 * 1024).expect("tfra seek");
+    assert_eq!(landed, 3 * 1024);
+    let data = loop {
+        match d.read_next() {
+            Ok((1, s, data)) => {
+                assert_eq!(s.dts, 3 * 1024);
+                break data;
+            }
+            Ok(_) => continue,
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    };
+    assert_eq!(data, payloads[3]);
+    // Video seek to pts 200 → fragment-2-leading keyframe.
+    let landed = d.seek_to(0, 200).expect("tfra seek video");
+    assert_eq!(landed, 200);
+}
+
+#[test]
+fn fragments_without_sync_samples_contribute_no_tfra_entry() {
+    // Keyframe only at sample 0: fragment 2 (samples 2..4) has no
+    // sync sample, so the video tfra indexes only fragment 1.
+    let mut m = MovMuxer::new()
+        .with_fragmentation(FragmentationMode::ByFrameCount(2))
+        .with_fragment_index();
+    m.add_track(
+        MuxTrackKind::Video {
+            format: *b"raw ",
+            width: 2,
+            height: 2,
+        },
+        600,
+        (0..4)
+            .map(|i| MuxSample {
+                data: vec![0x70 + i as u8; 8],
+                duration: 100,
+                keyframe: i == 0,
+                composition_offset: 0,
+            })
+            .collect(),
+        &[],
+    );
+    let d = open(m.encode_fragmented_to_vec().expect("encode"));
+    assert_eq!(d.tfra_indexes.len(), 1);
+    assert_eq!(d.tfra_indexes[0].entries.len(), 1);
+    assert_eq!(d.tfra_indexes[0].entries[0].time, 0);
+}

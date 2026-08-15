@@ -1407,6 +1407,14 @@ pub struct MovMuxer {
     /// a fragmented layout (`ftyp` + init-`moov` + N × `moof`+`mdat`)
     /// rather than the default non-fragmented `ftyp` + `mdat` + `moov`.
     fragmentation: Option<FragmentationMode>,
+    /// When `true`, the fragmented write path appends a trailing
+    /// `mfra` (Movie Fragment Random Access Box, ISO/IEC 14496-12
+    /// §8.8.9) — one `tfra` per track indexing the first sync sample
+    /// of each of its fragments, closed by the `mfro` size trailer
+    /// (§8.8.11). Defaults to `false` (the box is optional and the
+    /// historical output shape carries none). Set via
+    /// [`MovMuxer::with_fragment_index`].
+    write_fragment_index: bool,
     /// Chunking rule for the non-fragmented `mdat` (see
     /// [`ChunkStrategy`]). Defaults to the historical
     /// one-chunk-per-track layout. No effect on the fragmented path
@@ -1462,6 +1470,7 @@ impl MovMuxer {
             movie_timescale: 600,
             tracks: Vec::new(),
             fragmentation: None,
+            write_fragment_index: false,
             chunk_strategy: ChunkStrategy::default(),
             moov_placement: MoovPlacement::default(),
             compress_movie_resource: false,
@@ -1501,6 +1510,43 @@ impl MovMuxer {
     /// Return the configured fragmentation policy (if any).
     pub fn fragmentation_mode(&self) -> Option<FragmentationMode> {
         self.fragmentation
+    }
+
+    /// Opt-in the trailing **Movie Fragment Random Access Box**
+    /// (`mfra`, ISO/IEC 14496-12 §8.8.9) on the fragmented write
+    /// path.
+    ///
+    /// When enabled, [`MovMuxer::encode_fragmented_to_vec`] appends
+    /// one `tfra` (Track Fragment Random Access Box, §8.8.10) per
+    /// track after the last media segment, indexing the **first sync
+    /// sample** of each of that track's fragments: `time` is the
+    /// sample's presentation time (`dts + composition_offset`) in
+    /// `mdhd.time_scale` ticks, `moof_offset` the byte position of
+    /// the "first byte of the enclosing Movie Fragment Box", and the
+    /// 1-based `(traf_number, trun_number, sample_number)` triple
+    /// locates the sample inside that `moof` (fragments without any
+    /// sync sample for a track contribute no entry). Each `tfra`
+    /// auto-promotes to version 1 when a time or offset leaves the
+    /// 32-bit range. The `mfra` is closed by the mandatory `mfro`
+    /// size trailer (§8.8.11) so readers can locate the box from the
+    /// end of the file. The demuxer's `tfra`-driven fragmented seek
+    /// (`mfra`-preferring binary search) then engages on our own
+    /// output; without this flag the (optional) box is omitted and
+    /// the historical output shape is preserved byte-for-byte.
+    ///
+    /// External-data tracks index exactly the same way — a `tfra`
+    /// locates samples *structurally* (moof/traf/trun/sample), not by
+    /// data offset, so it is independent of where the sample bytes
+    /// live.
+    pub fn with_fragment_index(mut self) -> Self {
+        self.write_fragment_index = true;
+        self
+    }
+
+    /// Return whether the fragmented write path appends an `mfra`
+    /// random-access index (see [`MovMuxer::with_fragment_index`]).
+    pub fn writes_fragment_index(&self) -> bool {
+        self.write_fragment_index
     }
 
     /// Select the non-fragmented `mdat` chunking rule (QTFF
@@ -3603,6 +3649,15 @@ impl MovMuxer {
         // ── Pass 2: per-fragment moof + mdat with two sub-passes
         //    each so the trun.data_offset can be computed before the
         //    moof is emitted.
+        //
+        // Random-access bookkeeping for the optional trailing `mfra`
+        // (§8.8.9, `with_fragment_index`): a running per-track DTS
+        // cursor plus the collected per-track `tfra` entries. Kept
+        // even when the index is disabled — the cursor cost is
+        // negligible and the code stays on one path.
+        let mut track_dts: Vec<u64> = vec![0; self.tracks.len()];
+        let mut tfra_rows: Vec<Vec<crate::fragment::TfraEntry>> =
+            vec![Vec::new(); self.tracks.len()];
         let mut sequence_number: u32 = 1;
         for fragment in &fragments {
             // Skip empty fragments (can happen for trailing audio
@@ -3672,6 +3727,50 @@ impl MovMuxer {
                 moof_size,
                 "moof sizing pass mismatch"
             );
+            // §8.8.10 random-access bookkeeping: index the first sync
+            // sample of each track's run in this fragment (structural
+            // moof/traf/trun/sample coordinates — independent of
+            // whether the sample bytes live in this file or an
+            // external one). The per-track DTS cursor advances for
+            // every run, entry or not.
+            let moof_start = out.len() as u64;
+            for (traf_idx, (run, plan)) in fragment.iter().zip(&traf_plans).enumerate() {
+                let mut dts = track_dts[run.track_idx];
+                let mut entry: Option<crate::fragment::TfraEntry> = None;
+                for (i, s) in run.samples.iter().enumerate() {
+                    if s.keyframe && entry.is_none() {
+                        // tfra `time` is the sample's presentation
+                        // time (§8.8.10.3); the head-of-stream
+                        // negative-pts corner (a v1 composition
+                        // offset below -dts) clamps to 0.
+                        let time = (dts as i64)
+                            .saturating_add(s.composition_offset as i64)
+                            .max(0) as u64;
+                        let (trun_number, sample_number) = match plan {
+                            TrafPlan::Local { .. } => (1u32, (i as u32) + 1),
+                            TrafPlan::External { runs, .. } => {
+                                let ri = runs
+                                    .iter()
+                                    .position(|r| i >= r.first && i < r.first + r.count)
+                                    .unwrap_or(0);
+                                (ri as u32 + 1, (i - runs[ri].first) as u32 + 1)
+                            }
+                        };
+                        entry = Some(crate::fragment::TfraEntry {
+                            time,
+                            moof_offset: moof_start,
+                            traf_number: (traf_idx as u32) + 1,
+                            trun_number,
+                            sample_number,
+                        });
+                    }
+                    dts = dts.saturating_add(s.duration as u64);
+                }
+                track_dts[run.track_idx] = dts;
+                if let Some(e) = entry {
+                    tfra_rows[run.track_idx].push(e);
+                }
+            }
             push_atom(&mut out, *b"moof", &moof);
             // Emit the mdat: all tracks' samples concatenated in track
             // order, then all tracks' aux slabs in track order (matching
@@ -3691,6 +3790,28 @@ impl MovMuxer {
             }
             push_atom(&mut out, *b"mdat", &mdat_payload);
             sequence_number = sequence_number.saturating_add(1);
+        }
+        // ── Optional trailing Movie Fragment Random Access Box
+        //    (§8.8.9): one `tfra` per track that collected entries,
+        //    closed by the mandatory `mfro` size trailer (§8.8.11) so
+        //    readers can locate the `mfra` from the end of the file.
+        if self.write_fragment_index {
+            let mut mfra = Vec::new();
+            for (ti, rows) in tfra_rows.iter().enumerate() {
+                if rows.is_empty() {
+                    continue;
+                }
+                push_atom(&mut mfra, *b"tfra", &build_tfra((ti as u32) + 1, rows));
+            }
+            // §8.8.11.3: `size` is "the number of bytes of the
+            // enclosing 'mfra' box" — mfra header (8) + tfra children
+            // + the 16-byte mfro itself.
+            let total = 8u64 + (mfra.len() as u64) + 16;
+            let mut mfro = Vec::with_capacity(8);
+            mfro.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+            mfro.extend_from_slice(&(total as u32).to_be_bytes());
+            push_atom(&mut mfra, *b"mfro", &mfro);
+            push_atom(&mut out, *b"mfra", &mfra);
         }
         Ok(out)
     }
@@ -6212,6 +6333,46 @@ fn build_moof(
         push_atom(&mut moof, *b"traf", &build_traf(run, plan, saio_offset));
     }
     moof
+}
+
+/// Build a `tfra` (Track Fragment Random Access Box) payload per
+/// ISO/IEC 14496-12 §8.8.10.2/.3.
+///
+/// Version 0 (32-bit `time` / `moof_offset`) auto-promotes to
+/// version 1 (64-bit) when any entry's value leaves the 32-bit
+/// range. The three trailing structural coordinates are written
+/// 4 bytes wide each (`length_size_of_*` code 3 = "size − 1"), so
+/// arbitrarily large traf/trun/sample numbers round-trip; entries
+/// are appended in fragment order, which is "increasing order of
+/// time" per §8.8.10.3 (per-track DTS climbs monotonically across
+/// fragments).
+fn build_tfra(track_id: u32, entries: &[crate::fragment::TfraEntry]) -> Vec<u8> {
+    let v1 = entries
+        .iter()
+        .any(|e| e.time > u32::MAX as u64 || e.moof_offset > u32::MAX as u64);
+    let version: u32 = if v1 { 1 } else { 0 };
+    let per_entry = if v1 { 16 } else { 8 } + 12;
+    let mut p = Vec::with_capacity(16 + entries.len() * per_entry);
+    p.extend_from_slice(&(version << 24).to_be_bytes()); // ver + flags
+    p.extend_from_slice(&track_id.to_be_bytes());
+    // reserved(26) + length_size_of_traf_num(2) +
+    // length_size_of_trun_num(2) + length_size_of_sample_num(2):
+    // all three "4 bytes" (code 3).
+    p.extend_from_slice(&0x0000_003Fu32.to_be_bytes());
+    p.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    for e in entries {
+        if v1 {
+            p.extend_from_slice(&e.time.to_be_bytes());
+            p.extend_from_slice(&e.moof_offset.to_be_bytes());
+        } else {
+            p.extend_from_slice(&(e.time as u32).to_be_bytes());
+            p.extend_from_slice(&(e.moof_offset as u32).to_be_bytes());
+        }
+        p.extend_from_slice(&e.traf_number.to_be_bytes());
+        p.extend_from_slice(&e.trun_number.to_be_bytes());
+        p.extend_from_slice(&e.sample_number.to_be_bytes());
+    }
+    p
 }
 
 fn build_mfhd(sequence_number: u32) -> Vec<u8> {

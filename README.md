@@ -279,6 +279,15 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
 - `with_fragmentation(ByDuration | ByFrameCount)` +
   `encode_fragmented_to_vec()` emit a fragmented MP4 / fMP4 / DASH
   segment stream (init segment + one media segment per fragment).
+  Opt-in `with_fragment_index()` appends the trailing `mfra` Movie
+  Fragment Random Access Box (§8.8.9): one `tfra` per track indexing
+  the first sync sample of each of its fragments (presentation time +
+  moof offset + 1-based traf/trun/sample coordinates, per-box v0→v1
+  auto-promotion past 32 bits, 4-byte-wide structural fields), closed
+  by the `mfro` size trailer (§8.8.11) — so the demuxer's tfra-driven
+  fragmented seek engages on our own output, external-data tracks
+  included (a `tfra` locates samples structurally, independent of
+  where their bytes live).
 - `set_sample_aux(track_id, SampleAuxStream)` writes `saiz` / `saio`
   on both the non-fragmented (`stbl`-scope, absolute offset) and
   fragmented (`traf`-scope, moof-relative offset) paths — e.g. for
