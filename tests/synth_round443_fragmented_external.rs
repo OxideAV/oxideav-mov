@@ -658,3 +658,150 @@ fn inheriting_traf_with_matching_external_dref_chains_in_external_file() {
     assert_eq!(t1, vec![s[0].clone(), s[1].clone(), s[2].clone()]);
     assert_eq!(t2, vec![s[3].clone()]);
 }
+
+// ───────── fragmented trun composition-time offsets (§8.8.8) ─────────
+
+fn bframe_video_samples(offsets: &[i32]) -> Vec<MuxSample> {
+    offsets
+        .iter()
+        .enumerate()
+        .map(|(i, &cts)| MuxSample {
+            data: vec![0x40 + i as u8; 10],
+            duration: 100,
+            keyframe: i == 0,
+            composition_offset: cts,
+        })
+        .collect()
+}
+
+fn fragmented_video(offsets: &[i32]) -> Vec<u8> {
+    let mut m = MovMuxer::new().with_fragmentation(FragmentationMode::ByFrameCount(2));
+    m.add_track(
+        MuxTrackKind::Video {
+            format: *b"raw ",
+            width: 2,
+            height: 2,
+        },
+        600,
+        bframe_video_samples(offsets),
+        &[],
+    );
+    m.encode_fragmented_to_vec().expect("fragmented encode")
+}
+
+#[test]
+fn fragmented_trun_composition_offsets_round_trip_v0() {
+    // All-non-negative reorder offsets (classic ctts v0 shape).
+    let offsets = [100i32, 200, 0, 100];
+    let bytes = fragmented_video(&offsets);
+    let moofs = walk_moofs(&bytes);
+    assert_eq!(moofs.len(), 2);
+    let mut decoded = Vec::new();
+    for trafs in &moofs {
+        let trun = &trafs[0].truns[0];
+        assert_eq!(trun.version, 0, "all-non-negative offsets stay v0");
+        assert_ne!(
+            trun.tr_flags & 0x000800,
+            0,
+            "sample-composition-time-offsets-present"
+        );
+        for s in &trun.samples {
+            decoded.push(s.sample_cts_offset.expect("cts present"));
+        }
+    }
+    assert_eq!(decoded, offsets);
+    // The demuxer's fragment resolution carries the offsets onto the
+    // sample entries: pts = dts + cts.
+    let mut d = open(bytes);
+    let mut seen = Vec::new();
+    loop {
+        match d.read_next() {
+            Ok((0, s, _data)) => seen.push((s.dts, s.composition_offset)),
+            Ok(_) => {}
+            Err(Error::Eof) => break,
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![(0, 100), (100, 200), (200, 0), (300, 100)],
+        "dts climbs, cts preserved"
+    );
+}
+
+#[test]
+fn fragmented_trun_composition_offsets_promote_to_v1_when_negative() {
+    // A negative offset (composition-to-decode shift already applied)
+    // auto-promotes the trun to version 1, mirroring the ctts policy.
+    let offsets = [0i32, 100, -50, 0];
+    let bytes = fragmented_video(&offsets);
+    let moofs = walk_moofs(&bytes);
+    // Fragment 2 carries the negative offset; fragment 1 is v0.
+    assert_eq!(moofs[0][0].truns[0].version, 0);
+    assert_eq!(moofs[1][0].truns[0].version, 1);
+    let mut decoded = Vec::new();
+    for trafs in &moofs {
+        for s in &trafs[0].truns[0].samples {
+            decoded.push(s.sample_cts_offset.expect("cts present"));
+        }
+    }
+    assert_eq!(decoded, offsets);
+}
+
+#[test]
+fn fragmented_trun_omits_cts_field_when_all_zero() {
+    // Wire stability: no reorder ⇒ the historical 12-byte-row trun,
+    // no sample-composition-time-offsets-present bit.
+    let bytes = fragmented_video(&[0, 0, 0, 0]);
+    for trafs in &walk_moofs(&bytes) {
+        let trun = &trafs[0].truns[0];
+        assert_eq!(trun.tr_flags & 0x000800, 0);
+        assert!(trun.samples.iter().all(|s| s.sample_cts_offset.is_none()));
+    }
+}
+
+#[test]
+fn fragmented_external_track_keeps_composition_offsets() {
+    // The composition-offset axis rides the MuxSample even when the
+    // byte axis lives in the external file (r440 contract), so an
+    // external fragmented track reorders identically.
+    let (file, locations, payloads) = sidecar();
+    let cts = [0i32, 512, -256, 0];
+    let mut m = MovMuxer::new().with_fragmentation(FragmentationMode::ByFrameCount(2));
+    let a = m.add_track(
+        MuxTrackKind::Audio {
+            format: *b"twos",
+            channels: 1,
+            bits_per_sample: 16,
+            sample_rate: 8000,
+        },
+        8000,
+        cts.iter()
+            .map(|&c| MuxSample {
+                data: Vec::new(),
+                duration: 1024,
+                keyframe: true,
+                composition_offset: c,
+            })
+            .collect(),
+        &[],
+    );
+    m.set_data_references(a, &[DataReferenceWrite::Url("media.bin".into())])
+        .expect("table");
+    m.set_external_media(a, 1, &locations).expect("external");
+    let mut d = open(m.encode_fragmented_to_vec().expect("encode"));
+    d.set_data_reference_opener(move |_r| {
+        Ok(Box::new(Cursor::new(file.clone())) as Box<dyn ReadSeek>)
+    });
+    let mut seen = Vec::new();
+    loop {
+        match d.read_next() {
+            Ok((0, s, data)) => seen.push((s.composition_offset, data)),
+            Ok(_) => unreachable!(),
+            Err(Error::Eof) => break,
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+    let expect: Vec<(i32, Vec<u8>)> = cts.iter().copied().zip(payloads).collect();
+    assert_eq!(seen, expect);
+}

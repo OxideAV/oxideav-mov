@@ -249,7 +249,12 @@ case-correct QTFF sample-description FourCCs. Per-sample composition offsets (`M
 PTS − DTS) emit a `ctts` Composition Time to Sample Box (§8.6.1.3):
 omitted when every offset is zero, version 0 for an all-non-negative
 track, auto-promoted to version 1 (signed `int(32)`) the moment any
-offset is negative — so B-frame reorder round-trips PTS exactly.
+offset is negative — so B-frame reorder round-trips PTS exactly. The
+fragmented path applies the same policy per `trun` (§8.8.8.2
+`sample_composition_time_offset`, per-run version/flag selection with
+the all-zero run keeping the historical 12-byte-row wire shape), so
+fragmented B-frame reorder — including on external-data tracks —
+round-trips PTS too.
 `auto_cslg(track_id)` / `set_cslg(track_id, Cslg)` add the matching
 Composition to Decode Box (`cslg`, §8.6.1.4) right after the `ctts`:
 `auto_cslg` derives the five bounds (`compositionToDTSShift`, least /

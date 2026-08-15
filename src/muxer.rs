@@ -6040,67 +6040,88 @@ fn build_tfhd_external(track_id: u32, base_data_offset: u64) -> Vec<u8> {
 }
 
 /// Build a `trun` carrying explicit per-sample size + duration +
-/// flags for every sample in the run. ISO/IEC 14496-12 §8.8.8.2.
+/// flags for every sample in the run — plus per-sample
+/// composition-time offsets when any sample in the run reorders
+/// (round 443). ISO/IEC 14496-12 §8.8.8.2.
 ///
-/// Layout produced (each per-sample row = 12 bytes):
+/// Layout produced (each per-sample row = 12 or 16 bytes):
 ///   `[ver+flags:4][sample_count:4][data_offset:4]`
-///   N × `[duration:4][size:4][flags:4]`
+///   N × `[duration:4][size:4][flags:4]([cts_offset:4])?`
 ///
 /// `data_offset` is the trun-payload signed `i32`; the caller supplies
 /// the precomputed value (it depends on the moof's total byte size,
 /// which is fixed at this point).
 fn build_trun(samples: &[MuxSample], data_offset: i32) -> Vec<u8> {
-    build_trun_rows(
-        data_offset,
-        samples
-            .iter()
-            .map(|s| (s.duration, s.data.len() as u32, s.keyframe)),
-        samples.len(),
-    )
+    let rows: Vec<TrunRow> = samples
+        .iter()
+        .map(|s| {
+            (
+                s.duration,
+                s.data.len() as u32,
+                s.keyframe,
+                s.composition_offset,
+            )
+        })
+        .collect();
+    build_trun_rows(data_offset, &rows)
 }
 
 /// External-track variant of [`build_trun`]: per-sample byte sizes
 /// come from the caller-supplied [`ExternalSampleLocation`]s (the
 /// samples themselves carry empty `data` — their bytes live in the
-/// external file), timing / keyframe axes still come from the
-/// [`MuxSample`]s. `samples` and `locs` are parallel slices covering
-/// exactly one byte-contiguous run.
+/// external file), timing / keyframe / composition-offset axes still
+/// come from the [`MuxSample`]s. `samples` and `locs` are parallel
+/// slices covering exactly one byte-contiguous run.
 fn build_trun_external(
     samples: &[MuxSample],
     locs: &[ExternalSampleLocation],
     data_offset: i32,
 ) -> Vec<u8> {
     debug_assert_eq!(samples.len(), locs.len());
-    build_trun_rows(
-        data_offset,
-        samples
-            .iter()
-            .zip(locs)
-            .map(|(s, l)| (s.duration, l.size, s.keyframe)),
-        samples.len(),
-    )
+    let rows: Vec<TrunRow> = samples
+        .iter()
+        .zip(locs)
+        .map(|(s, l)| (s.duration, l.size, s.keyframe, s.composition_offset))
+        .collect();
+    build_trun_rows(data_offset, &rows)
 }
 
-/// Shared `trun` serialiser: `rows` yields `(duration, size,
-/// keyframe)` per sample.
-fn build_trun_rows(
-    data_offset: i32,
-    rows: impl Iterator<Item = (u32, u32, bool)>,
-    sample_count: usize,
-) -> Vec<u8> {
+/// One serialised `trun` row: `(duration, size, keyframe,
+/// composition_offset)`.
+type TrunRow = (u32, u32, bool, i32);
+
+/// Shared `trun` serialiser.
+///
+/// Composition-time offsets follow the `ctts` policy of the
+/// non-fragmented path (§8.8.8.1: "The recommendations given in the
+/// composition time-to-sample box concerning the use of signed
+/// composition offsets also apply here"): when every offset in the
+/// run is zero the field is omitted entirely (the historical wire
+/// shape is preserved byte-for-byte), an all-non-negative run emits
+/// version 0 (unsigned), and the moment any offset is negative the
+/// box auto-promotes to version 1 (signed `int(32)`) — so B-frame
+/// reorder round-trips PTS exactly on the fragmented path too.
+fn build_trun_rows(data_offset: i32, rows: &[TrunRow]) -> Vec<u8> {
     use crate::fragment::{
-        TRUN_DATA_OFFSET_PRESENT, TRUN_SAMPLE_DURATION_PRESENT, TRUN_SAMPLE_FLAGS_PRESENT,
-        TRUN_SAMPLE_SIZE_PRESENT,
+        TRUN_DATA_OFFSET_PRESENT, TRUN_SAMPLE_CTS_OFFSET_PRESENT, TRUN_SAMPLE_DURATION_PRESENT,
+        TRUN_SAMPLE_FLAGS_PRESENT, TRUN_SAMPLE_SIZE_PRESENT,
     };
-    let flags = TRUN_DATA_OFFSET_PRESENT
+    let mut flags = TRUN_DATA_OFFSET_PRESENT
         | TRUN_SAMPLE_DURATION_PRESENT
         | TRUN_SAMPLE_SIZE_PRESENT
         | TRUN_SAMPLE_FLAGS_PRESENT;
-    let mut p = Vec::with_capacity(12 + sample_count * 12);
-    p.extend_from_slice(&flags.to_be_bytes()); // ver=0 + flags
-    p.extend_from_slice(&(sample_count as u32).to_be_bytes()); // sample_count
+    let any_cts = rows.iter().any(|&(_, _, _, cts)| cts != 0);
+    let any_negative = rows.iter().any(|&(_, _, _, cts)| cts < 0);
+    let version: u8 = if any_negative { 1 } else { 0 };
+    if any_cts {
+        flags |= TRUN_SAMPLE_CTS_OFFSET_PRESENT;
+    }
+    let row_len = if any_cts { 16 } else { 12 };
+    let mut p = Vec::with_capacity(12 + rows.len() * row_len);
+    p.extend_from_slice(&(((version as u32) << 24) | flags).to_be_bytes()); // ver + flags
+    p.extend_from_slice(&(rows.len() as u32).to_be_bytes()); // sample_count
     p.extend_from_slice(&data_offset.to_be_bytes()); // data_offset (signed)
-    for (duration, size, keyframe) in rows {
+    for &(duration, size, keyframe, cts) in rows {
         p.extend_from_slice(&duration.to_be_bytes());
         p.extend_from_slice(&size.to_be_bytes());
         // sample_flags: 0 (sync) for keyframes, 0x0001_0000 (non-sync)
@@ -6108,6 +6129,12 @@ fn build_trun_rows(
         // sample` bit at 0x0001_0000.
         let f: u32 = if keyframe { 0 } else { 0x0001_0000 };
         p.extend_from_slice(&f.to_be_bytes());
+        if any_cts {
+            // v0: unsigned encoding of a non-negative offset; v1: the
+            // signed value's two's-complement — both are the same BE
+            // byte image of the i32.
+            p.extend_from_slice(&cts.to_be_bytes());
+        }
     }
     p
 }
