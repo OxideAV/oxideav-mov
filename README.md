@@ -291,7 +291,11 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   emits a `tfdt` (§8.8.12) in every `traf` — the absolute
   `baseMediaDecodeTime` of its first sample, v0→v1 auto-promotion —
   so a media segment stays correctly timed when decoded without its
-  predecessors (the streaming mid-stream-join shape).
+  predecessors (the streaming mid-stream-join shape). Opt-in
+  `with_fragment_total_duration()` opens the init `mvex` with a
+  `mehd` (§8.8.2) declaring the longest track's total duration in
+  movie ticks (computable exactly — every sample is supplied up
+  front).
 - `set_sample_aux(track_id, SampleAuxStream)` writes `saiz` / `saio`
   on both the non-fragmented (`stbl`-scope, absolute offset) and
   fragmented (`traf`-scope, moof-relative offset) paths — e.g. for

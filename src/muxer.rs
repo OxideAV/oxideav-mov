@@ -1423,6 +1423,15 @@ pub struct MovMuxer {
     /// historical output shape preserved). Set via
     /// [`MovMuxer::with_fragment_decode_times`].
     write_decode_times: bool,
+    /// When `true`, the fragmented init `moov`'s `mvex` opens with a
+    /// `mehd` (Movie Extends Header Box, ISO/IEC 14496-12 §8.8.2)
+    /// declaring the total fragmented-movie duration — "the duration
+    /// of the longest track" in `mvhd.time_scale` ticks — which is
+    /// known here because every sample is supplied up front.
+    /// Defaults to `false` (optional box; omitting it is the live /
+    /// unknown-duration shape and preserves the historical output).
+    /// Set via [`MovMuxer::with_fragment_total_duration`].
+    write_total_duration: bool,
     /// Chunking rule for the non-fragmented `mdat` (see
     /// [`ChunkStrategy`]). Defaults to the historical
     /// one-chunk-per-track layout. No effect on the fragmented path
@@ -1480,6 +1489,7 @@ impl MovMuxer {
             fragmentation: None,
             write_fragment_index: false,
             write_decode_times: false,
+            write_total_duration: false,
             chunk_strategy: ChunkStrategy::default(),
             moov_placement: MoovPlacement::default(),
             compress_movie_resource: false,
@@ -1584,6 +1594,32 @@ impl MovMuxer {
     /// `tfdt` boxes (see [`MovMuxer::with_fragment_decode_times`]).
     pub fn writes_fragment_decode_times(&self) -> bool {
         self.write_decode_times
+    }
+
+    /// Opt-in the `mehd` **Movie Extends Header Box** (ISO/IEC
+    /// 14496-12 §8.8.2) in the fragmented init segment's `mvex`.
+    ///
+    /// The box declares the total duration of the fragmented movie —
+    /// per §8.8.2.3 "the duration of the longest track, in the
+    /// timescale indicated in the Movie Header Box" — which this
+    /// muxer can compute exactly since every sample is supplied
+    /// before encoding (each track's media-timescale duration sum is
+    /// rescaled round-half-up into `mvhd.time_scale`, and the
+    /// maximum wins). Auto-promotes v0→v1 past 32 bits; written as
+    /// `mvex`'s first child, before the `trex` records. Omitting the
+    /// box (the default) is the live / unknown-duration shape and
+    /// keeps the historical output byte-for-byte; the read side
+    /// surfaces it on `MovDemuxer::mehd`.
+    pub fn with_fragment_total_duration(mut self) -> Self {
+        self.write_total_duration = true;
+        self
+    }
+
+    /// Return whether the fragmented init segment declares the total
+    /// movie duration via `mehd` (see
+    /// [`MovMuxer::with_fragment_total_duration`]).
+    pub fn writes_fragment_total_duration(&self) -> bool {
+        self.write_total_duration
     }
 
     /// Select the non-fragmented `mdat` chunking rule (QTFF
@@ -5957,14 +5993,55 @@ fn build_init_moov(m: &MovMuxer) -> Vec<u8> {
         let trak = build_init_trak(t, (idx as u32) + 1, m.movie_timescale);
         push_atom(&mut moov, *b"trak", &trak);
     }
-    // mvex with one trex per track.
+    // mvex: optional mehd first (§8.8.1 order), then one trex per
+    // track.
     let mut mvex = Vec::new();
+    if m.write_total_duration {
+        push_atom(
+            &mut mvex,
+            *b"mehd",
+            &build_mehd(fragmented_movie_duration(m)),
+        );
+    }
     for (idx, t) in m.tracks.iter().enumerate() {
         let trex = build_trex(t, (idx as u32) + 1);
         push_atom(&mut mvex, *b"trex", &trex);
     }
     push_atom(&mut moov, *b"mvex", &mvex);
     moov
+}
+
+/// Total fragmented-movie duration per ISO/IEC 14496-12 §8.8.2.3:
+/// "the duration of the longest track, in the timescale indicated in
+/// the Movie Header Box". Each track's media-timescale duration sum
+/// is rescaled round-half-up into `mvhd.time_scale`; the maximum
+/// across tracks wins.
+fn fragmented_movie_duration(m: &MovMuxer) -> u64 {
+    let movie_ts = m.movie_timescale.max(1) as u128;
+    m.tracks
+        .iter()
+        .map(|t| {
+            let media_ts = t.media_timescale.max(1) as u128;
+            let media_dur: u128 = t.samples.iter().map(|s| s.duration as u128).sum();
+            ((media_dur * movie_ts + media_ts / 2) / media_ts) as u64
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// Build a `mehd` (Movie Extends Header Box) payload per §8.8.2.2:
+/// version 0 (32-bit `fragment_duration`) auto-promoting to
+/// version 1 (64-bit) when the duration leaves the 32-bit range.
+fn build_mehd(fragment_duration: u64) -> Vec<u8> {
+    let mut p = Vec::with_capacity(12);
+    if fragment_duration > u32::MAX as u64 {
+        p.extend_from_slice(&(1u32 << 24).to_be_bytes()); // v1
+        p.extend_from_slice(&fragment_duration.to_be_bytes());
+    } else {
+        p.extend_from_slice(&0u32.to_be_bytes()); // v0
+        p.extend_from_slice(&(fragment_duration as u32).to_be_bytes());
+    }
+    p
 }
 
 /// `mvhd` for the init segment. Same body as the non-fragmented

@@ -1098,3 +1098,47 @@ fn tfdt_keeps_a_mid_stream_segment_correctly_timed() {
     }
     assert_eq!(dts, vec![0, 100]);
 }
+
+// ───────── mehd write path (§8.8.2) ─────────
+
+#[test]
+fn fragment_total_duration_is_opt_in_and_round_trips() {
+    let (_file, locations, _payloads) = sidecar();
+    // Default off.
+    let d = open(fragmented_mixed(&locations, 2));
+    assert!(d.mehd.is_none());
+    // Opted in: mvex/mehd = the longest track's duration in movie
+    // ticks. Video: 4 × 100 media ticks at ts 600 = 400 movie ticks
+    // (movie_timescale defaults to 600). External audio: 4 × 1024 at
+    // 8000 Hz → 4096 * 600 / 8000 = 307.2 → 307. Longest = video.
+    let mut m = MovMuxer::new()
+        .with_fragmentation(FragmentationMode::ByFrameCount(2))
+        .with_fragment_total_duration();
+    m.add_track(
+        MuxTrackKind::Video {
+            format: *b"raw ",
+            width: 2,
+            height: 2,
+        },
+        600,
+        video_samples(4),
+        &[],
+    );
+    let a = m.add_track(
+        MuxTrackKind::Audio {
+            format: *b"twos",
+            channels: 1,
+            bits_per_sample: 16,
+            sample_rate: 8000,
+        },
+        8000,
+        external_audio_samples(locations.len()),
+        &[],
+    );
+    m.set_data_references(a, &[DataReferenceWrite::Url("media.bin".into())])
+        .expect("table");
+    m.set_external_media(a, 1, &locations).expect("external");
+    let d = open(m.encode_fragmented_to_vec().expect("encode"));
+    let mehd = d.mehd.expect("mehd present");
+    assert_eq!(mehd.fragment_duration, 400);
+}
