@@ -97,9 +97,10 @@ pub use edit::{
 pub use fragment::{
     parse_mehd, parse_mfhd, parse_mfra, parse_mfro, parse_moof, parse_mvex, parse_tfdt, parse_tfhd,
     parse_tfra, parse_traf, parse_trex, parse_trun, resolve_traf_samples, sample_flags_is_sync,
-    Mehd, Mfhd, Mfro, Tfhd, Tfra, TfraEntry, TrafParse, TrafRecord, TrexDefaults, Trun, TrunSample,
-    TFHD_BASE_DATA_OFFSET_PRESENT, TFHD_DEFAULT_BASE_IS_MOOF, TFHD_DEFAULT_SAMPLE_DURATION_PRESENT,
-    TFHD_DEFAULT_SAMPLE_FLAGS_PRESENT, TFHD_DEFAULT_SAMPLE_SIZE_PRESENT, TFHD_DURATION_IS_EMPTY,
+    Mehd, Mfhd, Mfro, Tfhd, Tfra, TfraEntry, TrafAddressing, TrafParse, TrafRecord, TrexDefaults,
+    Trun, TrunSample, TFHD_BASE_DATA_OFFSET_PRESENT, TFHD_DEFAULT_BASE_IS_MOOF,
+    TFHD_DEFAULT_SAMPLE_DURATION_PRESENT, TFHD_DEFAULT_SAMPLE_FLAGS_PRESENT,
+    TFHD_DEFAULT_SAMPLE_SIZE_PRESENT, TFHD_DURATION_IS_EMPTY,
     TFHD_SAMPLE_DESCRIPTION_INDEX_PRESENT, TRUN_DATA_OFFSET_PRESENT,
     TRUN_FIRST_SAMPLE_FLAGS_PRESENT, TRUN_SAMPLE_CTS_OFFSET_PRESENT, TRUN_SAMPLE_DURATION_PRESENT,
     TRUN_SAMPLE_FLAGS_PRESENT, TRUN_SAMPLE_SIZE_PRESENT,

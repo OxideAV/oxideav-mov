@@ -158,6 +158,65 @@ pub struct Tfhd {
     pub default_sample_flags: Option<u32>,
 }
 
+/// How a track fragment anchors its sample-data offsets — the three
+/// `tfhd` shapes of ISO/IEC 14496-12 §8.8.7.1. Derived from
+/// [`Tfhd::tf_flags`] via [`Tfhd::addressing`].
+///
+/// The mode decides *which byte stream* the resolved offsets can
+/// address:
+///
+/// * [`ExplicitBase`](TrafAddressing::ExplicitBase) — the
+///   `base_data_offset` field "is a data offset that is identical to
+///   a chunk offset in the Chunk Offset Box" (§8.8.7.1), and a chunk
+///   offset addresses "its containing media file" (§8.7.5.3) — i.e.
+///   the stream the track's effective data reference designates,
+///   which may be an external file (§8.8.4.1: fragments make it
+///   "possible to build incremental presentations where the media
+///   data is in files other than the file containing the Movie
+///   Box").
+/// * [`MoofRelative`](TrafAddressing::MoofRelative) — the
+///   `default-base-is-moof` flag anchors at "the position of the
+///   first byte of the enclosing Movie Fragment Box", a byte
+///   position of the fragment's own file, used when offsets "need to
+///   be established relative to the movie fragment" (§8.8.7.1) — so
+///   the sample data must live in that same file.
+/// * [`Inherited`](TrafAddressing::Inherited) — neither flag: the
+///   first track fragment anchors at the enclosing `moof`'s first
+///   byte, second and subsequent ones at "the end of the data
+///   defined by the preceding track fragment"; §8.8.7.1 requires
+///   that fragments inheriting their offset this way "all use the
+///   same data-reference (i.e., the data for these tracks must be in
+///   the same file)".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrafAddressing {
+    /// `base-data-offset-present` (`0x000001`): the explicit
+    /// `base_data_offset` field anchors the track runs.
+    ExplicitBase,
+    /// `default-base-is-moof` (`0x020000`, with
+    /// `base-data-offset-present` clear): anchored at the first byte
+    /// of the enclosing `moof`.
+    MoofRelative,
+    /// Neither flag: anchored at the `moof` start (first track
+    /// fragment) or the preceding track fragment's data end.
+    Inherited,
+}
+
+impl Tfhd {
+    /// Classify this `tfhd`'s offset-anchoring mode per §8.8.7.1.
+    /// `default-base-is-moof` is ignored when
+    /// `base-data-offset-present` is set ("if base-data-offset-present
+    /// is 1, this flag is ignored").
+    pub fn addressing(&self) -> TrafAddressing {
+        if self.tf_flags & TFHD_BASE_DATA_OFFSET_PRESENT != 0 {
+            TrafAddressing::ExplicitBase
+        } else if self.tf_flags & TFHD_DEFAULT_BASE_IS_MOOF != 0 {
+            TrafAddressing::MoofRelative
+        } else {
+            TrafAddressing::Inherited
+        }
+    }
+}
+
 /// Per-sample row inside a `trun` (§8.8.8.2). Each field is
 /// optional at the box level; when absent we fall back to the
 /// `tfhd` default, then the `trex` default.

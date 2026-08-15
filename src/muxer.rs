@@ -2310,9 +2310,21 @@ impl MovMuxer {
     ///   ([`MovMuxer::set_sample_aux`]) — an aux slab is laid into
     ///   *this* file's `mdat`, which an external track does not touch.
     ///
-    /// Validated at encode time: the fragmented write path rejects
-    /// external tracks (movie-fragment data addressing is relative to
-    /// the fragment's own file). The read-side counterpart is
+    /// The fragmented write path
+    /// ([`MovMuxer::encode_fragmented_to_vec`], round 443) honours
+    /// external tracks too: per ISO/IEC 14496-12 §8.8.4.1 a
+    /// fragmented presentation may keep its media "in files other
+    /// than the file containing the Movie Box", so an external
+    /// track's `traf` carries an explicit `tfhd` `base_data_offset`
+    /// (§8.8.7.1 — "identical to a chunk offset", an offset into the
+    /// stream the non-self `dref` entry designates) anchored at the
+    /// fragment's lowest location offset, plus one `trun` per
+    /// byte-contiguous location run; no bytes land in the fragment's
+    /// `mdat`. Local tracks in the same movie keep the
+    /// `default-base-is-moof` shape. A fragment whose locations
+    /// spread wider than `i32::MAX` bytes is rejected (the signed
+    /// 32-bit `trun.data_offset`, §8.8.8.2). The read-side
+    /// counterpart is
     /// [`crate::demuxer::MovDemuxer::set_data_reference_opener`];
     /// without an opener the demuxer surfaces such samples as
     /// recoverable `Unsupported` errors.
@@ -3556,14 +3568,6 @@ impl MovMuxer {
                     i + 1
                 )));
             }
-            if t.external_media.is_some() {
-                return Err(Error::invalid(format!(
-                    "MOV muxer: track {} is marked external (set_external_media); the \
-                     fragmented write path addresses sample data relative to each \
-                     fragment's own file and does not support external data references",
-                    i + 1
-                )));
-            }
         }
         self.validate_data_reference_tables()?;
         match mode {
@@ -3613,20 +3617,37 @@ impl MovMuxer {
             // data_offset = 0, measure the resulting moof, then
             // recompute each traf with the correct offset.
             //
-            // Per §8.8.7.1 with default-base-is-moof: each track's
-            // base-data-offset = position of the enclosing moof's
-            // first byte. Each trun.data_offset is then "offset from
-            // the moof start to the run's first sample". With one
-            // run per track per moof, that equals
+            // Per §8.8.7.1 with default-base-is-moof (local tracks):
+            // each track's base-data-offset = position of the
+            // enclosing moof's first byte. Each trun.data_offset is
+            // then "offset from the moof start to the run's first
+            // sample". With one run per local track per moof, that
+            // equals
             //   moof_size + 8 (mdat header) + (cumulative bytes of
             //   preceding tracks' samples in this fragment).
-            let moof_size = measure_moof(sequence_number, fragment);
-            let mut traf_data_offsets: Vec<i32> = Vec::with_capacity(fragment.len());
-            let mut cumulative_in_mdat: u64 = 0;
+            //
+            // External tracks (`set_external_media`) instead carry an
+            // explicit tfhd base-data-offset — §8.8.7.1: "identical
+            // to a chunk offset", an offset into the file the
+            // track's non-self `dref` entry designates (§8.7.5.3) —
+            // plus one trun per byte-contiguous location run. Those
+            // plans never depend on the moof's size, so the sizing
+            // pass and the emit pass agree structurally.
+            let mut traf_plans: Vec<TrafPlan> = Vec::with_capacity(fragment.len());
             for run in fragment {
-                let do_val = (moof_size + 8 + cumulative_in_mdat) as i32;
-                traf_data_offsets.push(do_val);
-                cumulative_in_mdat += run.samples.iter().map(|s| s.data.len() as u64).sum::<u64>();
+                match run.ext_locations {
+                    Some(locs) => traf_plans.push(plan_external_runs(run.track_idx + 1, locs)?),
+                    None => traf_plans.push(TrafPlan::Local { data_offset: 0 }),
+                }
+            }
+            let moof_size = measure_moof(sequence_number, fragment, &traf_plans);
+            let mut cumulative_in_mdat: u64 = 0;
+            for (run, plan) in fragment.iter().zip(traf_plans.iter_mut()) {
+                if let TrafPlan::Local { data_offset } = plan {
+                    *data_offset = (moof_size + 8 + cumulative_in_mdat) as i32;
+                    cumulative_in_mdat +=
+                        run.samples.iter().map(|s| s.data.len() as u64).sum::<u64>();
+                }
             }
             // The auxiliary-information slabs (§8.7.8 / §8.7.9, §8.8.14)
             // sit in the same `mdat` *after* every track's sample data,
@@ -3645,12 +3666,7 @@ impl MovMuxer {
                 }
             }
             // Emit the moof with the real offsets.
-            let moof = build_moof(
-                sequence_number,
-                fragment,
-                &traf_data_offsets,
-                &traf_saio_offsets,
-            );
+            let moof = build_moof(sequence_number, fragment, &traf_plans, &traf_saio_offsets);
             debug_assert_eq!(
                 (moof.len() as u64) + 8,
                 moof_size,
@@ -5522,6 +5538,90 @@ struct FragmentRun<'a> {
     /// [`Self::aux`] is `Some`.
     aux_info_type: Option<[u8; 4]>,
     aux_info_type_parameter: u32,
+    /// External-file byte locations for exactly the samples in
+    /// [`Self::samples`], when the owning track is marked external via
+    /// [`MovMuxer::set_external_media`] (`None` for a local track).
+    /// Such a run contributes no bytes to the fragment's `mdat`; its
+    /// `traf` instead carries an explicit `tfhd` base-data-offset
+    /// (ISO/IEC 14496-12 §8.8.7.1 — "identical to a chunk offset",
+    /// i.e. an offset into the stream the track's non-self `dref`
+    /// entry designates) plus one `trun` per byte-contiguous location
+    /// run.
+    ext_locations: Option<&'a [ExternalSampleLocation]>,
+}
+
+/// The planned `traf` addressing for one [`FragmentRun`] of a
+/// fragment — resolved before the `moof` is emitted so the two-pass
+/// sizing works (ISO/IEC 14496-12 §8.8.7.1).
+enum TrafPlan {
+    /// Local track: `default-base-is-moof` anchoring, one `trun`
+    /// whose `data_offset` is moof-relative (filled in after the
+    /// sizing pass — it depends on the moof's byte length).
+    Local { data_offset: i32 },
+    /// External track ([`MovMuxer::set_external_media`]): explicit
+    /// `base_data_offset` into the external file, one `trun` per
+    /// byte-contiguous location run. Independent of the moof's size,
+    /// so the plan is final before the sizing pass.
+    External { base: u64, runs: Vec<ExtTrunPlan> },
+}
+
+/// One planned external `trun`: samples `[first, first+count)` of the
+/// fragment-local run, whose bytes are contiguous in the external
+/// file starting at `base + data_offset`.
+struct ExtTrunPlan {
+    first: usize,
+    count: usize,
+    data_offset: i32,
+}
+
+/// Plan the `trun` split for an external fragment run: coalesce
+/// byte-contiguous consecutive locations (exactly like the
+/// non-fragmented path coalesces chunks) and anchor the explicit
+/// base-data-offset at the run's smallest byte offset so every
+/// `trun.data_offset` is non-negative. Each `data_offset` must fit
+/// the signed 32-bit field of §8.8.8.2; a fragment whose locations
+/// spread wider than `i32::MAX` bytes is rejected.
+fn plan_external_runs(track_no: usize, locs: &[ExternalSampleLocation]) -> Result<TrafPlan> {
+    if locs.is_empty() {
+        // An empty run still emits one empty `trun` so the traf shape
+        // stays parallel to the local path.
+        return Ok(TrafPlan::External {
+            base: 0,
+            runs: vec![ExtTrunPlan {
+                first: 0,
+                count: 0,
+                data_offset: 0,
+            }],
+        });
+    }
+    let base = locs.iter().map(|l| l.offset).min().unwrap_or(0);
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut first = 0usize;
+    for i in 1..locs.len() {
+        let prev_end = locs[i - 1].offset.saturating_add(locs[i - 1].size as u64);
+        if prev_end != locs[i].offset {
+            spans.push((first, i - first));
+            first = i;
+        }
+    }
+    spans.push((first, locs.len() - first));
+    let mut runs = Vec::with_capacity(spans.len());
+    for (f, c) in spans {
+        let rel = locs[f].offset - base;
+        if rel > i32::MAX as u64 {
+            return Err(Error::invalid(format!(
+                "MOV muxer: track {track_no} external locations spread {rel} bytes within one \
+                 fragment; trun.data_offset is signed 32-bit (ISO/IEC 14496-12 §8.8.8.2), so a \
+                 fragment's locations must lie within i32::MAX bytes of its lowest offset"
+            )));
+        }
+        runs.push(ExtTrunPlan {
+            first: f,
+            count: c,
+            data_offset: rel as i32,
+        });
+    }
+    Ok(TrafPlan::External { base, runs })
 }
 
 /// Slice every track's flat sample list into per-fragment runs per
@@ -5645,6 +5745,7 @@ fn slice_fragments(tracks: &[TrackWrite], mode: FragmentationMode) -> Vec<Vec<Fr
                 aux,
                 aux_info_type,
                 aux_info_type_parameter,
+                ext_locations: t.external_media.as_ref().map(|e| &e.locations[lo..hi]),
             });
         }
         fragments.push(runs);
@@ -5921,6 +6022,23 @@ fn build_tfhd(track_id: u32) -> Vec<u8> {
     p
 }
 
+/// Build the `tfhd` payload of an **external** track's traf: an
+/// explicit `base_data_offset` (ISO/IEC 14496-12 §8.8.7.1 flag
+/// `0x000001`) into the file the track's non-self `dref` entry
+/// designates. `default-base-is-moof` must stay clear — the sample
+/// bytes are not in this file, so a moof-relative anchor would be
+/// meaningless (the flag is ignored when base-data-offset-present is
+/// set anyway, per §8.8.7.1).
+fn build_tfhd_external(track_id: u32, base_data_offset: u64) -> Vec<u8> {
+    use crate::fragment::TFHD_BASE_DATA_OFFSET_PRESENT;
+    let flags = TFHD_BASE_DATA_OFFSET_PRESENT;
+    let mut p = Vec::with_capacity(16);
+    p.extend_from_slice(&flags.to_be_bytes());
+    p.extend_from_slice(&track_id.to_be_bytes());
+    p.extend_from_slice(&base_data_offset.to_be_bytes());
+    p
+}
+
 /// Build a `trun` carrying explicit per-sample size + duration +
 /// flags for every sample in the run. ISO/IEC 14496-12 §8.8.8.2.
 ///
@@ -5932,6 +6050,44 @@ fn build_tfhd(track_id: u32) -> Vec<u8> {
 /// the precomputed value (it depends on the moof's total byte size,
 /// which is fixed at this point).
 fn build_trun(samples: &[MuxSample], data_offset: i32) -> Vec<u8> {
+    build_trun_rows(
+        data_offset,
+        samples
+            .iter()
+            .map(|s| (s.duration, s.data.len() as u32, s.keyframe)),
+        samples.len(),
+    )
+}
+
+/// External-track variant of [`build_trun`]: per-sample byte sizes
+/// come from the caller-supplied [`ExternalSampleLocation`]s (the
+/// samples themselves carry empty `data` — their bytes live in the
+/// external file), timing / keyframe axes still come from the
+/// [`MuxSample`]s. `samples` and `locs` are parallel slices covering
+/// exactly one byte-contiguous run.
+fn build_trun_external(
+    samples: &[MuxSample],
+    locs: &[ExternalSampleLocation],
+    data_offset: i32,
+) -> Vec<u8> {
+    debug_assert_eq!(samples.len(), locs.len());
+    build_trun_rows(
+        data_offset,
+        samples
+            .iter()
+            .zip(locs)
+            .map(|(s, l)| (s.duration, l.size, s.keyframe)),
+        samples.len(),
+    )
+}
+
+/// Shared `trun` serialiser: `rows` yields `(duration, size,
+/// keyframe)` per sample.
+fn build_trun_rows(
+    data_offset: i32,
+    rows: impl Iterator<Item = (u32, u32, bool)>,
+    sample_count: usize,
+) -> Vec<u8> {
     use crate::fragment::{
         TRUN_DATA_OFFSET_PRESENT, TRUN_SAMPLE_DURATION_PRESENT, TRUN_SAMPLE_FLAGS_PRESENT,
         TRUN_SAMPLE_SIZE_PRESENT,
@@ -5940,36 +6096,62 @@ fn build_trun(samples: &[MuxSample], data_offset: i32) -> Vec<u8> {
         | TRUN_SAMPLE_DURATION_PRESENT
         | TRUN_SAMPLE_SIZE_PRESENT
         | TRUN_SAMPLE_FLAGS_PRESENT;
-    let mut p = Vec::with_capacity(12 + samples.len() * 12);
+    let mut p = Vec::with_capacity(12 + sample_count * 12);
     p.extend_from_slice(&flags.to_be_bytes()); // ver=0 + flags
-    p.extend_from_slice(&(samples.len() as u32).to_be_bytes()); // sample_count
+    p.extend_from_slice(&(sample_count as u32).to_be_bytes()); // sample_count
     p.extend_from_slice(&data_offset.to_be_bytes()); // data_offset (signed)
-    for s in samples {
-        p.extend_from_slice(&s.duration.to_be_bytes());
-        p.extend_from_slice(&(s.data.len() as u32).to_be_bytes());
+    for (duration, size, keyframe) in rows {
+        p.extend_from_slice(&duration.to_be_bytes());
+        p.extend_from_slice(&size.to_be_bytes());
         // sample_flags: 0 (sync) for keyframes, 0x0001_0000 (non-sync)
         // otherwise. ISO/IEC 14496-12 §8.8.3.1 — `sample_is_non_sync_
         // sample` bit at 0x0001_0000.
-        let f: u32 = if s.keyframe { 0 } else { 0x0001_0000 };
+        let f: u32 = if keyframe { 0 } else { 0x0001_0000 };
         p.extend_from_slice(&f.to_be_bytes());
     }
     p
 }
 
-/// Build a `traf` payload (per §8.8.6.2): `tfhd` + `trun`, plus the
-/// optional `saiz` + `saio` pair (§8.7.8 / §8.7.9 at `traf` scope,
-/// §8.8.14). `saio_offset` is the moof-relative offset of this traf's
-/// auxiliary-information slab in the fragment's `mdat`; it is consulted
-/// only when the run carries an aux stream.
-fn build_traf(run: &FragmentRun<'_>, data_offset: i32, saio_offset: u64) -> Vec<u8> {
+/// Build a `traf` payload (per §8.8.6.2): `tfhd` + `trun`(s), plus
+/// the optional `saiz` + `saio` pair (§8.7.8 / §8.7.9 at `traf`
+/// scope, §8.8.14). `saio_offset` is the moof-relative offset of this
+/// traf's auxiliary-information slab in the fragment's `mdat`; it is
+/// consulted only when the run carries an aux stream.
+///
+/// The `plan` picks the §8.8.7.1 addressing shape: a local track's
+/// traf uses `default-base-is-moof` + one moof-relative `trun`; an
+/// external track's traf uses an explicit `base_data_offset` into the
+/// external file + one `trun` per byte-contiguous location run.
+fn build_traf(run: &FragmentRun<'_>, plan: &TrafPlan, saio_offset: u64) -> Vec<u8> {
     let track_id = (run.track_idx as u32) + 1;
     let mut traf = Vec::new();
-    push_atom(&mut traf, *b"tfhd", &build_tfhd(track_id));
-    push_atom(&mut traf, *b"trun", &build_trun(run.samples, data_offset));
+    match plan {
+        TrafPlan::Local { data_offset } => {
+            push_atom(&mut traf, *b"tfhd", &build_tfhd(track_id));
+            push_atom(&mut traf, *b"trun", &build_trun(run.samples, *data_offset));
+        }
+        TrafPlan::External { base, runs } => {
+            let locs = run.ext_locations.unwrap_or(&[]);
+            push_atom(&mut traf, *b"tfhd", &build_tfhd_external(track_id, *base));
+            for r in runs {
+                push_atom(
+                    &mut traf,
+                    *b"trun",
+                    &build_trun_external(
+                        &run.samples[r.first..r.first + r.count],
+                        &locs[r.first..r.first + r.count],
+                        r.data_offset,
+                    ),
+                );
+            }
+        }
+    }
     // §8.8.14: when sample-auxiliary information rides in the fragment,
     // the `saio` offsets are relative to the track-fragment base offset;
-    // `build_tfhd` always sets `default-base-is-moof`, so that base is
-    // the enclosing `moof`'s first byte.
+    // local trafs set `default-base-is-moof`, so that base is the
+    // enclosing `moof`'s first byte. (External tracks cannot carry an
+    // aux stream — `set_sample_aux` and `set_external_media` reject
+    // the combination — so `run.aux` is `None` on the external arm.)
     if let Some(blobs) = run.aux {
         push_atom(
             &mut traf,
@@ -5985,26 +6167,22 @@ fn build_traf(run: &FragmentRun<'_>, data_offset: i32, saio_offset: u64) -> Vec<
     traf
 }
 
-/// Build the full `moof` payload for a fragment. The `data_offsets`
-/// and `saio_offsets` slices are parallel to `fragment` and carry,
-/// respectively, the precomputed `trun.data_offset` and the
-/// moof-relative `saio` slab offset for each track's run.
+/// Build the full `moof` payload for a fragment. The `plans` and
+/// `saio_offsets` slices are parallel to `fragment` and carry,
+/// respectively, the resolved [`TrafPlan`] and the moof-relative
+/// `saio` slab offset for each track's run.
 fn build_moof(
     sequence_number: u32,
     fragment: &[FragmentRun<'_>],
-    data_offsets: &[i32],
+    plans: &[TrafPlan],
     saio_offsets: &[u64],
 ) -> Vec<u8> {
-    debug_assert_eq!(fragment.len(), data_offsets.len());
+    debug_assert_eq!(fragment.len(), plans.len());
     debug_assert_eq!(fragment.len(), saio_offsets.len());
     let mut moof = Vec::new();
     push_atom(&mut moof, *b"mfhd", &build_mfhd(sequence_number));
-    for ((run, &data_offset), &saio_offset) in fragment.iter().zip(data_offsets).zip(saio_offsets) {
-        push_atom(
-            &mut moof,
-            *b"traf",
-            &build_traf(run, data_offset, saio_offset),
-        );
+    for ((run, plan), &saio_offset) in fragment.iter().zip(plans).zip(saio_offsets) {
+        push_atom(&mut moof, *b"traf", &build_traf(run, plan, saio_offset));
     }
     moof
 }
@@ -6020,22 +6198,19 @@ fn build_mfhd(sequence_number: u32) -> Vec<u8> {
 /// for the supplied fragment. Used by the two-pass build to compute
 /// each track's `trun.data_offset` (which depends on the moof's
 /// total byte length).
-fn measure_moof(sequence_number: u32, fragment: &[FragmentRun<'_>]) -> u64 {
-    // Sizing pass uses placeholder data/saio offsets of 0. `trun`'s
-    // data_offset is a fixed 4-byte slot, so its value never affects
-    // the size. `saio`'s width is v0 (4-byte) for any offset ≤ u32::MAX;
-    // the real moof-relative slab offsets the muxer produces stay well
-    // under 4 GiB, so both the placeholder and the real value select v0
-    // and the sizing pass matches the emit pass (pinned by the
-    // `debug_assert_eq!` on `moof_size` in `encode_fragmented_to_vec`).
-    let placeholder_data: Vec<i32> = vec![0; fragment.len()];
+fn measure_moof(sequence_number: u32, fragment: &[FragmentRun<'_>], plans: &[TrafPlan]) -> u64 {
+    // Sizing pass runs with the local trafs' data_offset still at its
+    // placeholder 0. `trun`'s data_offset is a fixed 4-byte slot, so
+    // its value never affects the size; external trafs' plans are
+    // final before sizing (their base + per-run offsets come from the
+    // external file, never from the moof's size). `saio`'s width is
+    // v0 (4-byte) for any offset ≤ u32::MAX; the real moof-relative
+    // slab offsets the muxer produces stay well under 4 GiB, so both
+    // the placeholder and the real value select v0 and the sizing
+    // pass matches the emit pass (pinned by the `debug_assert_eq!` on
+    // `moof_size` in `encode_fragmented_to_vec`).
     let placeholder_saio: Vec<u64> = vec![0; fragment.len()];
-    let moof = build_moof(
-        sequence_number,
-        fragment,
-        &placeholder_data,
-        &placeholder_saio,
-    );
+    let moof = build_moof(sequence_number, fragment, plans, &placeholder_saio);
     8 + moof.len() as u64
 }
 
@@ -7522,14 +7697,44 @@ mod tests {
     }
 
     #[test]
-    fn fragmented_encode_rejects_external_tracks() {
+    fn fragmented_encode_accepts_external_tracks_with_explicit_base() {
+        // Round 443: ISO/IEC 14496-12 §8.8.4.1 sanctions fragmented
+        // presentations whose media lives in another file; the traf
+        // must then carry an explicit tfhd base_data_offset
+        // (§8.8.7.1) rather than default-base-is-moof.
         let mut m = MovMuxer::new().with_fragmentation(FragmentationMode::ByFrameCount(1));
         let a = add_external_audio(&mut m, 1);
         m.set_data_references(a, &[DataReferenceWrite::Url("media.bin".into())])
             .unwrap();
-        m.set_external_media(a, 1, &[ExternalSampleLocation { offset: 0, size: 4 }])
-            .unwrap();
-        assert!(m.encode_fragmented_to_vec().is_err());
+        m.set_external_media(
+            a,
+            1,
+            &[ExternalSampleLocation {
+                offset: 40,
+                size: 4,
+            }],
+        )
+        .unwrap();
+        let bytes = m.encode_fragmented_to_vec().expect("fragmented external");
+        // The single moof's traf must use the explicit-base shape.
+        use std::io::{Seek, SeekFrom};
+        let mut r = std::io::Cursor::new(bytes);
+        let mut checked = false;
+        while let Some(hdr) = crate::atom::read_atom_header(&mut r).unwrap() {
+            if &hdr.fourcc == b"moof" {
+                let (_, trafs) = crate::fragment::parse_moof(&mut r, &hdr).unwrap();
+                assert_eq!(trafs.len(), 1);
+                assert_eq!(
+                    trafs[0].tfhd.addressing(),
+                    crate::fragment::TrafAddressing::ExplicitBase
+                );
+                assert_eq!(trafs[0].tfhd.base_data_offset, Some(40));
+                checked = true;
+            }
+            let end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
+            r.seek(SeekFrom::Start(end)).unwrap();
+        }
+        assert!(checked, "no moof found");
     }
 
     #[cfg(feature = "registry")]

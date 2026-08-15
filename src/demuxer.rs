@@ -828,6 +828,17 @@ impl MovDemuxer {
                     // defaults to "position of the first byte of the
                     // enclosing Movie Fragment Box" per §8.8.7.1.
                     let mut prev_traf_end = moof_start;
+                    // §8.8.7.1 base-data-offset vs data-reference
+                    // interplay (round 443). The effective data
+                    // reference of the *preceding* track fragment
+                    // (`None` = this file, via the lenient local
+                    // classification of `sample_data_in_file`), so an
+                    // inheriting traf can be validated against the
+                    // stream whose data-end position it inherits.
+                    // Reset per moof: the first traf's inherited
+                    // anchor is the moof's own first byte.
+                    let mut prev_traf_dref: Option<crate::DataReference> = None;
+                    let mut is_first_data_traf = true;
                     for traf in &trafs {
                         // Resolve track-id → track index.
                         let tid = traf.tfhd.track_id;
@@ -843,6 +854,103 @@ impl MovDemuxer {
                             }
                         };
                         let trex = trex_defaults.iter().find(|t| t.track_id == tid);
+                        // ── §8.8.7.1: base-data-offset resolution
+                        // against the data reference (round 443).
+                        //
+                        // The effective sample description of this
+                        // traf (tfhd override → trex default → 1)
+                        // names a `dref` entry; that entry decides
+                        // *which byte stream* the resolved offsets
+                        // address, exactly as a chunk offset does
+                        // ("identical to a chunk offset in the Chunk
+                        // Offset Box", §8.8.7.1; a chunk offset is
+                        // "into its containing media file",
+                        // §8.7.5.3). The three anchoring modes
+                        // compose differently with a non-self entry:
+                        //
+                        // * explicit base-data-offset — legal with
+                        //   any data reference (§8.8.4.1 sanctions
+                        //   fragmented presentations whose media is
+                        //   "in files other than the file containing
+                        //   the Movie Box"); offsets resolve within
+                        //   the designated stream.
+                        // * default-base-is-moof — the anchor is a
+                        //   byte position of the fragment's own file
+                        //   ("the position of the first byte of the
+                        //   enclosing Movie Fragment Box"), used when
+                        //   offsets "need to be established relative
+                        //   to the movie fragment"; a non-self data
+                        //   reference contradicts it, so refuse
+                        //   rather than emit bytes from mismatched
+                        //   offsets.
+                        // * inherited — the first data-carrying traf
+                        //   anchors at the moof's own first byte
+                        //   (must be this file); a later traf anchors
+                        //   at "the end of the data defined by the
+                        //   preceding track fragment", and §8.8.7.1
+                        //   requires inheriting fragments to "all use
+                        //   the same data-reference (i.e., the data
+                        //   for these tracks must be in the same
+                        //   file)" — so its effective data reference
+                        //   must equal the preceding traf's (two
+                        //   trafs naming the same external file chain
+                        //   legally within it).
+                        //
+                        // duration-is-empty trafs define no data and
+                        // are exempt (and don't become "the preceding
+                        // track fragment" for this purpose, matching
+                        // the offset threading below).
+                        let duration_is_empty =
+                            traf.tfhd.tf_flags & crate::fragment::TFHD_DURATION_IS_EMPTY != 0;
+                        if !duration_is_empty {
+                            let eff_sdi = traf
+                                .tfhd
+                                .sample_description_index
+                                .or_else(|| trex.map(|t| t.default_sample_description_index))
+                                .unwrap_or(1);
+                            let eff_dref =
+                                effective_external_dref(&tracks[track_idx], eff_sdi).cloned();
+                            match traf.tfhd.addressing() {
+                                crate::fragment::TrafAddressing::ExplicitBase => {}
+                                crate::fragment::TrafAddressing::MoofRelative => {
+                                    if eff_dref.is_some() {
+                                        return Err(Error::invalid(format!(
+                                            "MOV: moof traf for track {tid} sets \
+                                             default-base-is-moof but its sample description \
+                                             names a non-self dref entry; §8.8.7.1 anchors \
+                                             moof-relative offsets at a byte position of the \
+                                             fragment's own file, so the sample data cannot \
+                                             live in an external file"
+                                        )));
+                                    }
+                                }
+                                crate::fragment::TrafAddressing::Inherited => {
+                                    if is_first_data_traf {
+                                        if eff_dref.is_some() {
+                                            return Err(Error::invalid(format!(
+                                                "MOV: first moof traf (track {tid}) inherits \
+                                                 its base-data-offset (the enclosing moof's \
+                                                 first byte, §8.8.7.1) but its sample \
+                                                 description names a non-self dref entry; \
+                                                 inherited anchoring requires the sample data \
+                                                 in the fragment's own file"
+                                            )));
+                                        }
+                                    } else if eff_dref != prev_traf_dref {
+                                        return Err(Error::invalid(format!(
+                                            "MOV: moof traf for track {tid} inherits its \
+                                             base-data-offset from the preceding track \
+                                             fragment but uses a different data reference; \
+                                             §8.8.7.1 requires inheriting track fragments to \
+                                             all use the same data-reference (the data must \
+                                             be in the same file)"
+                                        )));
+                                    }
+                                }
+                            }
+                            prev_traf_dref = eff_dref;
+                            is_first_data_traf = false;
+                        }
                         // `tfdt` (§8.8.12), when present, is the absolute
                         // baseline; otherwise climb from the running
                         // cursor (round-18 behaviour).
@@ -3290,6 +3398,34 @@ fn read_exact_bounded_from(
         )));
     }
     Ok(buf)
+}
+
+/// Resolve the **external** data reference (a non-self `dref` entry)
+/// behind a track's 1-based sample-description index, or `None` when
+/// the sample data lives in this file.
+///
+/// `None` covers the whole lenient local classification of
+/// [`MovDemuxer::sample_data_in_file`]: a track without a parsed
+/// `dref` table, an out-of-spec sample-description or zero/dangling
+/// `data_reference_index`, and the self-referencing entry (QTFF
+/// p. 65 / ISO/IEC 14496-12 §8.7.2.1 flag `0x000001`). Used by the
+/// `moof` walk to validate the §8.8.7.1 base-data-offset vs
+/// data-reference interplay of each track fragment.
+fn effective_external_dref(
+    track: &crate::track::Track,
+    sample_description_index: u32,
+) -> Option<&crate::DataReference> {
+    if track.data_references.is_empty() {
+        return None;
+    }
+    let sd = track
+        .sample_descriptions
+        .get((sample_description_index as usize).checked_sub(1)?)?;
+    let dri = sd.data_reference_index.checked_sub(1)?;
+    match track.data_references.get(dri as usize) {
+        Some(crate::DataReference::SelfRef) | None => None,
+        Some(r) => Some(r),
+    }
 }
 
 /// Build an "unsupported" error in a way that works under both the

@@ -173,7 +173,19 @@ Decoding stays in codec crates: this crate calls
 - Fragmented MP4 / fMP4 / DASH: `mvex/trex` defaults +
   `moof/traf/tfhd/trun` cascade, `tfdt` baseline DTS, `leva` level
   assignment, and per-fragment sample-aux. `mfra/tfra/mfro`-driven
-  fragmented seek (PTS-keyed binary search, linear fallback).
+  fragmented seek (PTS-keyed binary search, linear fallback). The
+  §8.8.7.1 base-data-offset modes resolve against each traf's
+  **effective data reference** (`Tfhd::addressing()` classifies
+  them): an explicit `base_data_offset` is "identical to a chunk
+  offset" and so addresses the stream the effective `dref` entry
+  designates — including a non-self (external) one, per §8.8.4.1's
+  incremental-presentation allowance — while the moof-relative modes
+  anchor at byte positions of the fragment's own file, so
+  `default-base-is-moof` with a non-self entry is refused, an
+  inheriting traf must use the same data reference as the traf whose
+  data-end it inherits ("the data for these tracks must be in the
+  same file"), and same-external-dref inheritance chains legally
+  within the external file.
 - Compressed movie resources (`cmov` / `dcom` / `cmvd`): zlib-inflated
   transparently on open (bounded by the declared uncompressed size),
   re-entering the same `moov` walk;
@@ -200,8 +212,10 @@ Decoding stays in codec crates: this crate calls
   plain-relative names joined to the caller's base directory (no
   absolute paths, no `..` traversal, no drive/rooted shapes); foreign
   schemes and Macintosh alias records are rejected. Seek, applied edit
-  lists, and every layout compose with resolution; the default `open`
-  still never touches the filesystem or network.
+  lists, fragmented movies (`moof` sample offsets resolved per
+  §8.8.7.1 land in the external file exactly like chunk offsets), and
+  every layout compose with resolution; the default `open` still
+  never touches the filesystem or network.
 
 ## Seek
 
@@ -432,11 +446,18 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   external offsets verbatim, auto-promoting to `co64` past 4 GiB;
   `stsz` / `stz2` sizes come from the locations. Composes with both
   `MoovPlacement`s, interleaving (external tracks are excluded — they
-  have no bytes here to interleave), `cmov`, and edit lists; rejected
-  on the fragmented path and alongside `set_sample_aux`. The read-side
-  counterpart is `set_data_reference_opener`; a self-contained and an
-  external authoring of the same media present identical packet
-  streams once resolved.
+  have no bytes here to interleave), `cmov`, edit lists, **and the
+  fragmented path** (per §8.8.4.1 a fragmented presentation may keep
+  its media in other files): an external track's `traf` carries an
+  explicit `tfhd` `base_data_offset` into the external file
+  (§8.8.7.1 — anchored at the fragment's lowest location offset) plus
+  one `trun` per byte-contiguous location run, local tracks keep
+  `default-base-is-moof`, and a fragment whose locations spread past
+  `i32::MAX` bytes is rejected (signed `trun.data_offset`, §8.8.8.2).
+  Rejected alongside `set_sample_aux`. The read-side counterpart is
+  `set_data_reference_opener`; a self-contained and an external
+  authoring of the same media present identical packet streams once
+  resolved, fragmented or not.
 - `set_track_gmin(track_id, Gmin)` overrides the `gmhd/gmin` Generic
   Media Information header (QTFF p. 65) of a time-code / text track —
   the compositing `graphics_mode` (Table 4-2), the `opcolor` triple the
