@@ -8,7 +8,6 @@
 //! Apple's `wave` audio extension) are captured as raw bytes in
 //! [`SampleDescription::extra`] for downstream codec crates.
 
-use crate::bmff_meta::BmffMeta;
 use crate::clip::Clipping;
 use crate::edit::{
     media_pts_to_movie_pts, movie_pts_to_media_pts, resolve_edit_segments, EditList, EditSegment,
@@ -905,10 +904,6 @@ pub struct Track {
     pub cslg: Option<Cslg>,
     /// Track-level Apple `meta` key-value pairs, when present.
     pub meta: Vec<MetaKeyValue>,
-    /// Track-level ISO BMFF §8.11 `meta` box, when the track's
-    /// `meta` atom is in the ISO/IEC 14496-12 shape rather than the
-    /// Apple key-value shape (mutually exclusive with [`Self::meta`]).
-    pub bmff_meta: Option<BmffMeta>,
     /// Track-level `udta` user-data entries, when present. Same atom
     /// shape as the movie-level `udta` (©nam / ©cpy / `name` / etc.);
     /// see [`crate::user_data::parse_udta`] for the layout.

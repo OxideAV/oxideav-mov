@@ -57,8 +57,7 @@
 //!     open time.
 //!   * Metadata — 3GPP `udta` boxes (`titl`/`auth`/…), iTunes-style
 //!     `meta`/`keys`/`ilst` (whose `item > data` inner shape is
-//!     itself a recursive box tree), `BmffMeta` `iprp`/`iloc`/`iref`
-//!     graph traversal.
+//!     itself a recursive box tree).
 //!   * `seek_to(0, 0)` re-exercises the sample-table walker from a
 //!     random offset, including the `tfra` binary search on
 //!     fragmented inputs.
@@ -199,9 +198,6 @@ fuzz_target!(|data: &[u8]| {
     let _ = dmx.mvhd.is_some();
     let _ = dmx.is_fragmented();
     let _ = dmx.is_faststart();
-    let _ = dmx.is_heic();
-    let _ = dmx.is_avif();
-    let _ = dmx.is_miaf();
     let _ = dmx.first_styp().is_some();
     let _ = dmx.first_prft().is_some();
     let _ = dmx.is_dash_segment();

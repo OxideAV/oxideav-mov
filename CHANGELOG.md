@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- The HEIF / HEIC / MIAF layer: `bmff_meta` (item model — `pitm` /
+  `iinf` / `iloc` / `idat` / `iref` / `ipro`), `iprp` (item properties
+  incl. the typed `clli` / `mdcv` / `cclv` / `amve` / `lsel` records),
+  `derived` (`grid` / `iovl` / `iden` / `tmap` layouts), `render`
+  (RGBA compositors) and `heif_write` (`HeifWriter` / `HeifItem` /
+  `HeifProperty` / `HeifDerivation` / `HeifItemReference`), together
+  with `MovDemuxer::{bmff_meta, file_bmff_meta, primary_image_layout,
+  primary_image_layout_with_input, resolve_item_bytes, base_image_for,
+  is_heic, is_avif, is_miaf}`, `Track::bmff_meta`, `Ftyp::{is_heic,
+  is_avif, is_miaf}` and the `BrandClass::*_family` predicates. That
+  layer lives in `oxideav-heif` (`HeifFile` reads, `HeifWriter` /
+  `SequenceWriter` write, `Meta` / `ItemProperties` / `build_graph`
+  for the item model). A `meta`-only file with no `moov` is refused
+  at open again; an ISO BMFF §8.11 item-based `meta` inside `moov` /
+  `trak` is skipped (only the Apple `keys` / `ilst` shape is
+  QuickTime metadata).
+
+### Added
+
+- Probe / priority pin: the `mov` probe scores 0 for every HEIF-family
+  `ftyp` brand (major or compatible) and `oxideav-core` resolves a full
+  tie to the lower priority number, i.e. to `oxideav-heif`.
+
 ## [0.0.5](https://github.com/OxideAV/oxideav-mov/compare/v0.0.4...v0.0.5) - 2026-08-15
 
 ### Other

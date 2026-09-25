@@ -71,9 +71,9 @@ pub struct Styp {
 
 impl Styp {
     /// Convert this segment-type box into an equivalently-shaped
-    /// [`Ftyp`], so callers can reuse the rich brand-class machinery
-    /// (`is_heic` / `is_avif_family` / `is_miaf_family` / per-brand
-    /// `BrandClass` walks) defined on [`Ftyp`].
+    /// [`Ftyp`], so callers can reuse the brand-class machinery
+    /// (`is_quicktime` / per-brand `BrandClass` walks) defined on
+    /// [`Ftyp`].
     pub fn to_ftyp(&self) -> Ftyp {
         Ftyp {
             major_brand: self.major_brand,

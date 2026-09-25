@@ -594,16 +594,16 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   `moov` into a `cmov` tree; `mdat` is written first so chunk offsets
   stay absolute.
 
-## HEIF / HEIC write path
+## HEIF / HEIC / AVIF
 
-[`HeifWriter`] emits a structurally-valid `.heic` / `.heif` / `.avif`
-file from a list of [`HeifItem`]s (coded bytes + item type + per-item
-property list: `ispe`, `pixi`, `colr`, `auxC`, `lsel`, `irot`,
-`imir`, `clli`, `mdcv`, `cclv`, `amve`, plus `Other` for codec-config
-blobs). Derived items (`grid`, `iovl`, `iden`, `tmap`) emit into
-`idat` with auto-generated `dimg` `iref` rows. Property de-dup, a
-two-pass layout for real `iloc` extents, and round-trip through this
-crate's own `parse_bmff_meta` / `iprp` / `derived` surfaces.
+Not here. Item-based still images (ISO BMFF §8.11 `meta` with `pitm` /
+`iinf` / `iloc` / `iref` / `iprp`, MIAF properties, `grid` / `iovl` /
+`iden` / `tmap` derivations, the `.heic` / `.avif` writer) are owned by
+[`oxideav-heif`](https://crates.io/crates/oxideav-heif) — `HeifFile`
+for reading, `HeifWriter` for writing. This crate's probe never claims
+a HEIF-family brand (`mif1` / `heic` / `heix` / `avif` / `avis` /
+`msf1`), and an item-based `meta` met inside a `.mov` is skipped: the
+QuickTime `meta` surface is the Apple `keys` / `ilst` shape only.
 
 ## Robustness
 

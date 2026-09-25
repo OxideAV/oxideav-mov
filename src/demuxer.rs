@@ -19,7 +19,6 @@ use crate::atom::{
     SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, SSIX, STBL, STCO, STDP, STHD, STSC, STSD, STSH, STSS,
     STSZ, STTS, STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID, VMHD, WIDE,
 };
-use crate::bmff_meta::{parse_bmff_meta, BmffMeta};
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
 use crate::clip::{parse_clip, Clipping};
 use crate::cmov::parse_cmov;
@@ -102,16 +101,6 @@ pub struct MovDemuxer {
     /// ([`crate::cmov::DCOM_ALG_ZLIB`]); any other value fails the
     /// open with a spec-citing error rather than landing here.
     pub compressed_movie_algorithm: Option<[u8; 4]>,
-    /// Movie-level ISO BMFF §8.11 `meta` box, when the file's
-    /// `moov/meta` is in the ISO/IEC 14496-12 (HEIF / MIAF / MPEG-7)
-    /// shape rather than the Apple key-value shape (which lives in
-    /// [`Self::meta`]). The two are mutually exclusive: a single
-    /// `meta` atom can only be one shape at a time.
-    pub bmff_meta: Option<BmffMeta>,
-    /// File-level ISO BMFF §8.11 `meta` box, when the input's top
-    /// level carries a `meta` atom (typical for HEIF / MIAF / AVIF /
-    /// JPEG-XL still images). Independent of any `moov/meta`.
-    pub file_bmff_meta: Option<BmffMeta>,
     /// True iff the first non-skip top-level atom after `ftyp` is
     /// `moov`, indicating the file is laid out for streaming
     /// ("faststart").
@@ -157,7 +146,7 @@ pub struct MovDemuxer {
     /// `moov` carries an optional `ctab` declaring a preferred
     /// indexed-color palette. Up to 256 4-channel (reserved/r/g/b)
     /// 16-bit entries. `None` for any file that omits this Apple-only
-    /// atom (the typical case — ISO BMFF / fMP4 / HEIF / AVIF do not
+    /// atom (the typical case — ISO BMFF / fMP4 do not
     /// define `ctab`).
     pub ctab: Option<Ctab>,
     /// Movie-level Clipping atom (QTFF p. 43), when the file's `moov`
@@ -186,7 +175,7 @@ pub struct MovDemuxer {
     /// the first when a writer emits duplicates (matching the
     /// conservative-merge convention shared with `pdin` / `ctab` /
     /// `clip` / `mvhd`). ISO BMFF does not define this atom; an MP4
-    /// / fMP4 / HEIF / AVIF file will not carry one and this field
+    /// / fMP4 file will not carry one and this field
     /// stays `None`.
     pub pnot: Option<Pnot>,
     /// Top-level User-Type Boxes (`uuid`) — ISO/IEC 14496-12 §4.2 /
@@ -516,8 +505,6 @@ impl MovDemuxer {
         // `cmov/dcom` algorithm FourCC when the `moov` walk found (and
         // transparently decompressed) a compressed movie resource.
         let mut compressed_movie_algorithm: Option<[u8; 4]> = None;
-        let mut movie_bmff_meta: Option<BmffMeta> = None;
-        let mut file_bmff_meta: Option<BmffMeta> = None;
         let mut mehd_box: Option<Mehd> = None;
         let mut trex_defaults: Vec<TrexDefaults> = Vec::new();
         // ISO/IEC 14496-12 §8.8.13 Level Assignment Box (`leva`).
@@ -775,7 +762,6 @@ impl MovDemuxer {
                         &mut movie_meta,
                         &mut movie_user_data,
                         &mut reference_movies,
-                        &mut movie_bmff_meta,
                         &mut mehd_box,
                         &mut trex_defaults,
                         &mut leva_box,
@@ -789,15 +775,6 @@ impl MovDemuxer {
                         // carry a `cmov`.
                         true,
                     )?;
-                }
-                t if t == &META => {
-                    // File-level meta box — common in HEIF/HEIC/AVIF
-                    // still-image files. The parser distinguishes the
-                    // ISO BMFF §8.11 shape from the Apple key-value
-                    // shape; only the former is meaningful at file
-                    // scope (Apple `meta` is never written at file
-                    // level in practice).
-                    file_bmff_meta = parse_bmff_meta(input.as_mut(), &hdr)?;
                 }
                 t if t == &MDAT => {
                     seen_mdat = true;
@@ -1017,25 +994,15 @@ impl MovDemuxer {
         }
 
         if mvhd.is_none() {
-            // A bare HEIF/HEIC/AVIF still-image file is allowed to
-            // ship without any `moov` at all — its content is
-            // entirely described by a top-level `meta` box. Accept
-            // such files so callers can walk `file_bmff_meta` to
-            // discover items, properties, and item-data extents.
-            if file_bmff_meta.is_none() {
-                return Err(Error::invalid("MOV: no moov/mvhd found"));
-            }
+            return Err(Error::invalid("MOV: no moov/mvhd found"));
         }
         if tracks.is_empty() {
-            // Three valid "no tracks" shapes:
-            //   * reference-movie file (`moov/rmra`) — tracks live in
-            //     the referenced file (best surfaced as Unsupported so
-            //     callers can fall back to alias resolution),
-            //   * meta-only HEIF/HEIC/AVIF still-image files — the
-            //     image data lives in `meta`/`iloc`, not in tracks,
-            //   * any future shape that carries `mvhd` purely for
-            //     timebase reasons but no media tracks (rare; we
-            //     accept it silently when a `meta` is present).
+            // A reference-movie file (`moov/rmra`) keeps its tracks in
+            // the referenced file — surfaced as Unsupported so callers
+            // can fall back to alias resolution. Anything else with an
+            // empty `moov` is not a playable QuickTime movie. (Item-
+            // based still images — HEIF / MIAF / AVIF — carry no `moov`
+            // at all and belong to `oxideav-heif`.)
             if !reference_movies.is_empty() {
                 return Err(unsupported_error(format!(
                     "MOV: reference-movie container with {n} alternate(s); resolving \
@@ -1043,12 +1010,7 @@ impl MovDemuxer {
                     n = reference_movies.len(),
                 )));
             }
-            if file_bmff_meta.is_none() && movie_bmff_meta.is_none() {
-                return Err(Error::invalid("MOV: moov contains no tracks"));
-            }
-            // Otherwise: meta-only file, fall through. `samples` is
-            // empty and `next_packet` will return `Eof` immediately;
-            // callers consume `file_bmff_meta` / `bmff_meta` instead.
+            return Err(Error::invalid("MOV: moov contains no tracks"));
         }
 
         // Resolve codec ids per-track using the provided resolver
@@ -1159,8 +1121,6 @@ impl MovDemuxer {
             user_data: movie_user_data,
             reference_movies,
             compressed_movie_algorithm,
-            bmff_meta: movie_bmff_meta,
-            file_bmff_meta,
             faststart: seen_moov_before_mdat,
             pdin: file_pdin,
             ctab: movie_ctab,
@@ -1211,9 +1171,7 @@ impl MovDemuxer {
     /// demuxer accepts because some early QTFF files predate `ftyp`).
     ///
     /// Order matches the on-wire order: `major_brand` first, then the
-    /// declared `compatible_brands` in declaration order. Convenience
-    /// helpers ([`Self::is_heic`], [`Self::is_avif`], [`Self::is_miaf`])
-    /// query the same list with the family rules baked in.
+    /// declared `compatible_brands` in declaration order.
     ///
     /// See [`crate::BrandClass`] for the brand registry.
     pub fn brand_class(&self) -> Vec<crate::header::BrandClass> {
@@ -1221,27 +1179,6 @@ impl MovDemuxer {
             Some(f) => f.brand_class(),
             None => Vec::new(),
         }
-    }
-
-    /// Whether the file declares any HEIC-family brand (`heic`,
-    /// `heix`, `heim`, `heis`). Convenience wrapper around
-    /// [`crate::Ftyp::is_heic`] that also handles the no-`ftyp` case.
-    pub fn is_heic(&self) -> bool {
-        self.ftyp.as_ref().map(|f| f.is_heic()).unwrap_or(false)
-    }
-
-    /// Whether the file declares any AVIF-family brand (`avif`,
-    /// `avis`, `avio`).
-    pub fn is_avif(&self) -> bool {
-        self.ftyp.as_ref().map(|f| f.is_avif()).unwrap_or(false)
-    }
-
-    /// Whether the file declares any MIAF-family brand: explicit
-    /// `mif1` / `mif2` markers, MIAF Annex A profiles (`MA1A` /
-    /// `MA1B`), or any HEIC- / AVIF-family brand (each entails MIAF
-    /// conformance per HEIF §10 / AVIF §3).
-    pub fn is_miaf(&self) -> bool {
-        self.ftyp.as_ref().map(|f| f.is_miaf()).unwrap_or(false)
     }
 
     /// The first Segment Type Box (`styp`) in the file, when present.
@@ -1388,325 +1325,6 @@ impl MovDemuxer {
             time_scale,
             entries,
         }))
-    }
-
-    /// Resolve the file's primary HEIF image into an [`ImageLayout`]
-    /// composition plan. Returns `None` when:
-    ///
-    /// * the input has no top-level `meta` box (it isn't a HEIF / MIAF
-    ///   / AVIF / JPEG-XL file), or
-    /// * the `meta` box has no `pitm`, or
-    /// * the primary item is a `grid` / `iovl` whose payload lives in
-    ///   `mdat` (`construction_method == 0`); use
-    ///   [`Self::primary_image_layout_with_input`] for the mdat path,
-    ///   or
-    /// * the primary item isn't a recognised image-derivation
-    ///   (`grid` / `iovl` / `iden`) or coded image type (`hvc1`,
-    ///   `av01`, `j2k1`, …) — surfaced as `None` rather than an
-    ///   error so callers that probe-and-fall-through don't have to
-    ///   pattern-match on `InvalidData`.
-    ///
-    /// On the `Grid` / `Overlay` paths the per-tile / per-layer
-    /// placement is computed once from the file's `iref dimg` and
-    /// `iprp ispe` tables; on the `Identity` path the inner item id
-    /// is surfaced directly so the caller can decode it through its
-    /// usual codec path (`oxideav-h265`, `oxideav-av1`, …) and apply
-    /// the iden item's transformative properties via
-    /// [`crate::render_iden`].
-    ///
-    /// The lookup uses [`Self::file_bmff_meta`] (the top-level `meta`
-    /// box). HEIF files store their primary image graph there;
-    /// `moov/meta` (held in [`Self::bmff_meta`]) is the QTFF / movie-
-    /// scope shape and is not consulted by this helper.
-    pub fn primary_image_layout(&self) -> Option<crate::derived::ImageLayout> {
-        let fm = self.file_bmff_meta.as_ref()?;
-        crate::derived::primary_image_layout_for(fm)
-    }
-
-    /// Same as [`Self::primary_image_layout`] but also resolves
-    /// `construction_method == 0` (mdat-resident) **and**
-    /// `construction_method == 2` (item-resident, sub-slice of another
-    /// item) `grid` / `iovl` derivation payloads by reading the file
-    /// extents from the input.
-    ///
-    /// HEIF derived-image payloads are tiny fixed records (8 / 12
-    /// bytes for `grid`, 12+ bytes for `iovl`); authoring tools
-    /// overwhelmingly inline them in the meta box's `idat`, but the
-    /// spec (ISO/IEC 14496-12 §8.11.3) permits placing them at any
-    /// `construction_method == 0` extent — typically inside `mdat`.
-    /// The pure-meta resolver [`Self::primary_image_layout`] returns
-    /// `None` for that path because it has no input handle; this
-    /// version takes `&mut self` so it can issue the seek+read for
-    /// the file extents.
-    ///
-    /// `construction_method == 2` (item_offset) is also resolved here
-    /// — the underlying read transparently sub-slices another item's
-    /// resolved bytes via [`Self::resolve_item_bytes`], so an
-    /// HEIF-grid primary whose payload lives at an offset inside
-    /// another item lands a `Grid` plan as expected.
-    ///
-    /// Returns `None` for the same not-a-HEIF-file reasons as
-    /// [`Self::primary_image_layout`].
-    pub fn primary_image_layout_with_input(&mut self) -> Option<crate::derived::ImageLayout> {
-        let pid = self.file_bmff_meta.as_ref()?.primary_item?;
-        let info = self.file_bmff_meta.as_ref()?.find_item(pid)?;
-        let item_type = info.item_type;
-        match &item_type {
-            b"grid" => {
-                let bytes = self.read_derivation_payload_bytes(pid)?;
-                let fm = self.file_bmff_meta.as_ref()?;
-                match crate::derived::build_grid_layout(fm, pid, &bytes) {
-                    Ok(g) => Some(crate::derived::ImageLayout::Grid(g)),
-                    Err(_) => None,
-                }
-            }
-            b"iovl" => {
-                let bytes = self.read_derivation_payload_bytes(pid)?;
-                let fm = self.file_bmff_meta.as_ref()?;
-                match crate::derived::build_overlay_layout(fm, pid, &bytes) {
-                    Ok(o) => Some(crate::derived::ImageLayout::Overlay(o)),
-                    Err(_) => None,
-                }
-            }
-            b"iden" => {
-                let fm = self.file_bmff_meta.as_ref()?;
-                // Defer to image_layout_for so the iden/inner cascade,
-                // pixi, and color_profile fields are populated
-                // identically to the pure-meta resolver.
-                crate::derived::image_layout_for(fm, pid)
-            }
-            b"tmap" => {
-                // Tone-mapping derivation: payload bytes may live in
-                // mdat (construction_method == 0). Resolve via the same
-                // path as grid/iovl, then surface a ToneMap variant
-                // identical in shape to what `image_layout_for` would
-                // produce on the idat path.
-                let bytes = self.read_derivation_payload_bytes(pid).unwrap_or_default();
-                let fm = self.file_bmff_meta.as_ref()?;
-                let base = *fm.derived_from(pid).first()?;
-                Some(crate::derived::ImageLayout::ToneMap {
-                    item_id: pid,
-                    base,
-                    params: crate::derived::TmapPayload::from_bytes(bytes),
-                })
-            }
-            _ => {
-                let fm = self.file_bmff_meta.as_ref()?;
-                crate::derived::image_layout_for(fm, pid)
-            }
-        }
-    }
-
-    /// Resolve a derivation item's payload bytes by inspecting its
-    /// `iloc` `construction_method`:
-    ///
-    /// * `1` (idat) — concatenate the matching `idat` slices.
-    /// * `0` (file extents) — seek to each extent in the input and
-    ///   read its bytes.
-    /// * any other (`2` / future) — `None` (caller's problem).
-    fn read_derivation_payload_bytes(&mut self, item_id: u32) -> Option<Vec<u8>> {
-        let fm = self.file_bmff_meta.as_ref()?;
-        let loc = fm.find_location(item_id)?;
-        match loc.construction_method {
-            1 => crate::bmff_meta::idat_bytes_concat(fm, item_id),
-            0 => {
-                // Snapshot the extents (so we can drop the borrow on
-                // self.file_bmff_meta before issuing the read).
-                let extents: Vec<(u64, u64)> = loc
-                    .extents
-                    .iter()
-                    .map(|e| (loc.base_offset + e.offset, e.length))
-                    .collect();
-                let mut total = 0usize;
-                for &(_, len) in &extents {
-                    total = total.checked_add(len as usize)?;
-                }
-                // Cap the pre-allocation: `total` is attacker-declared
-                // and the bounded per-extent reads below fail fast on
-                // truncated data anyway.
-                let mut out =
-                    Vec::with_capacity(total.min(crate::atom::MAX_INMEMORY_ATOM_BODY as usize));
-                for (off, len) in extents {
-                    let chunk = self.read_exact_bounded(off, len, "iloc extent").ok()?;
-                    out.extend_from_slice(&chunk);
-                }
-                Some(out)
-            }
-            // construction_method == 2 (item_offset). Recursive
-            // resolve via the public entry point so cycle detection
-            // and depth-limiting kick in.
-            _ => self.resolve_item_bytes(item_id).ok(),
-        }
-    }
-
-    /// Resolve an item's bytes per ISO/IEC 14496-12 §8.11.3, including
-    /// the `construction_method == 2` (item_offset) path which slices
-    /// the bytes out of *another* item's resolved payload.
-    ///
-    /// Behaviour by `construction_method`:
-    ///
-    /// * `0` (file_offset) — concatenate the `(base_offset + offset,
-    ///   length)` slices read directly from the input.
-    /// * `1` (idat_offset) — slice the file's `meta/idat` payload at
-    ///   `(base_offset + offset, length)` per extent.
-    /// * `2` (item_offset) — recursively resolve the source item
-    ///   (the **first** item in the file's `iref iloc` reference
-    ///   targets, or the `extent_index`-selected one when
-    ///   `index_size > 0`), then sub-slice the resulting bytes at
-    ///   `(base_offset + offset, length)` per extent.
-    ///
-    /// Cycle detection: a `HashSet<u32>` of visited item ids is
-    /// threaded through the recursion. A re-entry on a previously
-    /// visited id aborts the resolve with [`Error::invalid`] rather
-    /// than walking a self-referencing chain forever.
-    ///
-    /// Returns the concatenated payload bytes. Errors:
-    ///
-    /// * `Error::invalid("MOV: iloc cycle through items …")` on a
-    ///   visited-set hit (item references itself transitively).
-    /// * `Error::invalid("MOV: iloc item N has no entry")` when the
-    ///   id isn't present in the file's `iloc` table.
-    /// * `Error::invalid("MOV: iloc construction_method=2 source item
-    ///   missing")` when cm=2 needs a source-item reference (via
-    ///   `iref iloc` or extent_index) and the file lacks it.
-    /// * I/O errors propagated from the underlying reader.
-    pub fn resolve_item_bytes(&mut self, item_id: u32) -> Result<Vec<u8>> {
-        let mut visited = std::collections::HashSet::new();
-        self.resolve_item_bytes_inner(item_id, &mut visited)
-    }
-
-    fn resolve_item_bytes_inner(
-        &mut self,
-        item_id: u32,
-        visited: &mut std::collections::HashSet<u32>,
-    ) -> Result<Vec<u8>> {
-        if !visited.insert(item_id) {
-            return Err(Error::invalid(format!(
-                "MOV: iloc cycle through item {item_id}"
-            )));
-        }
-        let fm = self
-            .file_bmff_meta
-            .as_ref()
-            .ok_or_else(|| Error::invalid("MOV: iloc resolve called without meta box"))?;
-        let loc = fm
-            .find_location(item_id)
-            .ok_or_else(|| Error::invalid(format!("MOV: iloc item {item_id} has no entry")))?
-            .clone();
-        match loc.construction_method {
-            0 => {
-                let mut total = 0usize;
-                for e in &loc.extents {
-                    total = total
-                        .checked_add(e.length as usize)
-                        .ok_or_else(|| Error::invalid("MOV: iloc extent total overflow"))?;
-                }
-                // Cap the pre-allocation: `total` is attacker-declared
-                // and the bounded per-extent reads below fail fast on
-                // truncated data anyway.
-                let mut out =
-                    Vec::with_capacity(total.min(crate::atom::MAX_INMEMORY_ATOM_BODY as usize));
-                for e in &loc.extents {
-                    let off = loc.base_offset.saturating_add(e.offset);
-                    let chunk = self.read_exact_bounded(off, e.length, "iloc extent")?;
-                    out.extend_from_slice(&chunk);
-                }
-                Ok(out)
-            }
-            1 => {
-                let fm = self.file_bmff_meta.as_ref().ok_or_else(|| {
-                    Error::invalid("MOV: iloc cm=1 resolve lost meta-box reference")
-                })?;
-                crate::bmff_meta::idat_bytes_concat(fm, item_id).ok_or_else(|| {
-                    Error::invalid(format!(
-                        "MOV: iloc cm=1 idat resolve failed for item {item_id}"
-                    ))
-                })
-            }
-            2 => {
-                // construction_method == 2: each extent is
-                // `(extent_index?, offset, length)` *into another
-                // item's* resolved payload.
-                //
-                // Source-item selection per §8.11.3: when the iloc's
-                // index_size > 0 the per-extent `extent_index` is a
-                // 1-based index into the `iref iloc` reference list
-                // for this item (the source-item table). When
-                // index_size == 0 the source is the single target of
-                // the same `iref iloc` reference (HEIF authoring
-                // tools that emit a single iloc-iref + many extents
-                // all sub-slicing it).
-                let iref_targets: Vec<u32> = fm.refs_from(item_id, b"iloc");
-                let mut total = 0usize;
-                for e in &loc.extents {
-                    total = total
-                        .checked_add(e.length as usize)
-                        .ok_or_else(|| Error::invalid("MOV: iloc cm=2 extent total overflow"))?;
-                }
-                // Materialise each source-item resolution we need so
-                // we don't recurse repeatedly for the same target.
-                use std::collections::HashMap;
-                let mut resolved_sources: HashMap<u32, Vec<u8>> = HashMap::new();
-                let mut out = Vec::with_capacity(total);
-                for e in &loc.extents {
-                    let source_id = match e.index {
-                        Some(idx) if idx > 0 => {
-                            let i = (idx - 1) as usize;
-                            *iref_targets.get(i).ok_or_else(|| {
-                                Error::invalid(format!(
-                                    "MOV: iloc cm=2 extent_index {idx} out of range for item {item_id}"
-                                ))
-                            })?
-                        }
-                        _ => {
-                            // No per-extent index → take the single
-                            // (or first) iref iloc target.
-                            *iref_targets.first().ok_or_else(|| {
-                                Error::invalid(format!(
-                                    "MOV: iloc cm=2 source item missing for item {item_id}"
-                                ))
-                            })?
-                        }
-                    };
-                    if let std::collections::hash_map::Entry::Vacant(slot) =
-                        resolved_sources.entry(source_id)
-                    {
-                        let bytes = self.resolve_item_bytes_inner(source_id, visited)?;
-                        slot.insert(bytes);
-                    }
-                    let src = &resolved_sources[&source_id];
-                    let start = loc.base_offset.saturating_add(e.offset) as usize;
-                    let end = if e.length == 0 {
-                        src.len()
-                    } else {
-                        start
-                            .checked_add(e.length as usize)
-                            .ok_or_else(|| Error::invalid("MOV: iloc cm=2 sub-slice overflow"))?
-                    };
-                    if end > src.len() {
-                        return Err(Error::invalid(format!(
-                            "MOV: iloc cm=2 sub-slice out of range \
-                             (item {item_id} → src {source_id}, end={end}, len={})",
-                            src.len()
-                        )));
-                    }
-                    out.extend_from_slice(&src[start..end]);
-                }
-                Ok(out)
-            }
-            other => Err(Error::invalid(format!(
-                "MOV: iloc unknown construction_method {other}"
-            ))),
-        }
-    }
-
-    /// Pre-derived coded image base item (HEIF §6.4.7). Returns the
-    /// base coded image's id when this item carries a `base` `iref`
-    /// reference, otherwise `None`. Convenience alias for
-    /// `self.file_bmff_meta.base_image_for(item_id)` that elides the
-    /// `Option<&BmffMeta>` unwrap callers would otherwise have to do.
-    pub fn base_image_for(&self, item_id: u32) -> Option<u32> {
-        self.file_bmff_meta.as_ref()?.base_image_for(item_id)
     }
 
     /// Read the next sample's bytes from the input. Returns
@@ -2168,7 +1786,7 @@ impl MovDemuxer {
     /// list ([`Track::track_refs_of_kind`] with
     /// [`crate::track::TrackRefKind::NonPrimarySource`]). QTFF-only —
     /// ISO BMFF does not define `imap`, so the result is `None` for
-    /// MP4 / fMP4 / HEIF / AVIF inputs.
+    /// MP4 / fMP4 inputs.
     pub fn track_input_map(
         &self,
         track_index: usize,
@@ -3873,7 +3491,6 @@ fn parse_moov<R: Read + Seek + ?Sized>(
     meta: &mut Vec<MetaKeyValue>,
     user_data: &mut Vec<UserDataEntry>,
     reference_movies: &mut Vec<ReferenceMovie>,
-    bmff_meta: &mut Option<BmffMeta>,
     mehd_out: &mut Option<Mehd>,
     trex_out: &mut Vec<TrexDefaults>,
     leva_out: &mut Option<Leva>,
@@ -3922,7 +3539,6 @@ fn parse_moov<R: Read + Seek + ?Sized>(
                     meta,
                     user_data,
                     reference_movies,
-                    bmff_meta,
                     mehd_out,
                     trex_out,
                     leva_out,
@@ -3942,12 +3558,12 @@ fn parse_moov<R: Read + Seek + ?Sized>(
                 tracks.push(track);
             }
             t if t == &META => {
-                // Try Apple shape first; fall back to ISO BMFF §8.11
-                // shape when the Apple parser declines.
+                // Apple key-value shape (`hdlr` / `keys` / `ilst`). An
+                // ISO BMFF §8.11 item-based `meta` (HEIF / MIAF) is not
+                // QuickTime metadata — `oxideav-heif` owns that layer —
+                // so any other shape is skipped here.
                 if let Some(kv) = parse_meta_atom(r, child)? {
                     *meta = kv;
-                } else if let Some(b) = parse_bmff_meta(r, child)? {
-                    *bmff_meta = Some(b);
                 }
             }
             t if t == &UDTA => {
@@ -4147,8 +3763,6 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
             t if t == &META => {
                 if let Some(kv) = parse_meta_atom(r, child)? {
                     track.meta = kv;
-                } else if let Some(b) = parse_bmff_meta(r, child)? {
-                    track.bmff_meta = Some(b);
                 }
             }
             t if t == &UDTA => {
