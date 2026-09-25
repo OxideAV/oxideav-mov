@@ -57,7 +57,10 @@
 //!     open time.
 //!   * Metadata — 3GPP `udta` boxes (`titl`/`auth`/…), iTunes-style
 //!     `meta`/`keys`/`ilst` (whose `item > data` inner shape is
-//!     itself a recursive box tree).
+//!     itself a recursive box tree) plus the round-461 `QtMetadata`
+//!     walk — `mhdr` / `ctry` / `lang` / `itif` / `name`, every
+//!     locale-tagged value decoded, list indexes resolved, and the
+//!     p. 140 locale matcher driven from the input bytes.
 //!   * `seek_to(0, 0)` re-exercises the sample-table walker from a
 //!     random offset, including the `tfra` binary search on
 //!     fragmented inputs.
@@ -114,6 +117,47 @@ fuzz_target!(|data: &[u8]| {
     // fields below reach into the file-scope structural surfaces.
     let _ = dmx.streams().len();
     let _ = dmx.meta.len();
+    // Round-461 QuickTime Metadata atom (QTFF 2012 pp. 129 – 143):
+    // walk every item / value of the movie- and track-level
+    // `QtMetadata`, decode each value per its well-known type, resolve
+    // list-indexed locales against the `ctry` / `lang` sets (dangling
+    // indexes must not panic), and run the p. 140 locale matcher with
+    // a country / language pair taken from the input bytes. Caps keep
+    // a writer that ships thousands of items from dominating fuzz
+    // time.
+    {
+        let want_country: [u8; 2] = [
+            data.first().copied().unwrap_or(0),
+            data.get(1).copied().unwrap_or(0),
+        ];
+        let want_language = u16::from_be_bytes([
+            data.get(2).copied().unwrap_or(0),
+            data.get(3).copied().unwrap_or(0),
+        ]);
+        let track_metas = dmx.tracks.iter().filter_map(|t| t.qt_metadata.as_ref());
+        for qm in dmx.qt_metadata.iter().chain(track_metas) {
+            let _ = qm.has_mdta_handler();
+            let _ = qm.to_key_values().len();
+            let _ = qm.country_lists.len();
+            let _ = qm.language_lists.len();
+            for item in qm.items.iter().take(64) {
+                let _ = qm.key_for(item).map(|k| k.display_name());
+                let _ = item.name.as_deref();
+                let _ = item.item_id;
+                for v in item.values.iter().take(16) {
+                    let _ = v.well_known_type();
+                    let _ = v.decode();
+                    let _ = qm.countries_for(v).len();
+                    let _ = qm.language_tags_for(v).len();
+                }
+                let _ = qm.value_for_locale(item, Some(want_country), Some(want_language));
+                let _ = qm.value_for_locale(item, None, None);
+            }
+            if let Some(k) = qm.keys.first().and_then(|k| k.name()) {
+                let _ = qm.item_named(k);
+            }
+        }
+    }
     let _ = dmx.user_data.len();
     let ntracks = dmx.tracks.len();
 
