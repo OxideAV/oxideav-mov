@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-mov/compare/v0.0.5...v0.0.6) - 2026-09-25
+
+### Other
+
+- walk the QuickTime Metadata surface on every input
+- QuickTime Metadata atom in full — locales, list sets, itif, name, mhdr (QTFF 2012 pp. 129–143)
+- retire the HEIF / HEIC / MIAF layer — oxideav-heif owns it
+
 ### Removed
 
 - The HEIF / HEIC / MIAF layer: `bmff_meta` (item model — `pitm` /
