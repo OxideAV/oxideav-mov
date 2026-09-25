@@ -13,11 +13,11 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::atom::{
     read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CMOV, CO64, CSGP, CSLG,
-    CTAB, CTTS, DINF, DREF, EDTS, ELNG, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, HMHD, ILST, IMAP,
-    KEYS, LOAD, MATT, MAX_INMEMORY_ATOM_BODY, MDAT, MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX,
-    MVHD, NMHD, PADB, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SAIO,
-    SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, SSIX, STBL, STCO, STDP, STHD, STSC, STSD, STSH, STSS,
-    STSZ, STTS, STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID, VMHD, WIDE,
+    CTAB, CTTS, DINF, DREF, EDTS, ELNG, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, HMHD, IMAP, LOAD,
+    MATT, MAX_INMEMORY_ATOM_BODY, MDAT, MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, NMHD,
+    PADB, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP,
+    SDTP, SGPD, SIDX, SKIP, SMHD, SSIX, STBL, STCO, STDP, STHD, STSC, STSD, STSH, STSS, STSZ, STTS,
+    STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID, VMHD, WIDE,
 };
 use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
 use crate::clip::{parse_clip, Clipping};
@@ -32,10 +32,11 @@ use crate::header::{
 };
 use crate::leva::Leva;
 use crate::matte::parse_matt;
-use crate::media_meta::{parse_cslg, parse_ilst, parse_keys, parse_tapt_dims, MetaKeyValue, Tapt};
+use crate::media_meta::{parse_cslg, parse_tapt_dims, MetaKeyValue, Tapt};
 use crate::pdin::{parse_pdin, Pdin};
 use crate::pnot::{parse_pnot, Pnot};
 use crate::prft::{parse_prft, Prft};
+use crate::qt_metadata::{parse_qt_metadata, QtMetadata};
 use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
 use crate::sample_aux::{parse_saio, parse_saiz};
 use crate::sample_groups::{parse_csgp, parse_sbgp, parse_sgpd};
@@ -79,8 +80,15 @@ pub struct MovDemuxer {
     pub mvhd: Option<Mvhd>,
     pub tracks: Vec<Track>,
     /// Movie-level Apple `meta` key-value pairs (when the file
-    /// carries an Apple-shaped `meta` atom at moov scope).
+    /// carries an Apple-shaped `meta` atom at moov scope) — the flat
+    /// first-value-per-key view of [`Self::qt_metadata`].
     pub meta: Vec<MetaKeyValue>,
+    /// The full movie-level QuickTime Metadata atom (QTFF 2012
+    /// pp. 129 – 143): handler, `mhdr`, country / language list sets,
+    /// keys, and every item with all of its locale-tagged values,
+    /// `itif` id and `name`. `None` when `moov` carries no QuickTime-
+    /// shaped `meta`.
+    pub qt_metadata: Option<QtMetadata>,
     /// Movie-level `udta` user-data entries (©nam, ©cpy, name, …) at
     /// `moov/udta` scope. Track-level `udta` is exposed through
     /// [`Track::user_data`].
@@ -499,6 +507,7 @@ impl MovDemuxer {
         let mut mvhd: Option<Mvhd> = None;
         let mut tracks: Vec<Track> = Vec::new();
         let mut movie_meta: Vec<MetaKeyValue> = Vec::new();
+        let mut movie_qt_metadata: Option<QtMetadata> = None;
         let mut movie_user_data: Vec<UserDataEntry> = Vec::new();
         let mut reference_movies: Vec<ReferenceMovie> = Vec::new();
         // QTFF pp. 80 – 81 compressed movie resource: records the
@@ -760,6 +769,7 @@ impl MovDemuxer {
                         &mut mvhd,
                         &mut tracks,
                         &mut movie_meta,
+                        &mut movie_qt_metadata,
                         &mut movie_user_data,
                         &mut reference_movies,
                         &mut mehd_box,
@@ -1118,6 +1128,7 @@ impl MovDemuxer {
             mvhd,
             tracks,
             meta: movie_meta,
+            qt_metadata: movie_qt_metadata,
             user_data: movie_user_data,
             reference_movies,
             compressed_movie_algorithm,
@@ -3489,6 +3500,7 @@ fn parse_moov<R: Read + Seek + ?Sized>(
     mvhd: &mut Option<Mvhd>,
     tracks: &mut Vec<Track>,
     meta: &mut Vec<MetaKeyValue>,
+    qt_meta: &mut Option<QtMetadata>,
     user_data: &mut Vec<UserDataEntry>,
     reference_movies: &mut Vec<ReferenceMovie>,
     mehd_out: &mut Option<Mehd>,
@@ -3537,6 +3549,7 @@ fn parse_moov<R: Read + Seek + ?Sized>(
                     mvhd,
                     tracks,
                     meta,
+                    qt_meta,
                     user_data,
                     reference_movies,
                     mehd_out,
@@ -3562,8 +3575,9 @@ fn parse_moov<R: Read + Seek + ?Sized>(
                 // ISO BMFF §8.11 item-based `meta` (HEIF / MIAF) is not
                 // QuickTime metadata — `oxideav-heif` owns that layer —
                 // so any other shape is skipped here.
-                if let Some(kv) = parse_meta_atom(r, child)? {
-                    *meta = kv;
+                if let Some(m) = parse_meta_atom(r, child)? {
+                    *meta = m.to_key_values();
+                    *qt_meta = Some(m);
                 }
             }
             t if t == &UDTA => {
@@ -3761,8 +3775,9 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
                 track.cslg = Some(parse_cslg(&body)?);
             }
             t if t == &META => {
-                if let Some(kv) = parse_meta_atom(r, child)? {
-                    track.meta = kv;
+                if let Some(m) = parse_meta_atom(r, child)? {
+                    track.meta = m.to_key_values();
+                    track.qt_metadata = Some(m);
                 }
             }
             t if t == &UDTA => {
@@ -3871,68 +3886,22 @@ fn parse_tapt<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Ta
     Ok(out)
 }
 
-/// Parse an Apple-shaped `meta` atom. The QTFF / Apple iTunes layout
-/// is `[hdlr (mdta)][keys][ilst]` (the `hdlr` may carry a different
-/// 4-byte handler — we treat any handler the same way and look for a
-/// `keys` table followed by an `ilst` value list). Returns `None` when
-/// the atom doesn't carry the key-value structure (e.g. ISO BMFF
-/// `meta` with `XMP_` / `bxml`).
+/// Parse a QuickTime-shaped `meta` atom (QTFF 2012 pp. 129 – 143:
+/// `hdlr mdta` + optional `mhdr` / `ctry` / `lang` + `keys` + `ilst`).
+/// Returns `None` when the atom is not that shape — an ISO BMFF §8.11
+/// item-based `meta` (`hdlr pict` + `pitm` / `iinf` / …, the HEIF /
+/// MIAF layer `oxideav-heif` owns) or an `XMP_` / `bxml` carrier.
 ///
-/// QTFF documents the `meta` atom only by reference; the layout
-/// surfaced here matches Apple's QuickTime developer guidance and
-/// what `iTunes`/`MOV` writers emit in practice.
+/// Apple's `meta` atom in `moov` / `trak` does NOT carry the leading
+/// `[ver+flags=4]` FullBox word ISO BMFF mandates; the parser peeks
+/// at the body to tell the two apart, so either spelling decodes.
 fn parse_meta_atom<R: Read + Seek + ?Sized>(
     r: &mut R,
     hdr: &AtomHeader,
-) -> Result<Option<Vec<MetaKeyValue>>> {
-    let body_end = hdr.payload_offset + hdr.payload_len().unwrap_or(0);
-    r.seek(SeekFrom::Start(hdr.payload_offset))?;
-    // Apple's `meta` atom in `moov`/`trak` does NOT carry the leading
-    // `[ver+flags=4]` FullBox header that ISO BMFF mandates. To stay
-    // forgiving we *peek* at the next 8 bytes: if they look like a
-    // valid sub-atom header (size ≥ 8 and inside body_end) we proceed
-    // immediately; otherwise we skip the 4-byte FullBox header first.
-    let pos_now = r.stream_position()?;
-    let remain = body_end - pos_now;
-    if remain >= 4 {
-        let mut peek = [0u8; 8];
-        if remain >= 8 {
-            r.read_exact(&mut peek)?;
-            r.seek(SeekFrom::Start(pos_now))?;
-            let size = u32::from_be_bytes([peek[0], peek[1], peek[2], peek[3]]) as u64;
-            if size < 8 || size > remain {
-                // Not a valid sub-atom header — assume FullBox prefix
-                // and consume 4 bytes.
-                r.seek(SeekFrom::Start(pos_now + 4))?;
-            }
-        }
-    }
-
-    let mut keys: Vec<(String, [u8; 4])> = Vec::new();
-    let mut pending_ilst: Option<Vec<u8>> = None;
-
-    walk_children(r, Some(body_end), |r, child| {
-        match &child.fourcc {
-            t if t == &KEYS => {
-                let body = read_payload(r, child)?;
-                keys = parse_keys(&body)?;
-            }
-            t if t == &ILST => {
-                pending_ilst = Some(read_payload(r, child)?);
-            }
-            _ => {}
-        }
-        Ok(())
-    })?;
-
-    if keys.is_empty() && pending_ilst.is_none() {
-        return Ok(None);
-    }
-    let kv = match pending_ilst {
-        Some(body) => parse_ilst(&body, &keys)?,
-        None => Vec::new(),
-    };
-    Ok(Some(kv))
+) -> Result<Option<QtMetadata>> {
+    let body = read_payload(r, hdr)?;
+    let m = parse_qt_metadata(&body)?;
+    Ok(m.is_quicktime_shape().then_some(m))
 }
 
 fn parse_mdia<R: Read + Seek + ?Sized>(

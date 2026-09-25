@@ -29,6 +29,7 @@ pub mod muxer;
 pub mod pdin;
 pub mod pnot;
 pub mod prft;
+pub mod qt_metadata;
 pub mod reference;
 pub mod sample_aux;
 pub mod sample_groups;
@@ -111,8 +112,8 @@ pub use metadata_sample::{
 };
 pub use muxer::{
     AudioEntryV1, AudioEntryV2, ChunkStrategy, DataReferenceWrite, ExternalSampleLocation,
-    FragmentationMode, MoovPlacement, MovMetaItem, MovMetadata, MovMuxer, MuxEdit, MuxSample,
-    MuxTrackKind, SampleAuxStream, SampleGroupBoxForm, SampleGroupDescriptionWrite,
+    FragmentationMode, MoovPlacement, MovMetaItem, MovMetaValue, MovMetadata, MovMuxer, MuxEdit,
+    MuxSample, MuxTrackKind, SampleAuxStream, SampleGroupBoxForm, SampleGroupDescriptionWrite,
     SampleToGroupWrite, TrackReference, VisualExtensions, MDHD_LANGUAGE_UND, META_NAMESPACE_MDTA,
     META_TYPE_BE_SIGNED_INT, META_TYPE_BE_UNSIGNED_INT, META_TYPE_RAW, META_TYPE_UTF8,
     UTF8_INTL_TEXT_FLAG,
@@ -120,6 +121,10 @@ pub use muxer::{
 pub use pdin::{parse_pdin, Pdin, PdinEntry};
 pub use pnot::{parse_pnot, Pnot, MAC_TO_UNIX_EPOCH_SECONDS, PNOT_BODY_LEN};
 pub use prft::{parse_prft, Prft, NTP_TO_UNIX_EPOCH_SECONDS};
+pub use qt_metadata::{
+    parse_qt_metadata, DecodedValue, LocaleIndicator, MetaItem, MetaKey, MetaValue, QtMetadata,
+    WellKnownType, METADATA_HANDLER_MDTA,
+};
 pub use reference::{parse_dref, DataReference, ReferenceMovie};
 pub use sample_aux::{parse_saio, parse_saiz, AuxInfoType, FragmentSampleAux, Saio, Saiz};
 pub use sample_groups::{

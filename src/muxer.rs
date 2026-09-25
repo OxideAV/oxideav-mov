@@ -687,12 +687,84 @@ pub const META_NAMESPACE_MDTA: [u8; 4] = *b"mdta";
 /// and surfaces on [`crate::demuxer::MovDemuxer::meta`] as a
 /// [`crate::media_meta::MetaKeyValue`] with the same `namespace`, `key`,
 /// `type_code`, and `value`.
+/// One locale-tagged value of a [`MovMetaItem`] — a `data` atom (QTFF
+/// 2012 p. 142): a well-known type code, the countries and languages
+/// the value is for, and the value bytes.
+///
+/// Locale rules on write (p. 139 Table 3-3): no countries / languages
+/// → the `0` default indicator; exactly one → the immediate ISO 3166
+/// / packed ISO 639-2/T code; two or more → a `ctry` / `lang` list
+/// the writer emits (de-duplicated across the atom) and references by
+/// its 1-based index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MovMetaValue {
+    type_code: u32,
+    countries: Vec<[u8; 2]>,
+    languages: Vec<[u8; 3]>,
+    bytes: Vec<u8>,
+}
+
+impl MovMetaValue {
+    /// A UTF-8 text value ([`META_TYPE_UTF8`]) for every locale.
+    pub fn utf8(text: impl Into<String>) -> Self {
+        Self::typed(META_TYPE_UTF8, text.into().into_bytes())
+    }
+
+    /// A value with an explicit well-known type code and raw bytes,
+    /// for every locale.
+    pub fn typed(type_code: u32, bytes: impl Into<Vec<u8>>) -> Self {
+        Self {
+            type_code,
+            countries: Vec::new(),
+            languages: Vec::new(),
+            bytes: bytes.into(),
+        }
+    }
+
+    /// Restrict the value to these ISO 3166 two-letter country codes.
+    pub fn for_countries(mut self, countries: &[[u8; 2]]) -> Self {
+        self.countries = countries.to_vec();
+        self
+    }
+
+    /// Restrict the value to these ISO 639-2/T three-letter language
+    /// tags.
+    pub fn for_languages(mut self, languages: &[[u8; 3]]) -> Self {
+        self.languages = languages.to_vec();
+        self
+    }
+
+    /// The `data` type code.
+    pub fn type_code(&self) -> u32 {
+        self.type_code
+    }
+
+    /// The countries this value is for (empty = every country).
+    pub fn countries(&self) -> &[[u8; 2]] {
+        &self.countries
+    }
+
+    /// The languages this value is for (empty = every language).
+    pub fn languages(&self) -> &[[u8; 3]] {
+        &self.languages
+    }
+
+    /// The value bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MovMetaItem {
     namespace: [u8; 4],
     key: String,
-    type_code: u32,
-    value: Vec<u8>,
+    /// At least one; the first is the primary value (the one the
+    /// historical single-value accessors report). Order is the
+    /// on-disk order — p. 142 wants most-specific first.
+    values: Vec<MovMetaValue>,
+    name: Option<String>,
+    item_id: Option<u32>,
 }
 
 impl MovMetaItem {
@@ -700,12 +772,7 @@ impl MovMetaItem {
     /// (`type_code` = [`META_TYPE_UTF8`]). `key` is the reverse-DNS key
     /// name (e.g. `"com.apple.quicktime.title"`); `text` is the value.
     pub fn utf8(key: impl Into<String>, text: impl Into<String>) -> Self {
-        Self {
-            namespace: META_NAMESPACE_MDTA,
-            key: key.into(),
-            type_code: META_TYPE_UTF8,
-            value: text.into().into_bytes(),
-        }
+        Self::from_value(META_NAMESPACE_MDTA, key, MovMetaValue::utf8(text))
     }
 
     /// A big-endian signed-integer item in the `mdta` namespace
@@ -714,12 +781,11 @@ impl MovMetaItem {
     /// this constructor emits the 32-bit form. Use
     /// [`MovMetaItem::typed`] for an explicit width.
     pub fn signed_int(key: impl Into<String>, value: i32) -> Self {
-        Self {
-            namespace: META_NAMESPACE_MDTA,
-            key: key.into(),
-            type_code: META_TYPE_BE_SIGNED_INT,
-            value: value.to_be_bytes().to_vec(),
-        }
+        Self::from_value(
+            META_NAMESPACE_MDTA,
+            key,
+            MovMetaValue::typed(META_TYPE_BE_SIGNED_INT, value.to_be_bytes().to_vec()),
+        )
     }
 
     /// A fully-explicit item: caller supplies the key `namespace`, the
@@ -733,12 +799,52 @@ impl MovMetaItem {
         type_code: u32,
         bytes: impl Into<Vec<u8>>,
     ) -> Self {
+        Self::from_value(namespace, key, MovMetaValue::typed(type_code, bytes))
+    }
+
+    /// An item whose primary value is the given [`MovMetaValue`]
+    /// (any namespace / type / locale).
+    pub fn from_value(namespace: [u8; 4], key: impl Into<String>, value: MovMetaValue) -> Self {
         Self {
             namespace,
             key: key.into(),
-            type_code,
-            value: bytes.into(),
+            values: vec![value],
+            name: None,
+            item_id: None,
         }
+    }
+
+    /// Restrict the primary value to these countries / languages
+    /// (see [`MovMetaValue::for_countries`] /
+    /// [`MovMetaValue::for_languages`]).
+    pub fn with_locale(mut self, countries: &[[u8; 2]], languages: &[[u8; 3]]) -> Self {
+        self.values[0].countries = countries.to_vec();
+        self.values[0].languages = languages.to_vec();
+        self
+    }
+
+    /// Append another value (a further `data` atom). Per QTFF 2012
+    /// p. 142 Data Ordering, values go "from the most-specific data to
+    /// the most general" — callers should add the locale-specific
+    /// values before a default one.
+    pub fn with_value(mut self, value: MovMetaValue) -> Self {
+        self.values.push(value);
+        self
+    }
+
+    /// Give the item a `name` atom (p. 141: a UTF-8 handle "not user
+    /// visible", unique within the atom).
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Give the item an `itif` item id (p. 141; must be unique within
+    /// the atom). The writer then also emits the `mhdr` header with
+    /// `nextItemID` = the largest id + 1 (p. 131).
+    pub fn with_item_id(mut self, id: u32) -> Self {
+        self.item_id = Some(id);
+        self
     }
 
     /// The key namespace (4 bytes, typically [`META_NAMESPACE_MDTA`]).
@@ -751,14 +857,29 @@ impl MovMetaItem {
         &self.key
     }
 
-    /// The `data` sub-atom type-indicator for the value.
+    /// The `data` sub-atom type-indicator of the primary value.
     pub fn type_code(&self) -> u32 {
-        self.type_code
+        self.values[0].type_code
     }
 
-    /// The raw value bytes.
+    /// The raw bytes of the primary value.
     pub fn value(&self) -> &[u8] {
-        &self.value
+        &self.values[0].bytes
+    }
+
+    /// Every value in on-disk order (the primary first).
+    pub fn values(&self) -> &[MovMetaValue] {
+        &self.values
+    }
+
+    /// The `name` atom body, when set.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// The `itif` item id, when set.
+    pub fn item_id(&self) -> Option<u32> {
+        self.item_id
     }
 }
 
@@ -3971,26 +4092,125 @@ fn build_moov(
     moov
 }
 
-/// Build a movie-level Apple QuickTime Metadata box (`meta`) payload
-/// from a list of [`MovMetaItem`]s. Emits the three Apple children in
-/// order: `hdlr` (handler subtype `mdta`), `keys` (the ordered key
-/// declarations), and `ilst` (the matching typed values).
-///
-/// No leading `[ver+flags]` FullBox header is written — Apple's
-/// `moov`/`trak` `meta` omits it (the read-side `parse_meta_atom` peeks
-/// the first child header and proceeds directly when it is a valid
-/// sub-atom, which the `hdlr` first child always is).
-///
-/// The `ilst` entry at 1-based index `i` references the `keys`
-/// declaration at the same index, mirroring
-/// [`crate::media_meta::parse_ilst`]. Duplicate keys are emitted as
-/// independent slots, preserving `items` order.
+/// Build a QuickTime Metadata box (`meta`) payload from a list of
+/// [`MovMetaItem`]s (QTFF 2012 pp. 129 – 143). Children, in the
+/// Figure 3-1 order: `hdlr` (`mdta`), `mhdr` when any item carries an
+/// item id, `ctry` / `lang` when any value names two or more
+/// countries / languages, `keys`, and `ilst`. Item *N* in `items`
+/// becomes key index *N + 1* and the `ilst` entry whose type is that
+/// index; duplicate keys are emitted as independent slots, preserving
+/// `items` order.
 fn build_meta(items: &[MovMetaItem]) -> Vec<u8> {
     let mut meta = Vec::new();
     push_atom(&mut meta, *b"hdlr", &build_meta_hdlr());
+    // p. 131: the header "must exist if there are metadata item atoms
+    // containing an item information atom indicating the item's
+    // unique ID"; nextItemID is one past the largest id in use, or
+    // all-ones when that is not representable.
+    if let Some(max_id) = items.iter().filter_map(MovMetaItem::item_id).max() {
+        let mut mhdr = vec![0u8; 4];
+        mhdr.extend_from_slice(&max_id.saturating_add(1).to_be_bytes());
+        push_atom(&mut meta, *b"mhdr", &mhdr);
+    }
+    let lists = MetaLocaleLists::collect(items);
+    if !lists.countries.is_empty() {
+        push_atom(
+            &mut meta,
+            *b"ctry",
+            &build_locale_lists(lists.countries.iter().map(|l| {
+                l.iter()
+                    .map(|c| u16::from_be_bytes(*c))
+                    .collect::<Vec<u16>>()
+            })),
+        );
+    }
+    if !lists.languages.is_empty() {
+        push_atom(
+            &mut meta,
+            *b"lang",
+            &build_locale_lists(lists.languages.iter().map(|l| {
+                l.iter()
+                    .map(|t| MovMetadata::iso_language(*t))
+                    .collect::<Vec<u16>>()
+            })),
+        );
+    }
     push_atom(&mut meta, *b"keys", &build_keys(items));
-    push_atom(&mut meta, *b"ilst", &build_ilst(items));
+    push_atom(&mut meta, *b"ilst", &build_ilst(items, &lists));
     meta
+}
+
+/// The `ctry` / `lang` lists a set of items needs: one entry per
+/// distinct multi-code locale set, in first-use order, so a value's
+/// indicator can reference its list by 1-based index (p. 133 / p. 134:
+/// at most 255 lists each; a set past that cap falls back to its
+/// first code as an immediate indicator).
+#[derive(Default)]
+struct MetaLocaleLists {
+    countries: Vec<Vec<[u8; 2]>>,
+    languages: Vec<Vec<[u8; 3]>>,
+}
+
+impl MetaLocaleLists {
+    const MAX_LISTS: usize = 255;
+
+    fn collect(items: &[MovMetaItem]) -> Self {
+        let mut out = Self::default();
+        for v in items.iter().flat_map(|i| i.values.iter()) {
+            if v.countries.len() >= 2
+                && !out.countries.contains(&v.countries)
+                && out.countries.len() < Self::MAX_LISTS
+            {
+                out.countries.push(v.countries.clone());
+            }
+            if v.languages.len() >= 2
+                && !out.languages.contains(&v.languages)
+                && out.languages.len() < Self::MAX_LISTS
+            {
+                out.languages.push(v.languages.clone());
+            }
+        }
+        out
+    }
+
+    /// The 16-bit country indicator for a value (p. 139 Table 3-3).
+    fn country_indicator(&self, v: &MovMetaValue) -> u16 {
+        match v.countries.as_slice() {
+            [] => 0,
+            [one] => u16::from_be_bytes(*one),
+            many => match self.countries.iter().position(|l| l == many) {
+                Some(i) => (i + 1) as u16,
+                None => u16::from_be_bytes(many[0]),
+            },
+        }
+    }
+
+    /// The 16-bit language indicator for a value.
+    fn language_indicator(&self, v: &MovMetaValue) -> u16 {
+        match v.languages.as_slice() {
+            [] => 0,
+            [one] => MovMetadata::iso_language(*one),
+            many => match self.languages.iter().position(|l| l == many) {
+                Some(i) => (i + 1) as u16,
+                None => MovMetadata::iso_language(many[0]),
+            },
+        }
+    }
+}
+
+/// Build a `ctry` / `lang` list-set payload (pp. 133 – 134 field
+/// lists): `[ver+flags:4][entry_count:4]` then per list
+/// `[count:2][code:2 × count]`.
+fn build_locale_lists(lists: impl ExactSizeIterator<Item = Vec<u16>>) -> Vec<u8> {
+    let mut p = vec![0u8; 4];
+    p.extend_from_slice(&(lists.len() as u32).to_be_bytes());
+    for list in lists {
+        p.extend_from_slice(&(list.len().min(u16::MAX as usize) as u16).to_be_bytes());
+        for code in list.iter().take(u16::MAX as usize) {
+            p.extend_from_slice(&code.to_be_bytes());
+        }
+    }
+    p
 }
 
 /// Build the `hdlr` (Handler Reference Box) payload for an Apple
@@ -4028,26 +4248,43 @@ fn build_keys(items: &[MovMetaItem]) -> Vec<u8> {
 }
 
 /// Build the `ilst` (Metadata Item List Box) payload — one entry per
-/// item, each `[entry_size:4][key_index:4]` followed by a single
-/// `data` sub-atom `[size:4]['data'][type_code:4][locale:4][value]`.
+/// item, each `[entry_size:4][key_index:4]` followed by an optional
+/// `itif` (`[ver+flags:4][item_id:4]`), an optional `name`
+/// (`[ver+flags:4][utf8]`), and one `data` sub-atom
+/// `[size:4]['data'][type_code:4][locale:4][value]` per value.
 /// `key_index` is the 1-based index into the parallel `keys` list, so
 /// the read-side `parse_ilst` resolves it back to the same key.
-fn build_ilst(items: &[MovMetaItem]) -> Vec<u8> {
+fn build_ilst(items: &[MovMetaItem], lists: &MetaLocaleLists) -> Vec<u8> {
     let mut p = Vec::new();
     for (i, item) in items.iter().enumerate() {
-        // `data` sub-atom: [size:4]['data'][type:4][locale:4][value].
-        let data_size = (16 + item.value.len()) as u32;
-        let mut data = Vec::with_capacity(data_size as usize);
-        data.extend_from_slice(&data_size.to_be_bytes());
-        data.extend_from_slice(b"data");
-        data.extend_from_slice(&item.type_code.to_be_bytes());
-        data.extend_from_slice(&0u32.to_be_bytes()); // locale = 0
-        data.extend_from_slice(&item.value);
-        // ilst entry: [entry_size:4][key_index:4][data...].
-        let entry_size = (8 + data.len()) as u32;
-        p.extend_from_slice(&entry_size.to_be_bytes());
-        p.extend_from_slice(&((i as u32) + 1).to_be_bytes()); // 1-based key index
-        p.extend_from_slice(&data);
+        let mut body = Vec::new();
+        // Value atoms first. The spec is not self-consistent on child
+        // order (p. 138 lists item_info / name / data, Figure 3-4 draws
+        // itif / data / name), and a widely deployed black-box reader
+        // (`ffprobe`) drops an item whose first child is not `data`;
+        // leading with the values keeps every consumer happy.
+        for v in &item.values {
+            // `data` sub-atom: [type:4][locale:4][value].
+            let mut data = Vec::with_capacity(8 + v.bytes.len());
+            data.extend_from_slice(&v.type_code.to_be_bytes());
+            let locale =
+                ((lists.country_indicator(v) as u32) << 16) | lists.language_indicator(v) as u32;
+            data.extend_from_slice(&locale.to_be_bytes());
+            data.extend_from_slice(&v.bytes);
+            push_atom(&mut body, *b"data", &data);
+        }
+        if let Some(id) = item.item_id {
+            let mut itif = vec![0u8; 4];
+            itif.extend_from_slice(&id.to_be_bytes());
+            push_atom(&mut body, *b"itif", &itif);
+        }
+        if let Some(name) = &item.name {
+            let mut n = vec![0u8; 4];
+            n.extend_from_slice(name.as_bytes());
+            push_atom(&mut body, *b"name", &n);
+        }
+        // ilst entry: [entry_size:4][key_index:4][children...].
+        push_atom(&mut p, ((i as u32) + 1).to_be_bytes(), &body); // 1-based key index
     }
     p
 }

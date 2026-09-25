@@ -38,6 +38,15 @@ Decoding stays in codec crates: this crate calls
   type — `'roll'` / `'prol'` / `'rap '` (random-access), `'tele'`
   (temporal level), `'sap '` (Stream Access Point), `'rash'`
   (rate share), and `'alst'` (alternative startup sequence).
+- QuickTime Metadata atom (`moov/meta`, `trak/meta` — QTFF 2012
+  pp. 129 – 143) in full: `hdlr` (`mdta`), `mhdr` next-item-id, `ctry` /
+  `lang` localization list sets, `keys`, and every `ilst` item with its
+  `itif` id, `name`, and all locale-tagged `data` values
+  (`QtMetadata`; well-known types 0 – 28 decode; p. 140 locale
+  matching via `value_for_locale`). The flat `meta` list keeps the
+  first-value-per-key view. The muxer writes the same surface
+  (`MovMetaItem` values with countries / languages → derived `ctry` /
+  `lang` lists, `itif` + `mhdr`, `name`).
 - Per-sample iterator yielding `(index, file_offset, size, dts,
   duration, sample_description_id, keyframe)`, plus a random-access
   surface (`chunk_for_sample`, `sample_offset`, `chunk_byte_extent`, …)

@@ -24,6 +24,7 @@ use crate::metadata_sample::{
     parse_metadata_sample_entry, parse_stxt, parse_subtitle_sample_entry, MetadataSampleEntry,
     SimpleTextSampleEntry, SubtitleSampleEntry,
 };
+use crate::qt_metadata::QtMetadata;
 use crate::reference::DataReference;
 use crate::sample_table::{SampleEntry, SampleTable};
 use crate::text_sample::{
@@ -902,8 +903,13 @@ pub struct Track {
     /// from `stbl` or `trak` scope. Lets a player short-circuit the
     /// `ctts` scan when computing presentation-time bounds.
     pub cslg: Option<Cslg>,
-    /// Track-level Apple `meta` key-value pairs, when present.
+    /// Track-level Apple `meta` key-value pairs, when present — the
+    /// flat first-value-per-key view of [`Self::qt_metadata`].
     pub meta: Vec<MetaKeyValue>,
+    /// The full track-level QuickTime Metadata atom (QTFF 2012
+    /// pp. 129 – 143), when the track carries a QuickTime-shaped
+    /// `meta`.
+    pub qt_metadata: Option<QtMetadata>,
     /// Track-level `udta` user-data entries, when present. Same atom
     /// shape as the movie-level `udta` (©nam / ©cpy / `name` / etc.);
     /// see [`crate::user_data::parse_udta`] for the layout.

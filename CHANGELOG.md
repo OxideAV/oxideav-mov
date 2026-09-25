@@ -28,6 +28,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- QuickTime Metadata atom in full (QTFF 2012 pp. 129 – 143): new
+  `qt_metadata` module — `QtMetadata` (`hdlr` handler + name, `mhdr`
+  `nextItemID`, `ctry` / `lang` list sets, `keys`, `ilst` items with
+  `itif` id + flags, `name`, and every locale-tagged `data` value),
+  `WellKnownType` (Table 3-5, 0 – 28) with `MetaValue::decode`
+  (UTF-8 / UTF-16 / 1 – 8-byte BE ints / f32 / f64 / nested metadata
+  atom), `LocaleIndicator` (Table 3-3) with `countries_for` /
+  `languages_for` list resolution and the p. 140 `value_for_locale`
+  matching rule; surfaced as `MovDemuxer::qt_metadata` and
+  `Track::qt_metadata` while `meta` keeps the flat first-value view.
+  The `ctry` / `lang` worked examples (Table 3-1 / 3-2, `atom_size`
+  26) omit the version/flags word the field lists mandate; the parser
+  reads the normative full-atom layout and accepts the example
+  spelling when it accounts for the whole body.
+- Muxer: `MovMetaValue` (type + countries + languages + bytes),
+  `MovMetaItem::{from_value, with_locale, with_value, named,
+  with_item_id}`; `build_meta` derives de-duplicated `ctry` / `lang`
+  lists, emits `mhdr` when any item has an id, and `itif` / `name`
+  children — round-trips through the new parser. Each item leads
+  with its `data` atoms (the spec's p. 138 field list and Figure 3-4
+  disagree on child order; the ffprobe black box drops an item whose
+  first child is not `data`, so values go first and every item is
+  reported).
 - Probe / priority pin: the `mov` probe scores 0 for every HEIF-family
   `ftyp` brand (major or compatible) and `oxideav-core` resolves a full
   tie to the lower priority number, i.e. to `oxideav-heif`.
