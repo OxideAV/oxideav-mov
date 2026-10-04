@@ -3406,7 +3406,19 @@ fn build_streams(tracks: &[Track], resolver: &dyn CodecResolver) -> Vec<StreamIn
                 if let Some(desc) = t.sample_descriptions.first() {
                     params.channels = Some(desc.channels);
                     params.sample_rate = Some(desc.sample_rate);
-                    if !desc.extra.is_empty() {
+                    // MPEG-4 audio (`mp4a`, QTFF p. 185 – 186): the
+                    // decoder configuration is the esds
+                    // DecoderSpecificInfo (the AudioSpecificConfig),
+                    // carried directly or inside the `wave` extension —
+                    // not the raw extension-area atoms.
+                    let dsi = desc
+                        .esds
+                        .as_deref()
+                        .or_else(|| desc.si_decompression_param.as_ref().and_then(|w| w.esds()))
+                        .and_then(crate::track::esds_decoder_specific_info);
+                    if let Some(dsi) = dsi {
+                        params.extradata = dsi;
+                    } else if !desc.extra.is_empty() {
                         params.extradata = desc.extra.clone();
                     }
                 }

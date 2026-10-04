@@ -493,6 +493,68 @@ pub fn parse_esds(payload: &[u8]) -> Result<Vec<u8>> {
     Ok(payload[4..].to_vec())
 }
 
+/// Extract the `DecoderSpecificInfo` (ISO/IEC 14496-1 §7.2.6.7, tag
+/// `0x05`) from the elementary-stream-descriptor bytes an `esds` atom
+/// carries (the [`parse_esds`] output): walk the `ES_Descriptor`
+/// (tag `0x03`, §7.2.6.5 — skipping the optional dependsOn / URL /
+/// OCR fields its flags announce) into its `DecoderConfigDescriptor`
+/// (tag `0x04`, §7.2.6.6) and return the DSI payload. For MPEG-4 Audio
+/// this is the ISO/IEC 14496-3 §1.6.2.1 `AudioSpecificConfig` the
+/// decoder needs as extradata. `None` when the structure does not
+/// parse or carries no DSI.
+pub fn esds_decoder_specific_info(descriptor: &[u8]) -> Option<Vec<u8>> {
+    /// §8.3.3 expandable-class size: up to four 7-bit groups.
+    fn header(buf: &[u8], pos: usize) -> Option<(u8, usize, usize)> {
+        let tag = *buf.get(pos)?;
+        let mut len = 0usize;
+        let mut i = pos + 1;
+        for _ in 0..4 {
+            let b = *buf.get(i)?;
+            i += 1;
+            len = (len << 7) | usize::from(b & 0x7F);
+            if b & 0x80 == 0 {
+                return Some((tag, i, len));
+            }
+        }
+        None
+    }
+    let (tag, body, len) = header(descriptor, 0)?;
+    if tag != 0x03 {
+        return None;
+    }
+    let end = body.checked_add(len)?.min(descriptor.len());
+    let flags = *descriptor.get(body + 2)?;
+    let mut pos = body + 3;
+    if flags & 0x80 != 0 {
+        pos += 2; // dependsOn_ES_ID
+    }
+    if flags & 0x40 != 0 {
+        pos += 1 + usize::from(*descriptor.get(pos)?); // URLlength + URLstring
+    }
+    if flags & 0x20 != 0 {
+        pos += 2; // OCR_ES_Id
+    }
+    while pos < end {
+        let (t, b, l) = header(descriptor, pos)?;
+        if t == 0x04 {
+            // objectTypeIndication(8) streamType/upStream/reserved(8)
+            // bufferSizeDB(24) maxBitrate(32) avgBitrate(32) = 13 bytes.
+            let dcd_end = b.checked_add(l)?.min(end);
+            let mut p = b + 13;
+            while p < dcd_end {
+                let (t2, b2, l2) = header(descriptor, p)?;
+                if t2 == 0x05 {
+                    return descriptor.get(b2..b2.checked_add(l2)?).map(<[u8]>::to_vec);
+                }
+                p = b2.checked_add(l2)?;
+            }
+            return None;
+        }
+        pos = b.checked_add(l)?;
+    }
+    None
+}
+
 /// Serialise a framed `esds` atom from raw elementary-stream-
 /// descriptor bytes — the exact inverse of [`parse_esds`], suitable
 /// for a muxer track's `extra_stsd_atoms`.

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `mp4a` (AAC) tracks surfaced the raw sound-description extension atoms
+  (`wave` / `esds` / Terminator) as `extradata`, which the AAC decoder
+  rejected (`audioObjectType 0`). The stream extradata is now the `esds`
+  DecoderSpecificInfo — the AudioSpecificConfig — whether the `esds`
+  sits directly in the sound description or inside `wave`. New
+  `esds_decoder_specific_info` helper (ISO/IEC 14496-1 §7.2.6.5–7).
+
 ### Removed
 
 - The HEIF / HEIC / MIAF layer: `bmff_meta` (item model — `pitm` /
