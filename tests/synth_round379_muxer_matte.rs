@@ -48,7 +48,7 @@ fn image_description(fourcc: &[u8; 4], extra: usize) -> Vec<u8> {
     out.extend_from_slice(fourcc);
     out.extend_from_slice(&[0u8; 6]);
     out.extend_from_slice(&1u16.to_be_bytes());
-    out.extend(std::iter::repeat(0u8).take(extra));
+    out.extend(std::iter::repeat_n(0u8, extra));
     out
 }
 

@@ -31,8 +31,8 @@ use std::io::Cursor;
 
 use oxideav_core::{Demuxer, ReadSeek};
 use oxideav_mov::{
-    decode_rap, decode_roll, decode_sap, decode_tele, parse_sgpd, MovDemuxer, MovMuxer, MuxSample,
-    MuxTrackKind, SampleGroupDescriptionWrite, SampleToGroupWrite,
+    MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, SampleGroupDescriptionWrite, SampleToGroupWrite,
+    decode_rap, decode_roll, decode_sap, decode_tele, parse_sgpd,
 };
 
 /// Build an N-sample audio MOV with a sample-to-group assignment plus

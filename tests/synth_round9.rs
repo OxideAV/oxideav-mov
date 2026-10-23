@@ -12,7 +12,7 @@ use std::io::{Cursor, Write};
 
 use common::*;
 use oxideav_core::ReadSeek;
-use oxideav_mov::{open_file_url, MovDemuxer};
+use oxideav_mov::{MovDemuxer, open_file_url};
 
 // The three integration tests below construct `file://` URLs from
 // real filesystem paths. On Windows those paths use backslashes and

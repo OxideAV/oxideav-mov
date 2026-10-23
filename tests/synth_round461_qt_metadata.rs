@@ -23,9 +23,9 @@ use std::process::Command;
 
 use oxideav_core::ReadSeek;
 use oxideav_mov::{
-    DecodedValue, LocaleIndicator, MovDemuxer, MovMetaItem, MovMetaValue, MovMetadata, MovMuxer,
-    MuxSample, MuxTrackKind, QtMetadata, WellKnownType, META_NAMESPACE_MDTA,
-    META_TYPE_BE_UNSIGNED_INT, META_TYPE_UTF8,
+    DecodedValue, LocaleIndicator, META_NAMESPACE_MDTA, META_TYPE_BE_UNSIGNED_INT, META_TYPE_UTF8,
+    MovDemuxer, MovMetaItem, MovMetaValue, MovMetadata, MovMuxer, MuxSample, MuxTrackKind,
+    QtMetadata, WellKnownType,
 };
 
 fn one_audio_track(m: &mut MovMuxer) -> u32 {

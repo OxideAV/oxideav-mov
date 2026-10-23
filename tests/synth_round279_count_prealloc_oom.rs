@@ -20,8 +20,8 @@
 use std::io::Cursor;
 
 use oxideav_core::ReadSeek;
-use oxideav_mov::media_meta::parse_keys;
 use oxideav_mov::MovDemuxer;
+use oxideav_mov::media_meta::parse_keys;
 
 /// The verbatim libFuzzer reproducer (82 bytes).
 const CRASH: &[u8] = &[

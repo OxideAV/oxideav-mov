@@ -13,7 +13,7 @@ use std::io::Cursor;
 
 use common::*;
 use oxideav_core::ReadSeek;
-use oxideav_mov::{parse_text_sample_styles, MovDemuxer, MAX_ALIAS_DEPTH};
+use oxideav_mov::{MAX_ALIAS_DEPTH, MovDemuxer, parse_text_sample_styles};
 
 // ─────────────────────── Multi-hop alias chain ───────────────────────
 

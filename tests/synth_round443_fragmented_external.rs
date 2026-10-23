@@ -32,8 +32,8 @@ use std::io::{Cursor, Seek, SeekFrom};
 
 use oxideav_core::{Error, ReadSeek};
 use oxideav_mov::{
-    parse_moof, read_atom_header, DataReference, DataReferenceWrite, ExternalSampleLocation,
-    FragmentationMode, MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, TrafAddressing, TrafRecord,
+    DataReference, DataReferenceWrite, ExternalSampleLocation, FragmentationMode, MovDemuxer,
+    MovMuxer, MuxSample, MuxTrackKind, TrafAddressing, TrafRecord, parse_moof, read_atom_header,
 };
 
 /// Sidecar "external file": 6 bytes of unrelated preamble, then four
@@ -217,10 +217,12 @@ fn fragmented_external_round_trips_through_opener() {
         }
     }
     assert_eq!(video.len(), 4);
-    assert!(video
-        .iter()
-        .enumerate()
-        .all(|(i, p)| *p == vec![0x10 + i as u8; 12]));
+    assert!(
+        video
+            .iter()
+            .enumerate()
+            .all(|(i, p)| *p == vec![0x10 + i as u8; 12])
+    );
     assert_eq!(audio, payloads);
     // DTS keeps climbing across fragments (running cursor).
     assert_eq!(audio_dts, vec![0, 1024, 2048, 3072]);
@@ -453,10 +455,12 @@ fn patched_fragmented(
 #[test]
 fn default_base_is_moof_with_external_dref_is_refused() {
     // Sanity: unpatched opens fine.
-    assert!(MovDemuxer::open(
-        Box::new(Cursor::new(patched_fragmented(1, None, None))) as Box<dyn ReadSeek>
-    )
-    .is_ok());
+    assert!(
+        MovDemuxer::open(
+            Box::new(Cursor::new(patched_fragmented(1, None, None))) as Box<dyn ReadSeek>
+        )
+        .is_ok()
+    );
     // dri → the non-self Url entry while the tfhd still says
     // default-base-is-moof: §8.8.7.1 anchors moof-relative offsets at
     // a byte position of the fragment's own file.
@@ -510,10 +514,12 @@ fn inheriting_traf_between_local_trafs_is_still_legal() {
     // trun.data_offset values were authored moof-relative, so decoded
     // *payloads* are not asserted here; this pins that the mode
     // check itself accepts a legal all-local inheritance chain.)
-    assert!(MovDemuxer::open(
-        Box::new(Cursor::new(patched_fragmented(2, None, Some(2)))) as Box<dyn ReadSeek>
-    )
-    .is_ok());
+    assert!(
+        MovDemuxer::open(
+            Box::new(Cursor::new(patched_fragmented(2, None, Some(2)))) as Box<dyn ReadSeek>
+        )
+        .is_ok()
+    );
 }
 
 // ───────── hand-built moof: inherited chaining in the external file ─────────

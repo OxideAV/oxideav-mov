@@ -233,7 +233,7 @@ fn build_two_fragment_with_traf_sample_aux() -> Vec<u8> {
 
     let mut mdat1 = Vec::new();
     for (i, &sz) in sizes1.iter().enumerate() {
-        mdat1.extend(std::iter::repeat(b'A' + i as u8).take(sz as usize));
+        mdat1.extend(std::iter::repeat_n(b'A' + i as u8, sz as usize));
     }
     push_atom(&mut out, *b"mdat", &mdat1);
 
@@ -270,7 +270,7 @@ fn build_two_fragment_with_traf_sample_aux() -> Vec<u8> {
 
     let mut mdat2 = Vec::new();
     for (i, &sz) in sizes2.iter().enumerate() {
-        mdat2.extend(std::iter::repeat(b'X' + i as u8).take(sz as usize));
+        mdat2.extend(std::iter::repeat_n(b'X' + i as u8, sz as usize));
     }
     push_atom(&mut out, *b"mdat", &mdat2);
 
@@ -396,7 +396,7 @@ fn fragment_sample_aux_empty_when_no_traf_boxes() {
 
     let mut mdat = Vec::new();
     for (i, &sz) in sizes.iter().enumerate() {
-        mdat.extend(std::iter::repeat(b'A' + i as u8).take(sz as usize));
+        mdat.extend(std::iter::repeat_n(b'A' + i as u8, sz as usize));
     }
     push_atom(&mut out, *b"mdat", &mdat);
 

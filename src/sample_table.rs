@@ -868,10 +868,10 @@ pub fn parse_stsc(payload: &[u8]) -> Result<Vec<StscEntry>> {
             ));
         }
     }
-    if let Some(first) = out.first() {
-        if first.first_chunk != 1 {
-            return Err(Error::invalid("MOV: stsc first entry's first_chunk != 1"));
-        }
+    if let Some(first) = out.first()
+        && first.first_chunk != 1
+    {
+        return Err(Error::invalid("MOV: stsc first entry's first_chunk != 1"));
     }
     Ok(out)
 }
@@ -1488,7 +1488,7 @@ impl Iterator for SampleIter<'_> {
             None => {
                 return Some(Err(Error::invalid(
                     "MOV: sample index past end of stsz table",
-                )))
+                )));
             }
         };
         // Verify chunk pointer is valid.

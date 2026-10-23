@@ -29,9 +29,9 @@ use std::io::Cursor;
 use common::*;
 use oxideav_core::ReadSeek;
 use oxideav_mov::{
-    InputTypeKind, MovDemuxer, INPUT_TYPE_ATOM, K_TRACK_MODIFIER_OBJECT_MATRIX,
-    K_TRACK_MODIFIER_TYPE_BALANCE, K_TRACK_MODIFIER_TYPE_MATRIX, K_TRACK_MODIFIER_TYPE_VOLUME,
-    OBJECT_ID_ATOM, TRACK_INPUT_ATOM,
+    INPUT_TYPE_ATOM, InputTypeKind, K_TRACK_MODIFIER_OBJECT_MATRIX, K_TRACK_MODIFIER_TYPE_BALANCE,
+    K_TRACK_MODIFIER_TYPE_MATRIX, K_TRACK_MODIFIER_TYPE_VOLUME, MovDemuxer, OBJECT_ID_ATOM,
+    TRACK_INPUT_ATOM,
 };
 
 fn classic_atom(fourcc: [u8; 4], body: &[u8]) -> Vec<u8> {

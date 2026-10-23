@@ -10,8 +10,8 @@ use std::io::Cursor;
 
 use oxideav_core::ReadSeek;
 use oxideav_mov::{
-    Load, MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, LOAD_HINT_DOUBLE_BUFFER,
-    LOAD_HINT_HIGH_QUALITY, LOAD_PRELOAD_DURATION_TO_END, LOAD_PRELOAD_IF_ENABLED,
+    LOAD_HINT_DOUBLE_BUFFER, LOAD_HINT_HIGH_QUALITY, LOAD_PRELOAD_DURATION_TO_END,
+    LOAD_PRELOAD_IF_ENABLED, Load, MovDemuxer, MovMuxer, MuxSample, MuxTrackKind,
 };
 
 fn open(bytes: Vec<u8>) -> MovDemuxer {

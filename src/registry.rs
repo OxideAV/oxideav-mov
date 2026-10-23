@@ -187,7 +187,7 @@ pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<
                 return Err(Error::unsupported(format!(
                     "MOV muxer: stream {} has media type {other:?}; only video and audio are accepted on the registry path",
                     s.index
-                )))
+                )));
             }
         };
         tracks.push(PendingTrack {

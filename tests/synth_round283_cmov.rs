@@ -22,7 +22,7 @@ use std::io::Cursor;
 
 use common::*;
 use oxideav_core::{Demuxer, ReadSeek};
-use oxideav_mov::{compress_movie_resource, Cmov, Cmvd, Dcom, MovDemuxer, DCOM_ALG_ZLIB};
+use oxideav_mov::{Cmov, Cmvd, DCOM_ALG_ZLIB, Dcom, MovDemuxer, compress_movie_resource};
 
 /// Build the uncompressed movie resource — a complete `moov` atom
 /// (header included, per QTFF p. 30 the decompressed contents are the

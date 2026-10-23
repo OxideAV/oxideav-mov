@@ -25,8 +25,8 @@ mod common;
 use std::io::Cursor;
 
 use common::*;
-use oxideav_core::{ContainerRegistry, ProbeData, ReadSeek, DEFAULT_PRIORITY};
-use oxideav_mov::{demuxer, MovDemuxer};
+use oxideav_core::{ContainerRegistry, DEFAULT_PRIORITY, ProbeData, ReadSeek};
+use oxideav_mov::{MovDemuxer, demuxer};
 
 /// HEIF / MIAF / AVIF brands that `oxideav-heif` owns (ISO/IEC
 /// 23008-12 §10 brand registry, ISO/IEC 23000-22 §7.2, AVIF §3).

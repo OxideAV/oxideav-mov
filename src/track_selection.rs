@@ -225,7 +225,7 @@ pub fn parse_tsel(payload: &[u8]) -> Result<TrackSelection> {
     // payload[1..4] = flags (ignored).
     let switch_group = i32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
     let tail = &payload[8..];
-    if tail.len() % 4 != 0 {
+    if !tail.len().is_multiple_of(4) {
         return Err(Error::invalid(format!(
             "MOV: tsel attribute-list tail {} bytes not multiple of 4",
             tail.len()

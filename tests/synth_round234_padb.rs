@@ -20,7 +20,7 @@ use std::io::Cursor;
 
 use common::*;
 use oxideav_core::ReadSeek;
-use oxideav_mov::{parse_padb, MovDemuxer};
+use oxideav_mov::{MovDemuxer, parse_padb};
 
 /// Build a `padb` body for the given per-sample `pad` values. Layout
 /// per §8.7.6.2: `[version:1][flags:3][sample_count:4]` then
@@ -262,7 +262,7 @@ fn parse_padb_truncated_table_errors() {
     let mut payload = Vec::new();
     payload.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
     payload.extend_from_slice(&4u32.to_be_bytes()); // claim 4 samples
-                                                    // no packed bytes follow
+    // no packed bytes follow
     let err = parse_padb(&payload).unwrap_err();
     assert!(
         format!("{err}").contains("truncated"),

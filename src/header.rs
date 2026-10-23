@@ -212,11 +212,11 @@ pub fn parse_ftyp(payload: &[u8]) -> Result<Ftyp> {
     let minor = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
 
     let rest = &payload[8..];
-    if rest.len() % 4 != 0 {
+    if !rest.len().is_multiple_of(4) {
         return Err(Error::invalid("MOV: ftyp compatible-brands not 4-aligned"));
     }
     let mut brands = Vec::with_capacity(rest.len() / 4);
-    for chunk in rest.chunks_exact(4) {
+    for chunk in rest.as_chunks::<4>().0 {
         let mut b = [0u8; 4];
         b.copy_from_slice(chunk);
         brands.push(b);
@@ -911,8 +911,8 @@ mod tests {
         // Build a synthetic v0 mvhd payload (100 bytes).
         let mut p = vec![0u8; 100];
         p[0] = 0; // version
-                  // flags = 0
-                  // creation_time @ 4..8 = 1
+        // flags = 0
+        // creation_time @ 4..8 = 1
         p[7] = 1;
         // modification_time @ 8..12 = 2
         p[11] = 2;
@@ -950,8 +950,8 @@ mod tests {
         p[40..44].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // b
         p[48..52].copy_from_slice(&(-0x0001_0000i32).to_be_bytes()); // c
         p[68..72].copy_from_slice(&0x4000_0000u32.to_be_bytes()); // w
-                                                                  // preview_time @ 72, preview_duration @ 76, poster_time @ 80,
-                                                                  // selection_time @ 84, selection_duration @ 88, current @ 92.
+        // preview_time @ 72, preview_duration @ 76, poster_time @ 80,
+        // selection_time @ 84, selection_duration @ 88, current @ 92.
         p[72..76].copy_from_slice(&120u32.to_be_bytes());
         p[76..80].copy_from_slice(&240u32.to_be_bytes());
         p[80..84].copy_from_slice(&360u32.to_be_bytes());

@@ -2853,7 +2853,7 @@ impl MovMuxer {
                 pads.len()
             )));
         }
-        if let Some((i, &v)) = pads.iter().enumerate().find(|(_, &v)| v > 7) {
+        if let Some((i, &v)) = pads.iter().enumerate().find(|&(_, &v)| v > 7) {
             return Err(Error::invalid(format!(
                 "MOV muxer: padb pad value {v} at sample {i} exceeds the 3-bit field (max 7)"
             )));
@@ -3814,12 +3814,12 @@ impl MovMuxer {
             FragmentationMode::ByDuration(0) => {
                 return Err(Error::invalid(
                     "MOV muxer: ByDuration threshold must be > 0",
-                ))
+                ));
             }
             FragmentationMode::ByFrameCount(0) => {
                 return Err(Error::invalid(
                     "MOV muxer: ByFrameCount threshold must be > 0",
-                ))
+                ));
             }
             _ => {}
         }
@@ -4718,7 +4718,7 @@ fn build_hdlr(t: &TrackWrite) -> Vec<u8> {
     p.extend_from_slice(subtype);
     p.extend_from_slice(&[0u8; 12]); // manuf + flags + flags_mask
     p.push(0); // counted-Pascal name length 0 (BMFF readers also accept
-               // this as a NUL-terminated empty UTF-8 string)
+    // this as a NUL-terminated empty UTF-8 string)
     p
 }
 
@@ -5112,7 +5112,7 @@ fn build_sgpd(d: &SampleGroupDescriptionWrite) -> Vec<u8> {
 fn csgp_min_size_code(max_val: u32) -> (u32, u32) {
     for code in 0u32..=2 {
         let width = 4u32 << code; // 4, 8, 16
-                                  // The widest representable value at `width` bits.
+        // The widest representable value at `width` bits.
         let cap: u64 = (1u64 << width) - 1;
         if (max_val as u64) <= cap {
             return (code, width);
@@ -6169,11 +6169,7 @@ fn slice_fragments(tracks: &[TrackWrite], mode: FragmentationMode) -> Vec<Vec<Fr
                 }
                 let lo = s_start.unwrap_or(t.samples.len());
                 let hi = s_end.unwrap_or(t.samples.len());
-                if lo <= hi {
-                    (lo, hi)
-                } else {
-                    (0, 0)
-                }
+                if lo <= hi { (lo, hi) } else { (0, 0) }
             };
             let run_slice = &t.samples[lo..hi];
             let (aux, aux_info_type, aux_info_type_parameter) = match &t.sample_aux {
@@ -7238,9 +7234,10 @@ mod tests {
     #[test]
     fn visual_extensions_unknown_track_id_errors() {
         let mut m = MovMuxer::new();
-        assert!(m
-            .set_visual_extensions(99, VisualExtensions::default())
-            .is_err());
+        assert!(
+            m.set_visual_extensions(99, VisualExtensions::default())
+                .is_err()
+        );
     }
 
     #[test]
@@ -7310,8 +7307,8 @@ mod tests {
             &[],
         );
         // -2 is not the empty-edit sentinel ⇒ rejected.
-        assert!(m
-            .set_edit_list(
+        assert!(
+            m.set_edit_list(
                 1,
                 &[MuxEdit {
                     track_duration: 100,
@@ -7319,7 +7316,8 @@ mod tests {
                     media_rate: 0x0001_0000,
                 }]
             )
-            .is_err());
+            .is_err()
+        );
         // -1 (empty edit) is accepted.
         assert!(m.set_edit_list(1, &[MuxEdit::empty(100)]).is_ok());
         // Empty slice clears the list.
@@ -7845,9 +7843,11 @@ mod tests {
     #[test]
     fn compress_movie_resource_flag_defaults_off() {
         assert!(!MovMuxer::new().compresses_movie_resource());
-        assert!(MovMuxer::new()
-            .with_compressed_movie_resource(true)
-            .compresses_movie_resource());
+        assert!(
+            MovMuxer::new()
+                .with_compressed_movie_resource(true)
+                .compresses_movie_resource()
+        );
     }
 
     #[test]
@@ -8277,19 +8277,21 @@ mod tests {
         m.set_external_media(a, 1, &[ExternalSampleLocation { offset: 0, size: 4 }])
             .unwrap();
         // Replacing the table so index 1 becomes the SelfRef must fail.
-        assert!(m
-            .set_data_references(
+        assert!(
+            m.set_data_references(
                 a,
                 &[
                     DataReferenceWrite::SelfRef,
                     DataReferenceWrite::Url("media.bin".into())
                 ]
             )
-            .is_err());
+            .is_err()
+        );
         // A replacement keeping index 1 external is fine.
-        assert!(m
-            .set_data_references(a, &[DataReferenceWrite::Url("other.bin".into())])
-            .is_ok());
+        assert!(
+            m.set_data_references(a, &[DataReferenceWrite::Url("other.bin".into())])
+                .is_ok()
+        );
     }
 
     #[test]

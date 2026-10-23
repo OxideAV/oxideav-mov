@@ -63,7 +63,7 @@ mod common;
 use std::io::Cursor;
 
 use oxideav_core::ReadSeek;
-use oxideav_mov::{read_atom_header, MovDemuxer};
+use oxideav_mov::{MovDemuxer, read_atom_header};
 
 /// The exact 91-byte input libFuzzer produced. Encoded as a Rust
 /// literal so the regression travels with the test rather than as

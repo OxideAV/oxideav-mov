@@ -10,27 +10,27 @@
 
 use crate::clip::Clipping;
 use crate::edit::{
-    media_pts_to_movie_pts, movie_pts_to_media_pts, resolve_edit_segments, EditList, EditSegment,
+    EditList, EditSegment, media_pts_to_movie_pts, movie_pts_to_media_pts, resolve_edit_segments,
 };
 use crate::gmhd::Gmhd;
 use crate::header::{Hdlr, Hmhd, Mdhd, MediaHeaderKind, Tkhd};
 use crate::kind::KindEntry;
 use crate::matte::Matte;
 use crate::media_meta::{
-    parse_chan, parse_clap, parse_colr, parse_fiel, parse_mjht, parse_mjqt, parse_pasp, Chan, Clap,
-    ColorParameters, Cslg, Fiel, MetaKeyValue, Mjht, Mjqt, Pasp, Tapt,
+    Chan, Clap, ColorParameters, Cslg, Fiel, MetaKeyValue, Mjht, Mjqt, Pasp, Tapt, parse_chan,
+    parse_clap, parse_colr, parse_fiel, parse_mjht, parse_mjqt, parse_pasp,
 };
 use crate::metadata_sample::{
-    parse_metadata_sample_entry, parse_stxt, parse_subtitle_sample_entry, MetadataSampleEntry,
-    SimpleTextSampleEntry, SubtitleSampleEntry,
+    MetadataSampleEntry, SimpleTextSampleEntry, SubtitleSampleEntry, parse_metadata_sample_entry,
+    parse_stxt, parse_subtitle_sample_entry,
 };
 use crate::qt_metadata::QtMetadata;
 use crate::reference::DataReference;
 use crate::sample_table::{SampleEntry, SampleTable};
 use crate::text_sample::{
-    parse_text_sample_description, TextSampleDescription, TEXT_SAMPLE_DESC_FIXED_LEN,
+    TEXT_SAMPLE_DESC_FIXED_LEN, TextSampleDescription, parse_text_sample_description,
 };
-use crate::timecode::{parse_tmcd_sample_description, Tmcd};
+use crate::timecode::{Tmcd, parse_tmcd_sample_description};
 use crate::track_load::Load;
 use crate::track_selection::TrackSelection;
 use crate::user_data::UserDataEntry;
@@ -2299,7 +2299,7 @@ mod tests {
         body[8..10].copy_from_slice(&3u16.to_be_bytes()); // always3
         body[10..12].copy_from_slice(&16u16.to_be_bytes()); // always16
         body[12..14].copy_from_slice(&(-2i16).to_be_bytes()); // alwaysMinus2
-                                                              // always0 @ 14..16 left zero
+        // always0 @ 14..16 left zero
         body[16..20].copy_from_slice(&65536u32.to_be_bytes()); // always65536
         body[20..24].copy_from_slice(&size_of_struct_only.to_be_bytes());
         body[24..32].copy_from_slice(&rate.to_be_bytes());

@@ -83,7 +83,7 @@ use oxideav_core::{Error, Result};
 #[cfg(not(feature = "registry"))]
 use crate::standalone::{Error, Result};
 
-use crate::track_selection::{ts_attribute_role, TsAttributeRole};
+use crate::track_selection::{TsAttributeRole, ts_attribute_role};
 
 /// Parsed `stri` Sub Track Information box (ISO/IEC 14496-12 §8.14.4).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -205,7 +205,7 @@ pub fn parse_stri(payload: &[u8]) -> Result<SubTrackInformation> {
     let alternate_group = i16::from_be_bytes([payload[6], payload[7]]);
     let sub_track_id = u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]]);
     let tail = &payload[12..];
-    if tail.len() % 4 != 0 {
+    if !tail.len().is_multiple_of(4) {
         return Err(Error::invalid(format!(
             "MOV: stri attribute-list tail {} bytes not multiple of 4",
             tail.len()

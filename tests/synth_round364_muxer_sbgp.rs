@@ -21,8 +21,8 @@ use std::io::Cursor;
 
 use oxideav_core::{Demuxer, ReadSeek};
 use oxideav_mov::{
-    parse_sbgp, MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, SampleGroupBoxForm,
-    SampleToGroupWrite,
+    MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, SampleGroupBoxForm, SampleToGroupWrite,
+    parse_sbgp,
 };
 
 fn build_audio_mov_classic(

@@ -20,8 +20,8 @@ use std::io::Cursor;
 
 use oxideav_core::{Demuxer, ReadSeek};
 use oxideav_mov::{
-    iso_language_tag, MovDemuxer, MovMetadata, MovMuxer, MuxSample, MuxTrackKind, UserDataKind,
-    UTF8_INTL_TEXT_FLAG,
+    MovDemuxer, MovMetadata, MovMuxer, MuxSample, MuxTrackKind, UTF8_INTL_TEXT_FLAG, UserDataKind,
+    iso_language_tag,
 };
 
 /// One single-sample audio track, no metadata yet.

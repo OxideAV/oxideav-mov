@@ -175,14 +175,16 @@ fn udta_dref_and_rotation_round_trip() {
 
     // 3. Movie-level udta: 3 entries (©nam, ©cpy, name).
     assert_eq!(d.user_data.len(), 3);
-    assert!(d
-        .user_data
-        .iter()
-        .any(|e| e.fourcc == [0xA9, b'n', b'a', b'm'] && e.as_str() == Some("Test Movie")));
-    assert!(d
-        .user_data
-        .iter()
-        .any(|e| e.fourcc == [0xA9, b'c', b'p', b'y'] && e.as_str() == Some("(c) 2026")));
+    assert!(
+        d.user_data
+            .iter()
+            .any(|e| e.fourcc == [0xA9, b'n', b'a', b'm'] && e.as_str() == Some("Test Movie"))
+    );
+    assert!(
+        d.user_data
+            .iter()
+            .any(|e| e.fourcc == [0xA9, b'c', b'p', b'y'] && e.as_str() == Some("(c) 2026"))
+    );
     let name_entry = d
         .user_data
         .iter()

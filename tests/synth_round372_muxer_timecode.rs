@@ -17,8 +17,8 @@ use std::io::Cursor;
 
 use oxideav_core::ReadSeek;
 use oxideav_mov::{
-    MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, Tcmi, TimecodeRecord, TimecodeSample, Tmcd,
-    TrackReference, TMCD_FLAG_COUNTER, TMCD_FLAG_DROP_FRAME,
+    MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, TMCD_FLAG_COUNTER, TMCD_FLAG_DROP_FRAME, Tcmi,
+    TimecodeRecord, TimecodeSample, Tmcd, TrackReference,
 };
 
 fn record_sample(rec: TimecodeRecord) -> Vec<MuxSample> {

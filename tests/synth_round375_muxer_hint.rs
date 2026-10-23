@@ -130,9 +130,10 @@ fn hint_track_references_media_track_via_tref_hint() {
     assert_eq!(d.tracks.len(), 2);
     assert!(d.tracks[1].hdlr.is_hint());
     let refs = &d.tracks[1].references;
-    assert!(refs
-        .iter()
-        .any(|r| r.fourcc == *b"hint" && r.track_ids.contains(&vid)));
+    assert!(
+        refs.iter()
+            .any(|r| r.fourcc == *b"hint" && r.track_ids.contains(&vid))
+    );
 }
 
 #[test]

@@ -235,11 +235,13 @@ impl MetaValue {
         Some(match self.well_known_type()? {
             W::Utf8 | W::Utf8Sort => DecodedValue::Text(std::str::from_utf8(v).ok()?.to_owned()),
             W::Utf16 | W::Utf16Sort => {
-                if v.len() % 2 != 0 {
+                if !v.len().is_multiple_of(2) {
                     return None;
                 }
                 let units: Vec<u16> = v
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| u16::from_be_bytes([c[0], c[1]]))
                     .collect();
                 DecodedValue::Text(String::from_utf16(&units).ok()?)
@@ -577,10 +579,10 @@ fn parse_locale_lists(body: &[u8], what: &str) -> Result<Vec<Vec<u16>>> {
     // The worked examples (Table 3-1 / Table 3-2, `atom_size` 26)
     // omit the version/flags word the field lists mandate. Accept
     // that spelling only when it accounts for every byte of the body.
-    if let Ok((lists, consumed)) = parse_locale_lists_from(body, 0, what) {
-        if consumed == body.len() {
-            return Ok(lists);
-        }
+    if let Ok((lists, consumed)) = parse_locale_lists_from(body, 0, what)
+        && consumed == body.len()
+    {
+        return Ok(lists);
     }
     // Neither spelling fits: report against the normative one.
     parse_locale_lists_from(body, 4, what).map(|(l, _)| l)

@@ -177,7 +177,7 @@ pub fn parse_pdin(payload: &[u8]) -> Result<Pdin> {
         )));
     }
     let body = &payload[4..];
-    if body.len() % 8 != 0 {
+    if !body.len().is_multiple_of(8) {
         return Err(Error::invalid(format!(
             "MOV: pdin body {} bytes is not a multiple of 8",
             body.len()

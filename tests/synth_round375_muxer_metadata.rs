@@ -239,9 +239,10 @@ fn metadata_track_with_cdsc_reference_from_video() {
     assert!(d.tracks[1].hdlr.is_metadata());
     // The video track's cdsc reference resolves to the metadata track.
     let refs = &d.tracks[0].references;
-    assert!(refs
-        .iter()
-        .any(|r| r.fourcc == *b"cdsc" && r.track_ids.contains(&meta)));
+    assert!(
+        refs.iter()
+            .any(|r| r.fourcc == *b"cdsc" && r.track_ids.contains(&meta))
+    );
 }
 
 #[test]

@@ -23,8 +23,8 @@ use std::io::Cursor;
 use common::*;
 use oxideav_core::ReadSeek;
 use oxideav_mov::{
-    MovDemuxer, LOAD_HINT_DOUBLE_BUFFER, LOAD_HINT_HIGH_QUALITY, LOAD_PRELOAD_ALWAYS,
-    LOAD_PRELOAD_DURATION_TO_END, LOAD_PRELOAD_IF_ENABLED,
+    LOAD_HINT_DOUBLE_BUFFER, LOAD_HINT_HIGH_QUALITY, LOAD_PRELOAD_ALWAYS,
+    LOAD_PRELOAD_DURATION_TO_END, LOAD_PRELOAD_IF_ENABLED, MovDemuxer,
 };
 
 /// Build a 16-byte `load` payload — QTFF Figure 2-12 (p. 48).

@@ -28,7 +28,7 @@ use std::io::Cursor;
 
 use common::*;
 use oxideav_core::ReadSeek;
-use oxideav_mov::{MovDemuxer, TrackGroupTypeEntry, TRACK_GROUP_TYPE_MSRC};
+use oxideav_mov::{MovDemuxer, TRACK_GROUP_TYPE_MSRC, TrackGroupTypeEntry};
 
 /// Build a track-group-type FullBox body — `[ver:1][flags:3][id:4][tail]`.
 /// The body is what goes *inside* the per-child atom (size + FourCC

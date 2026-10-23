@@ -221,7 +221,7 @@ fn build_single_fragment_fmp4() -> (Vec<u8>, Vec<u32>) {
     // --- mdat ---
     let mut mdat_payload = Vec::new();
     for (i, &sz) in sizes.iter().enumerate() {
-        mdat_payload.extend(std::iter::repeat(b'A' + i as u8).take(sz as usize));
+        mdat_payload.extend(std::iter::repeat_n(b'A' + i as u8, sz as usize));
     }
     push_atom(&mut out, *b"mdat", &mdat_payload);
 
@@ -345,7 +345,7 @@ fn build_two_fragment_fmp4() -> (Vec<u8>, Vec<u32>) {
     push_atom(&mut out, *b"moof", &moof);
     let mut mdat_payload = Vec::new();
     for (i, &sz) in frag1_sizes.iter().enumerate() {
-        mdat_payload.extend(std::iter::repeat(b'A' + i as u8).take(sz as usize));
+        mdat_payload.extend(std::iter::repeat_n(b'A' + i as u8, sz as usize));
     }
     push_atom(&mut out, *b"mdat", &mdat_payload);
     let _ = frag1_moof_start;
@@ -380,7 +380,7 @@ fn build_two_fragment_fmp4() -> (Vec<u8>, Vec<u32>) {
     push_atom(&mut out, *b"moof", &moof2);
     let mut mdat2_payload = Vec::new();
     for (i, &sz) in frag2_sizes.iter().enumerate() {
-        mdat2_payload.extend(std::iter::repeat(b'P' + i as u8).take(sz as usize));
+        mdat2_payload.extend(std::iter::repeat_n(b'P' + i as u8, sz as usize));
     }
     push_atom(&mut out, *b"mdat", &mdat2_payload);
     let _ = frag2_moof_start;

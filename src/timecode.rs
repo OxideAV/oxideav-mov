@@ -345,10 +345,10 @@ fn scan_source_reference(buf: &[u8]) -> Option<String> {
             break;
         }
         let fc = &buf[p + 4..p + 8];
-        if fc == b"udta" {
-            if let Some(s) = find_name_atom(&buf[p + 8..p + size]) {
-                return Some(s);
-            }
+        if fc == b"udta"
+            && let Some(s) = find_name_atom(&buf[p + 8..p + size])
+        {
+            return Some(s);
         }
         p += size;
     }

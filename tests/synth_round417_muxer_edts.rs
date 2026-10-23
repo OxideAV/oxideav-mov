@@ -15,8 +15,8 @@ use std::io::Cursor;
 
 use oxideav_core::{Demuxer, Packet, ReadSeek};
 use oxideav_mov::{
-    EditSegmentKind, FragmentationMode, MovDemuxer, MovMuxer, MuxEdit, MuxSample, MuxTrackKind,
-    MEDIA_RATE_ONE,
+    EditSegmentKind, FragmentationMode, MEDIA_RATE_ONE, MovDemuxer, MovMuxer, MuxEdit, MuxSample,
+    MuxTrackKind,
 };
 
 fn uniform_samples(n: usize, dur: u32) -> Vec<MuxSample> {

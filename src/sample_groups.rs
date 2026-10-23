@@ -430,7 +430,7 @@ pub fn decode_alst(payload: &[u8]) -> Result<AlternativeStartup> {
     // Optional output-rate pieces fill the remaining 4-byte-aligned
     // tail. A trailing fragment < 4 bytes is malformed.
     let tail = payload.len() - cursor;
-    if tail % 4 != 0 {
+    if !tail.is_multiple_of(4) {
         return Err(Error::invalid(
             "MOV: sgpd 'alst' trailing piece table not a multiple of 4 bytes",
         ));
@@ -1364,10 +1364,10 @@ mod tests {
         p.extend_from_slice(&[0, 0, (2u32 << 4) as u8]); // pattern_code=2 (16-bit), others 0
         p.extend_from_slice(b"roll");
         p.extend_from_slice(&1u32.to_be_bytes()); // pattern_count
-                                                  // pattern_length=4 (16-bit), sample_count=4 (4-bit)
+        // pattern_length=4 (16-bit), sample_count=4 (4-bit)
         p.extend_from_slice(&4u16.to_be_bytes());
         p.push(0x40); // 4 in top nibble (4-bit count), low nibble starts indices
-                      // Truncate here — no room for four 4-bit indices.
+        // Truncate here — no room for four 4-bit indices.
         assert!(parse_csgp(&p).is_err());
     }
 

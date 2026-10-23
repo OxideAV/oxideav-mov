@@ -26,7 +26,7 @@
 use std::io::Cursor;
 
 use oxideav_core::{Demuxer, ReadSeek};
-use oxideav_mov::{parse_cslg, Cslg, MovDemuxer, MovMuxer, MuxSample, MuxTrackKind};
+use oxideav_mov::{Cslg, MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, parse_cslg};
 
 /// Build a video MOV from a list of (composition_offset, duration,
 /// keyframe) tuples on the only track. Optionally attach a cslg.

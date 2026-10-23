@@ -383,16 +383,16 @@ fn csgp_compact_group_resolves_per_sample_through_demuxer() {
     // index_size_code=1 (8-bit), count_size_code=1, pattern_size_code=1.
     let mut csgp = Vec::new();
     csgp.push(0u8); // version
-                    // flags: index_code=1 (bits0..1), count_code=1 (bits2..3),
-                    // pattern_code=1 (bits4..5), gtp_present=0.
+    // flags: index_code=1 (bits0..1), count_code=1 (bits2..3),
+    // pattern_code=1 (bits4..5), gtp_present=0.
     let flags: u32 = 1 | (1 << 2) | (1 << 4);
     csgp.extend_from_slice(&flags.to_be_bytes()[1..4]);
     csgp.extend_from_slice(b"prol"); // grouping_type
     csgp.extend_from_slice(&1u32.to_be_bytes()); // pattern_count
-                                                 // pattern table (all 8-bit): pattern_length=2, sample_count=4.
+    // pattern table (all 8-bit): pattern_length=2, sample_count=4.
     csgp.push(2); // pattern_length[0]
     csgp.push(4); // sample_count[0]
-                  // index table (8-bit each): 1, 2.
+    // index table (8-bit each): 1, 2.
     csgp.push(1);
     csgp.push(2);
 

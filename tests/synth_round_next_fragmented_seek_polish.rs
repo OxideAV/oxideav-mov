@@ -273,10 +273,10 @@ fn build_multi_trex_two_traf_fixture() -> Vec<u8> {
     // mdat: video bytes (each video sample fills with 'V'+i), then audio.
     let mut mdat_payload = Vec::new();
     for i in 0..video_count {
-        mdat_payload.extend(std::iter::repeat(b'V' + (i as u8)).take(video_sz as usize));
+        mdat_payload.extend(std::iter::repeat_n(b'V' + (i as u8), video_sz as usize));
     }
     for i in 0..audio_count {
-        mdat_payload.extend(std::iter::repeat(b'a' + (i as u8)).take(audio_sz as usize));
+        mdat_payload.extend(std::iter::repeat_n(b'a' + (i as u8), audio_sz as usize));
     }
     push_atom(&mut out, *b"mdat", &mdat_payload);
     out
@@ -403,7 +403,7 @@ fn build_negative_cts_fixture() -> Vec<u8> {
     // mdat: 5 × 64 bytes
     let mut mdat_payload = Vec::new();
     for i in 0..count {
-        mdat_payload.extend(std::iter::repeat(b'A' + (i as u8)).take(sz as usize));
+        mdat_payload.extend(std::iter::repeat_n(b'A' + (i as u8), sz as usize));
     }
     push_atom(&mut out, *b"mdat", &mdat_payload);
     out
@@ -560,7 +560,7 @@ fn build_tfdt_baseline_fixture() -> (Vec<u8>, u64) {
 
         let mut mdat = Vec::new();
         for i in 0..sample_count {
-            mdat.extend(std::iter::repeat(b'A' + (i as u8)).take(sz as usize));
+            mdat.extend(std::iter::repeat_n(b'A' + (i as u8), sz as usize));
         }
 
         // moof on the wire is `[size+type][payload]` and so is mdat.
@@ -772,7 +772,7 @@ fn build_tfdt_with_explicit_gap() -> Vec<u8> {
 
         let mut mdat = Vec::new();
         for i in 0..sample_count {
-            mdat.extend(std::iter::repeat(b'A' + (i as u8)).take(sz as usize));
+            mdat.extend(std::iter::repeat_n(b'A' + (i as u8), sz as usize));
         }
 
         let mut moof_on_wire = Vec::new();

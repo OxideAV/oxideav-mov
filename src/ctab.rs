@@ -318,7 +318,7 @@ mod tests {
         p.extend_from_slice(&0u32.to_be_bytes()); // seed
         p.extend_from_slice(&0x8000u16.to_be_bytes()); // flags
         p.extend_from_slice(&2u16.to_be_bytes()); // size → 3 entries
-                                                  // Only 16 bytes for 2 entries.
+        // Only 16 bytes for 2 entries.
         p.extend_from_slice(&[0u8; 16]);
         let err = parse_ctab(&p).unwrap_err();
         assert!(format!("{err}").contains("body length"));

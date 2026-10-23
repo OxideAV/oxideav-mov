@@ -19,8 +19,8 @@ use std::io::Cursor;
 
 use oxideav_core::{Demuxer, ReadSeek};
 use oxideav_mov::{
-    MovDemuxer, MovMetaItem, MovMuxer, MuxSample, MuxTrackKind, META_NAMESPACE_MDTA,
-    META_TYPE_BE_SIGNED_INT, META_TYPE_RAW, META_TYPE_UTF8,
+    META_NAMESPACE_MDTA, META_TYPE_BE_SIGNED_INT, META_TYPE_RAW, META_TYPE_UTF8, MovDemuxer,
+    MovMetaItem, MovMuxer, MuxSample, MuxTrackKind,
 };
 
 /// One single-sample audio track, no metadata yet.

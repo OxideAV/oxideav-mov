@@ -38,10 +38,10 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::atom::{
-    read_payload, walk_children, AtomHeader, LEVA, MEHD, MFRO, SAIO, SAIZ, TFRA, TRAF, TREX,
+    AtomHeader, LEVA, MEHD, MFRO, SAIO, SAIZ, TFRA, TRAF, TREX, read_payload, walk_children,
 };
-use crate::leva::{parse_leva, Leva};
-use crate::sample_aux::{parse_saio, parse_saiz, Saio, Saiz};
+use crate::leva::{Leva, parse_leva};
+use crate::sample_aux::{Saio, Saiz, parse_saio, parse_saiz};
 use crate::sample_table::SampleEntry;
 
 #[cfg(feature = "registry")]
@@ -1547,7 +1547,7 @@ mod tests {
         let mut p = Vec::new();
         p.extend_from_slice(&TFHD_BASE_DATA_OFFSET_PRESENT.to_be_bytes());
         p.extend_from_slice(&1u32.to_be_bytes()); // track_id
-                                                  // Missing 8-byte base_data_offset
+        // Missing 8-byte base_data_offset
         assert!(parse_tfhd(&p).is_err());
     }
 
@@ -1594,7 +1594,7 @@ mod tests {
         p.extend_from_slice(&1u32.to_be_bytes()); // track_id
         p.extend_from_slice(&0u32.to_be_bytes()); // length_size word (all 1 byte)
         p.extend_from_slice(&2u32.to_be_bytes()); // n
-                                                  // entry 0
+        // entry 0
         p.extend_from_slice(&1u64.to_be_bytes()); // time
         p.extend_from_slice(&100u64.to_be_bytes()); // moof_offset
         p.extend_from_slice(&[1, 1, 1]);

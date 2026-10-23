@@ -151,13 +151,13 @@ pub fn read_atom_header<R: Read + Seek + ?Sized>(r: &mut R) -> Result<Option<Ato
     // and `src/atom.rs` line 263 (debug builds panic; release builds
     // silently wrap and would compute a body_end far below
     // `total_len`, masking the malformed input).
-    if let Some(t) = total_size {
-        if start.checked_add(t).is_none() {
-            return Err(Error::invalid(format!(
-                "MOV: atom '{}' declared size {t} from offset {start} overflows u64",
-                std::str::from_utf8(&fourcc).unwrap_or("????"),
-            )));
-        }
+    if let Some(t) = total_size
+        && start.checked_add(t).is_none()
+    {
+        return Err(Error::invalid(format!(
+            "MOV: atom '{}' declared size {t} from offset {start} overflows u64",
+            std::str::from_utf8(&fourcc).unwrap_or("????"),
+        )));
     }
 
     Ok(Some(AtomHeader {
@@ -275,10 +275,10 @@ where
 {
     loop {
         let pos = r.stream_position()?;
-        if let Some(end) = parent_payload_end {
-            if pos >= end {
-                break;
-            }
+        if let Some(end) = parent_payload_end
+            && pos >= end
+        {
+            break;
         }
         let hdr = match read_atom_header(r)? {
             Some(h) => h,
@@ -290,12 +290,12 @@ where
             .or(parent_payload_end)
             .ok_or_else(|| Error::invalid("MOV: open-ended atom inside container"))?;
         // Validate the child does not exceed the parent.
-        if let Some(end) = parent_payload_end {
-            if body_end > end {
-                return Err(Error::invalid(
-                    "MOV: child atom extends beyond parent payload",
-                ));
-            }
+        if let Some(end) = parent_payload_end
+            && body_end > end
+        {
+            return Err(Error::invalid(
+                "MOV: child atom extends beyond parent payload",
+            ));
         }
         visit(r, &hdr)?;
         // Snap to the end of this atom regardless of how the visitor left
@@ -509,8 +509,8 @@ pub const CSLG: [u8; 4] = fourcc("cslg");
 // Round-80: Sample-group atoms (ISO/IEC 14496-12 §8.9).
 pub const SBGP: [u8; 4] = fourcc("sbgp"); // Sample-to-Group Box
 pub const SGPD: [u8; 4] = fourcc("sgpd"); // Sample-Group-Description Box
-                                          // Compact Sample to Group Box (ISO/IEC 14496-12:2020 §8.9.5 —
-                                          // post-2015 box; see docs/container/isobmff/post-2015-additions.md).
+// Compact Sample to Group Box (ISO/IEC 14496-12:2020 §8.9.5 —
+// post-2015 box; see docs/container/isobmff/post-2015-additions.md).
 pub const CSGP: [u8; 4] = fourcc("csgp");
 
 // Round-4: Data information sub-atoms.

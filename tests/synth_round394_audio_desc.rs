@@ -239,15 +239,16 @@ fn validation_rejects_bad_configs() {
     let aud = add_audio(&mut m, 2);
 
     // Non-audio track.
-    assert!(m
-        .set_sound_description_v1(vid, SoundV1::default(), false)
-        .is_err());
+    assert!(
+        m.set_sound_description_v1(vid, SoundV1::default(), false)
+            .is_err()
+    );
     assert!(m.set_audio_entry_v1(vid, AudioEntryV1::default()).is_err());
     // Unknown id.
     assert!(m.set_audio_entry_v1(99, AudioEntryV1::default()).is_err());
     // Explicit layout row count must match the channel count.
-    assert!(m
-        .set_audio_entry_v1(
+    assert!(
+        m.set_audio_entry_v1(
             aud,
             AudioEntryV1 {
                 sampling_rate: None,
@@ -262,10 +263,11 @@ fn validation_rejects_bad_configs() {
                 }),
             },
         )
-        .is_err());
+        .is_err()
+    );
     // definedLayout == 0 on-wire selects the explicit form.
-    assert!(m
-        .set_audio_entry_v1(
+    assert!(
+        m.set_audio_entry_v1(
             aud,
             AudioEntryV1 {
                 sampling_rate: None,
@@ -279,19 +281,22 @@ fn validation_rejects_bad_configs() {
                 }),
             },
         )
-        .is_err());
+        .is_err()
+    );
     // Mutual exclusion, both orders.
     m.set_audio_entry_v1(aud, AudioEntryV1::default()).unwrap();
-    assert!(m
-        .set_sound_description_v1(aud, SoundV1::default(), false)
-        .is_err());
+    assert!(
+        m.set_sound_description_v1(aud, SoundV1::default(), false)
+            .is_err()
+    );
     let mut m2 = MovMuxer::new();
     let aud2 = add_audio(&mut m2, 2);
     m2.set_sound_description_v1(aud2, SoundV1::default(), true)
         .unwrap();
-    assert!(m2
-        .set_audio_entry_v1(aud2, AudioEntryV1::default())
-        .is_err());
+    assert!(
+        m2.set_audio_entry_v1(aud2, AudioEntryV1::default())
+            .is_err()
+    );
 }
 
 #[test]

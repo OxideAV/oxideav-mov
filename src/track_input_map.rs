@@ -78,7 +78,7 @@ use oxideav_core::{Error, Result};
 #[cfg(not(feature = "registry"))]
 use crate::standalone::{Error, Result};
 
-use crate::atom::{read_atom_header, read_payload, AtomHeader, MAX_INMEMORY_ATOM_BODY};
+use crate::atom::{AtomHeader, MAX_INMEMORY_ATOM_BODY, read_atom_header, read_payload};
 
 /// QTFF p. 52 — track input atom FourCC `' in'`. The leading two
 /// bytes are 0x00 (NOT ASCII space): "note that the two leading

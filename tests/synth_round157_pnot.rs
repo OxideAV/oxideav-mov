@@ -29,7 +29,7 @@ use std::io::Cursor;
 
 use common::*;
 use oxideav_core::ReadSeek;
-use oxideav_mov::{MovDemuxer, MAC_TO_UNIX_EPOCH_SECONDS, PNOT_BODY_LEN};
+use oxideav_mov::{MAC_TO_UNIX_EPOCH_SECONDS, MovDemuxer, PNOT_BODY_LEN};
 
 /// Build a `pnot` body matching QTFF Figure 1-7 byte-for-byte.
 fn build_pnot_payload(

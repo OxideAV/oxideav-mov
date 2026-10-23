@@ -241,8 +241,8 @@ fn demuxer_resolves_each_kind_to_zero_based_indices() {
     assert_eq!(d.sync_track_indices(0), vec![1]); // sync → track-id 2 → index 1
     assert_eq!(d.hint_track_indices(0), vec![3]); // hint → track-id 4 → index 3
     assert_eq!(d.transcript_track_indices(0), vec![2]); // scpt → track-id 3 → index 2
-                                                        // ssrc → [3, 0]; the `0` sentinel is filtered out so a single
-                                                        // index survives.
+    // ssrc → [3, 0]; the `0` sentinel is filtered out so a single
+    // index survives.
     assert_eq!(d.non_primary_source_track_indices(0), vec![2]);
     // timecode_track_index returns the first resolvable entry; the
     // second slot (track-id 99) is unresolvable and filtered out.

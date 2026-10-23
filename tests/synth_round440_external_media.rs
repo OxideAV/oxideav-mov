@@ -14,13 +14,13 @@
 #![cfg(feature = "registry")]
 
 use std::io::Cursor;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use oxideav_core::{Demuxer, Error, ReadSeek};
 use oxideav_mov::{
-    dref_file_opener, DataReference, DataReferenceWrite, ExternalSampleLocation, MovDemuxer,
-    MovMuxer, MuxSample, MuxTrackKind,
+    DataReference, DataReferenceWrite, ExternalSampleLocation, MovDemuxer, MovMuxer, MuxSample,
+    MuxTrackKind, dref_file_opener,
 };
 
 /// Sidecar "external file" bytes + the per-sample locations of the
@@ -131,10 +131,12 @@ fn external_track_resolves_through_opener() {
         }
     }
     assert_eq!(video_payloads.len(), 3);
-    assert!(video_payloads
-        .iter()
-        .enumerate()
-        .all(|(i, p)| *p == vec![0x10 + i as u8; 12]));
+    assert!(
+        video_payloads
+            .iter()
+            .enumerate()
+            .all(|(i, p)| *p == vec![0x10 + i as u8; 12])
+    );
     assert_eq!(audio_payloads, payloads);
     // The opener resolved the data reference exactly once for the
     // whole track (per-(track, dref-entry) caching).
@@ -450,10 +452,12 @@ fn faststart_and_interleaved_local_track_coexist_with_external() {
             }
         }
         assert_eq!(video_out.len(), 4);
-        assert!(video_out
-            .iter()
-            .enumerate()
-            .all(|(i, p)| *p == vec![0x40 + i as u8; 9]));
+        assert!(
+            video_out
+                .iter()
+                .enumerate()
+                .all(|(i, p)| *p == vec![0x40 + i as u8; 9])
+        );
         assert_eq!(audio_out, payloads, "placement {placement:?}");
     }
 }

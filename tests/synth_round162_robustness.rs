@@ -38,8 +38,8 @@ use std::io::Cursor;
 use common::*;
 use oxideav_core::ReadSeek;
 use oxideav_mov::{
-    read_atom_header, read_payload, read_payload_bounded, AtomHeader, MovDemuxer,
-    MAX_INMEMORY_ATOM_BODY,
+    AtomHeader, MAX_INMEMORY_ATOM_BODY, MovDemuxer, read_atom_header, read_payload,
+    read_payload_bounded,
 };
 
 // ---------------------------------------------------------------------

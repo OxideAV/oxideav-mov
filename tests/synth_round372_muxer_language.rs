@@ -12,7 +12,7 @@ use std::io::Cursor;
 
 use oxideav_core::ReadSeek;
 use oxideav_mov::{
-    iso_language_tag, MovDemuxer, MovMetadata, MovMuxer, MuxSample, MuxTrackKind, MDHD_LANGUAGE_UND,
+    MDHD_LANGUAGE_UND, MovDemuxer, MovMetadata, MovMuxer, MuxSample, MuxTrackKind, iso_language_tag,
 };
 
 fn add_audio(m: &mut MovMuxer) -> u32 {

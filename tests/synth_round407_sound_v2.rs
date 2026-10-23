@@ -12,8 +12,8 @@ use std::io::Cursor;
 
 use oxideav_core::ReadSeek;
 use oxideav_mov::{
-    build_esds_atom, AudioEntryV1, AudioEntryV2, FragmentationMode, LpcmFlags, MovDemuxer,
-    MovMuxer, MuxSample, MuxTrackKind, SoundV1, WaveChild,
+    AudioEntryV1, AudioEntryV2, FragmentationMode, LpcmFlags, MovDemuxer, MovMuxer, MuxSample,
+    MuxTrackKind, SoundV1, WaveChild, build_esds_atom,
 };
 
 fn samples(n: usize) -> Vec<MuxSample> {
@@ -244,15 +244,16 @@ fn v2_validation_and_mutual_exclusion() {
     assert!(m.set_sound_description_v2(99, ok).is_err());
     // Rate must be finite and positive.
     for bad in [0.0, -48_000.0, f64::NAN, f64::INFINITY] {
-        assert!(m
-            .set_sound_description_v2(
+        assert!(
+            m.set_sound_description_v2(
                 aud,
                 AudioEntryV2 {
                     audio_sample_rate: bad,
                     ..AudioEntryV2::default()
                 },
             )
-            .is_err());
+            .is_err()
+        );
     }
     // Mutual exclusion, every ordering. v2 after v1:
     m.set_sound_description_v1(aud, SoundV1::default(), false)
@@ -262,22 +263,25 @@ fn v2_validation_and_mutual_exclusion() {
     let mut m2 = MovMuxer::new();
     let aud2 = add_audio(&mut m2, *b"lpcm", 2, &[]);
     m2.set_sound_description_v2(aud2, ok).unwrap();
-    assert!(m2
-        .set_sound_description_v1(aud2, SoundV1::default(), false)
-        .is_err());
-    assert!(m2
-        .set_audio_entry_v1(aud2, AudioEntryV1::default())
-        .is_err());
+    assert!(
+        m2.set_sound_description_v1(aud2, SoundV1::default(), false)
+            .is_err()
+    );
+    assert!(
+        m2.set_audio_entry_v1(aud2, AudioEntryV1::default())
+            .is_err()
+    );
     // Re-setting v2 itself is allowed (idempotent reconfiguration).
-    assert!(m2
-        .set_sound_description_v2(
+    assert!(
+        m2.set_sound_description_v2(
             aud2,
             AudioEntryV2 {
                 audio_sample_rate: 96_000.0,
                 ..AudioEntryV2::default()
             },
         )
-        .is_ok());
+        .is_ok()
+    );
     // v2 after ISO-v1:
     let mut m3 = MovMuxer::new();
     let aud3 = add_audio(&mut m3, *b"lpcm", 2, &[]);

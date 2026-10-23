@@ -322,7 +322,7 @@ mod tests {
         out.extend_from_slice(fourcc); // data format
         out.extend_from_slice(&[0u8; 6]); // reserved
         out.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index
-        out.extend(std::iter::repeat(0u8).take(extra_size));
+        out.extend(std::iter::repeat_n(0u8, extra_size));
         out
     }
 
@@ -428,7 +428,7 @@ mod tests {
         body.push(0); // version
         body.extend_from_slice(&[0, 0, 0]); // flags
         body.extend_from_slice(&15u32.to_be_bytes()); // bad size
-        body.extend(std::iter::repeat(0u8).take(15));
+        body.extend(std::iter::repeat_n(0u8, 15));
         let err = parse_kmat(&body).unwrap_err();
         assert!(format!("{err}").contains("image-description size 15"));
     }
@@ -441,7 +441,7 @@ mod tests {
         body.push(0);
         body.extend_from_slice(&[0, 0, 0]);
         body.extend_from_slice(&32u32.to_be_bytes()); // claims 32 bytes
-        body.extend(std::iter::repeat(0u8).take(20)); // only 20 follow
+        body.extend(std::iter::repeat_n(0u8, 20)); // only 20 follow
         let err = parse_kmat(&body).unwrap_err();
         assert!(format!("{err}").contains("exceeds body remainder"));
     }

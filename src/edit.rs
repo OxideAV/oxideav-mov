@@ -355,14 +355,14 @@ pub fn resolve_edit_segments(edits: &EditList, movie_duration: Option<u64>) -> V
         cursor = end;
     }
     // Implicit trailing empty edit per QTFF p. 47 / §8.6.6.3.
-    if let Some(total) = movie_duration {
-        if cursor < total {
-            out.push(EditSegment {
-                movie_time_start: cursor,
-                movie_time_end: total,
-                kind: EditSegmentKind::Empty,
-            });
-        }
+    if let Some(total) = movie_duration
+        && cursor < total
+    {
+        out.push(EditSegment {
+            movie_time_start: cursor,
+            movie_time_end: total,
+            kind: EditSegmentKind::Empty,
+        });
     }
     out
 }

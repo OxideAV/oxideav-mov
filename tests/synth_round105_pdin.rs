@@ -60,10 +60,10 @@ fn build_isobmff_with_optional_pdin(
 
         // `pdin` before `moov` — the spec's "as early as possible"
         // recommendation (§8.1.3.1).
-        if let Some(pairs) = pdin_pairs {
-            if !after_moov {
-                push_atom(&mut out, *b"pdin", &build_pdin_payload(pairs));
-            }
+        if let Some(pairs) = pdin_pairs
+            && !after_moov
+        {
+            push_atom(&mut out, *b"pdin", &build_pdin_payload(pairs));
         }
 
         let mut moov = Vec::new();
@@ -94,10 +94,10 @@ fn build_isobmff_with_optional_pdin(
         // `pdin` after `moov` — non-recommended placement but spec
         // §8.1.3.1 says "as early as possible" not "must be first";
         // the parser still needs to recognise it.
-        if let Some(pairs) = pdin_pairs {
-            if after_moov {
-                push_atom(&mut out, *b"pdin", &build_pdin_payload(pairs));
-            }
+        if let Some(pairs) = pdin_pairs
+            && after_moov
+        {
+            push_atom(&mut out, *b"pdin", &build_pdin_payload(pairs));
         }
 
         push_atom(&mut out, *b"mdat", mdat_payload);

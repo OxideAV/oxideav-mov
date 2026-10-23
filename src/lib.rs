@@ -55,135 +55,135 @@ pub mod registry;
 pub mod standalone;
 
 pub use atom::{
-    read_atom_header, read_payload, read_payload_bounded, skip_payload, walk_children, AtomHeader,
-    MAX_INMEMORY_ATOM_BODY,
+    AtomHeader, MAX_INMEMORY_ATOM_BODY, read_atom_header, read_payload, read_payload_bounded,
+    skip_payload, walk_children,
 };
 pub use chapter::{
-    decode_text_sample, decode_text_sample_full, encode_text_sample, parse_text_sample_styles,
     ChapterEntry, ChapterList, ColorRgba, FontTableEntry, HighlightColor, HighlightRange,
-    StyleRecord, TextSampleStyles,
+    StyleRecord, TextSampleStyles, decode_text_sample, decode_text_sample_full, encode_text_sample,
+    parse_text_sample_styles,
 };
-pub use clip::{parse_clip, parse_crgn, Clipping, ClippingRegion, QdRect};
+pub use clip::{Clipping, ClippingRegion, QdRect, parse_clip, parse_crgn};
 pub use cmov::{
-    compress as compress_movie_resource, parse_cmov, parse_cmvd, parse_dcom, Cmov, Cmvd, Dcom,
-    CMVD_MIN_BODY_LEN, DCOM_ALG_ZLIB, DCOM_BODY_LEN,
+    CMVD_MIN_BODY_LEN, Cmov, Cmvd, DCOM_ALG_ZLIB, DCOM_BODY_LEN, Dcom,
+    compress as compress_movie_resource, parse_cmov, parse_cmvd, parse_dcom,
 };
-pub use ctab::{parse_ctab, ColorTableEntry, Ctab};
+pub use ctab::{ColorTableEntry, Ctab, parse_ctab};
 pub use demuxer::{
-    dref_file_opener, open_file_url, DataReferenceOpener, MovDemuxer, MAX_ALIAS_DEPTH,
+    DataReferenceOpener, MAX_ALIAS_DEPTH, MovDemuxer, dref_file_opener, open_file_url,
 };
 pub use edit::{
-    edited_timing_for_sample, first_presented_media_time, initial_empty_duration,
+    EMPTY_EDIT_MEDIA_TIME, Edit, EditList, EditSegment, EditSegmentKind, EditedTiming, Elst,
+    MEDIA_RATE_ONE, edited_timing_for_sample, first_presented_media_time, initial_empty_duration,
     media_pts_to_movie_pts, movie_pts_to_media_pts, resolve_edit_segments, total_edit_duration,
-    Edit, EditList, EditSegment, EditSegmentKind, EditedTiming, Elst, EMPTY_EDIT_MEDIA_TIME,
-    MEDIA_RATE_ONE,
 };
 pub use fragment::{
-    parse_mehd, parse_mfhd, parse_mfra, parse_mfro, parse_moof, parse_mvex, parse_tfdt, parse_tfhd,
-    parse_tfra, parse_traf, parse_trex, parse_trun, resolve_traf_samples, sample_flags_is_sync,
-    Mehd, Mfhd, Mfro, Tfhd, Tfra, TfraEntry, TrafAddressing, TrafParse, TrafRecord, TrexDefaults,
-    Trun, TrunSample, TFHD_BASE_DATA_OFFSET_PRESENT, TFHD_DEFAULT_BASE_IS_MOOF,
+    Mehd, Mfhd, Mfro, TFHD_BASE_DATA_OFFSET_PRESENT, TFHD_DEFAULT_BASE_IS_MOOF,
     TFHD_DEFAULT_SAMPLE_DURATION_PRESENT, TFHD_DEFAULT_SAMPLE_FLAGS_PRESENT,
     TFHD_DEFAULT_SAMPLE_SIZE_PRESENT, TFHD_DURATION_IS_EMPTY,
     TFHD_SAMPLE_DESCRIPTION_INDEX_PRESENT, TRUN_DATA_OFFSET_PRESENT,
     TRUN_FIRST_SAMPLE_FLAGS_PRESENT, TRUN_SAMPLE_CTS_OFFSET_PRESENT, TRUN_SAMPLE_DURATION_PRESENT,
-    TRUN_SAMPLE_FLAGS_PRESENT, TRUN_SAMPLE_SIZE_PRESENT,
+    TRUN_SAMPLE_FLAGS_PRESENT, TRUN_SAMPLE_SIZE_PRESENT, Tfhd, Tfra, TfraEntry, TrafAddressing,
+    TrafParse, TrafRecord, TrexDefaults, Trun, TrunSample, parse_mehd, parse_mfhd, parse_mfra,
+    parse_mfro, parse_moof, parse_mvex, parse_tfdt, parse_tfhd, parse_tfra, parse_traf, parse_trex,
+    parse_trun, resolve_traf_samples, sample_flags_is_sync,
 };
 pub use gmhd::{
-    parse_gmin, parse_tcmi, parse_text_header, Gmhd, Gmin, GraphicsMode, Tcmi, TextHeader,
+    Gmhd, Gmin, GraphicsMode, Tcmi, TextHeader, parse_gmin, parse_tcmi, parse_text_header,
 };
 pub use header::{
-    parse_elng, parse_hmhd, BrandClass, Ftyp, Hdlr, Hmhd, Mdhd, MediaHeaderKind, Mvhd, Tkhd,
-    TrackRotation,
+    BrandClass, Ftyp, Hdlr, Hmhd, Mdhd, MediaHeaderKind, Mvhd, Tkhd, TrackRotation, parse_elng,
+    parse_hmhd,
 };
-pub use kind::{find_kinds_in_udta, parse_kind, KindEntry};
-pub use leva::{parse_leva, AssignmentType, Leva, LevaLevel};
-pub use matte::{parse_kmat, parse_matt, CompressedMatte, Matte, MIN_IMAGE_DESCRIPTION_SIZE};
+pub use kind::{KindEntry, find_kinds_in_udta, parse_kind};
+pub use leva::{AssignmentType, Leva, LevaLevel, parse_leva};
+pub use matte::{CompressedMatte, MIN_IMAGE_DESCRIPTION_SIZE, Matte, parse_kmat, parse_matt};
 pub use media_meta::{
-    channel_mask_for_layout_tag, parse_cslg, parse_fiel, parse_mjht, parse_mjqt, Chan,
-    ChanDescription, Clap, ColorParameters, ColorParametersKind, Cslg, Fiel, FieldOrdering,
-    MetaKeyValue, Mjht, Mjqt, Pasp, Tapt, TaptDims, FIEL_BODY_LEN,
+    Chan, ChanDescription, Clap, ColorParameters, ColorParametersKind, Cslg, FIEL_BODY_LEN, Fiel,
+    FieldOrdering, MetaKeyValue, Mjht, Mjqt, Pasp, Tapt, TaptDims, channel_mask_for_layout_tag,
+    parse_cslg, parse_fiel, parse_mjht, parse_mjqt,
 };
 pub use metadata_sample::{
-    parse_btrt, parse_metadata_sample_entry, parse_mett, parse_metx, parse_sbtt, parse_stpp,
-    parse_stxt, parse_subtitle_sample_entry, parse_urim, BitRate, MetadataSampleEntry,
-    SimpleTextSampleEntry, SubtitleSampleEntry, TextMetadataSampleEntry, TextSubtitleSampleEntry,
-    UriMetadataSampleEntry, XmlMetadataSampleEntry, XmlSubtitleSampleEntry,
+    BitRate, MetadataSampleEntry, SimpleTextSampleEntry, SubtitleSampleEntry,
+    TextMetadataSampleEntry, TextSubtitleSampleEntry, UriMetadataSampleEntry,
+    XmlMetadataSampleEntry, XmlSubtitleSampleEntry, parse_btrt, parse_metadata_sample_entry,
+    parse_mett, parse_metx, parse_sbtt, parse_stpp, parse_stxt, parse_subtitle_sample_entry,
+    parse_urim,
 };
 pub use muxer::{
     AudioEntryV1, AudioEntryV2, ChunkStrategy, DataReferenceWrite, ExternalSampleLocation,
-    FragmentationMode, MoovPlacement, MovMetaItem, MovMetaValue, MovMetadata, MovMuxer, MuxEdit,
-    MuxSample, MuxTrackKind, SampleAuxStream, SampleGroupBoxForm, SampleGroupDescriptionWrite,
-    SampleToGroupWrite, TrackReference, VisualExtensions, MDHD_LANGUAGE_UND, META_NAMESPACE_MDTA,
-    META_TYPE_BE_SIGNED_INT, META_TYPE_BE_UNSIGNED_INT, META_TYPE_RAW, META_TYPE_UTF8,
-    UTF8_INTL_TEXT_FLAG,
+    FragmentationMode, MDHD_LANGUAGE_UND, META_NAMESPACE_MDTA, META_TYPE_BE_SIGNED_INT,
+    META_TYPE_BE_UNSIGNED_INT, META_TYPE_RAW, META_TYPE_UTF8, MoovPlacement, MovMetaItem,
+    MovMetaValue, MovMetadata, MovMuxer, MuxEdit, MuxSample, MuxTrackKind, SampleAuxStream,
+    SampleGroupBoxForm, SampleGroupDescriptionWrite, SampleToGroupWrite, TrackReference,
+    UTF8_INTL_TEXT_FLAG, VisualExtensions,
 };
-pub use pdin::{parse_pdin, Pdin, PdinEntry};
-pub use pnot::{parse_pnot, Pnot, MAC_TO_UNIX_EPOCH_SECONDS, PNOT_BODY_LEN};
-pub use prft::{parse_prft, Prft, NTP_TO_UNIX_EPOCH_SECONDS};
+pub use pdin::{Pdin, PdinEntry, parse_pdin};
+pub use pnot::{MAC_TO_UNIX_EPOCH_SECONDS, PNOT_BODY_LEN, Pnot, parse_pnot};
+pub use prft::{NTP_TO_UNIX_EPOCH_SECONDS, Prft, parse_prft};
 pub use qt_metadata::{
-    parse_qt_metadata, DecodedValue, LocaleIndicator, MetaItem, MetaKey, MetaValue, QtMetadata,
-    WellKnownType, METADATA_HANDLER_MDTA,
+    DecodedValue, LocaleIndicator, METADATA_HANDLER_MDTA, MetaItem, MetaKey, MetaValue, QtMetadata,
+    WellKnownType, parse_qt_metadata,
 };
-pub use reference::{parse_dref, DataReference, ReferenceMovie};
-pub use sample_aux::{parse_saio, parse_saiz, AuxInfoType, FragmentSampleAux, Saio, Saiz};
+pub use reference::{DataReference, ReferenceMovie, parse_dref};
+pub use sample_aux::{AuxInfoType, FragmentSampleAux, Saio, Saiz, parse_saio, parse_saiz};
 pub use sample_groups::{
-    decode_prol, decode_rap, decode_roll, decode_sap, decode_tele, parse_csgp, parse_sbgp,
-    parse_sgpd, split_csgp_index, AudioPreRoll, CsgpIndex, RollRecovery, SampleGroupDescription,
+    AudioPreRoll, CSGP_FRAGMENT_LOCAL_BIT, CsgpIndex, RollRecovery, SampleGroupDescription,
     SampleGroupDescriptionEntry, SampleToGroup, SampleToGroupEntry, StreamAccessPoint,
-    TemporalLevel, VisualRandomAccess, CSGP_FRAGMENT_LOCAL_BIT,
+    TemporalLevel, VisualRandomAccess, decode_prol, decode_rap, decode_roll, decode_sap,
+    decode_tele, parse_csgp, parse_sbgp, parse_sgpd, split_csgp_index,
 };
 pub use sample_table::{
-    parse_padb, parse_sdtp, parse_stdp, parse_stsh, parse_stz2, parse_subs, IsLeading,
-    SampleDependsOn, SampleEntry, SampleHasRedundancy, SampleIsDependedOn, SampleSizeSource,
-    SampleTable, SdtpEntry, StshEntry, SubSampleEntry, SubSampleInfo,
+    IsLeading, SampleDependsOn, SampleEntry, SampleHasRedundancy, SampleIsDependedOn,
+    SampleSizeSource, SampleTable, SdtpEntry, StshEntry, SubSampleEntry, SubSampleInfo, parse_padb,
+    parse_sdtp, parse_stdp, parse_stsh, parse_stz2, parse_subs,
 };
-pub use sidx::{parse_sidx, ReferenceType, Sidx, SidxReference};
-pub use ssix::{parse_ssix, Ssix, SsixRange, SsixSubsegment};
-pub use styp::{parse_styp, Styp};
+pub use sidx::{ReferenceType, Sidx, SidxReference, parse_sidx};
+pub use ssix::{Ssix, SsixRange, SsixSubsegment, parse_ssix};
+pub use styp::{Styp, parse_styp};
 pub use sub_track::{
-    find_sub_tracks_in_udta, parse_stri, parse_strk, parse_stsg, SubTrack, SubTrackInformation,
-    SubTrackSampleGroup,
+    SubTrack, SubTrackInformation, SubTrackSampleGroup, find_sub_tracks_in_udta, parse_stri,
+    parse_strk, parse_stsg,
 };
 pub use text_sample::{
-    parse_text_sample_description, Rgb48, TextBox, TextJustification, TextSampleDescription,
-    TEXT_FACE_BOLD, TEXT_FACE_CONDENSE, TEXT_FACE_EXTEND, TEXT_FACE_ITALIC, TEXT_FACE_OUTLINE,
-    TEXT_FACE_SHADOW, TEXT_FACE_UNDERLINE, TEXT_FLAG_ANTI_ALIAS, TEXT_FLAG_CONTINUOUS_SCROLL,
-    TEXT_FLAG_DONT_AUTO_SCALE, TEXT_FLAG_DROP_SHADOW, TEXT_FLAG_HORIZONTAL_SCROLL,
-    TEXT_FLAG_KEY_TEXT, TEXT_FLAG_REVERSE_SCROLL, TEXT_FLAG_SCROLL_IN, TEXT_FLAG_SCROLL_OUT,
-    TEXT_FLAG_USE_MOVIE_BG_COLOR, TEXT_SAMPLE_DESC_FIXED_LEN,
+    Rgb48, TEXT_FACE_BOLD, TEXT_FACE_CONDENSE, TEXT_FACE_EXTEND, TEXT_FACE_ITALIC,
+    TEXT_FACE_OUTLINE, TEXT_FACE_SHADOW, TEXT_FACE_UNDERLINE, TEXT_FLAG_ANTI_ALIAS,
+    TEXT_FLAG_CONTINUOUS_SCROLL, TEXT_FLAG_DONT_AUTO_SCALE, TEXT_FLAG_DROP_SHADOW,
+    TEXT_FLAG_HORIZONTAL_SCROLL, TEXT_FLAG_KEY_TEXT, TEXT_FLAG_REVERSE_SCROLL, TEXT_FLAG_SCROLL_IN,
+    TEXT_FLAG_SCROLL_OUT, TEXT_FLAG_USE_MOVIE_BG_COLOR, TEXT_SAMPLE_DESC_FIXED_LEN, TextBox,
+    TextJustification, TextSampleDescription, parse_text_sample_description,
 };
 pub use timecode::{
-    parse_tmcd_sample_description, StartTimecode, TimecodeRecord, TimecodeSample, Tmcd,
-    TMCD_FLAG_24_HOUR, TMCD_FLAG_COUNTER, TMCD_FLAG_DROP_FRAME, TMCD_FLAG_NEGATIVES_OK,
+    StartTimecode, TMCD_FLAG_24_HOUR, TMCD_FLAG_COUNTER, TMCD_FLAG_DROP_FRAME,
+    TMCD_FLAG_NEGATIVES_OK, TimecodeRecord, TimecodeSample, Tmcd, parse_tmcd_sample_description,
 };
 pub use track::{
-    build_esds_atom, esds_decoder_specific_info, parse_chnl, parse_esds, parse_flap, parse_srat,
-    parse_wave, ChannelLayout, ChannelStructure, LpcmFlags, SampleDescription,
-    SiDecompressionParam, SoundSlopeAndIntercept, SoundV1, SoundV2, SpeakerPosition, Track,
-    TrackRef, TrackRefKind, WaveChild,
+    ChannelLayout, ChannelStructure, LpcmFlags, SampleDescription, SiDecompressionParam,
+    SoundSlopeAndIntercept, SoundV1, SoundV2, SpeakerPosition, Track, TrackRef, TrackRefKind,
+    WaveChild, build_esds_atom, esds_decoder_specific_info, parse_chnl, parse_esds, parse_flap,
+    parse_srat, parse_wave,
 };
 pub use track_group::{
-    parse_track_group_type, parse_trgr, TrackGroupTypeEntry, TRACK_GROUP_TYPE_MSRC,
+    TRACK_GROUP_TYPE_MSRC, TrackGroupTypeEntry, parse_track_group_type, parse_trgr,
 };
 pub use track_input_map::{
-    parse_imap, parse_track_input_entry, InputType, InputTypeKind, ObjectId, TrackInputEntry,
-    TrackInputMap, INPUT_TYPE_ATOM, K_TRACK_MODIFIER_OBJECT_GRAPHICS_MODE,
+    INPUT_TYPE_ATOM, InputType, InputTypeKind, K_TRACK_MODIFIER_OBJECT_GRAPHICS_MODE,
     K_TRACK_MODIFIER_OBJECT_MATRIX, K_TRACK_MODIFIER_TYPE_BALANCE, K_TRACK_MODIFIER_TYPE_CLIP,
     K_TRACK_MODIFIER_TYPE_GRAPHICS_MODE, K_TRACK_MODIFIER_TYPE_IMAGE, K_TRACK_MODIFIER_TYPE_MATRIX,
-    K_TRACK_MODIFIER_TYPE_VOLUME, OBJECT_ID_ATOM, TRACK_INPUT_ATOM,
+    K_TRACK_MODIFIER_TYPE_VOLUME, OBJECT_ID_ATOM, ObjectId, TRACK_INPUT_ATOM, TrackInputEntry,
+    TrackInputMap, parse_imap, parse_track_input_entry,
 };
 pub use track_load::{
-    parse_load, Load, LOAD_HINT_DOUBLE_BUFFER, LOAD_HINT_HIGH_QUALITY, LOAD_PRELOAD_ALWAYS,
-    LOAD_PRELOAD_DURATION_TO_END, LOAD_PRELOAD_IF_ENABLED,
+    LOAD_HINT_DOUBLE_BUFFER, LOAD_HINT_HIGH_QUALITY, LOAD_PRELOAD_ALWAYS,
+    LOAD_PRELOAD_DURATION_TO_END, LOAD_PRELOAD_IF_ENABLED, Load, parse_load,
 };
 pub use track_selection::{
-    find_tsel_in_udta, parse_tsel, ts_attribute_role, TrackSelection, TsAttributeRole,
     TSEL_ATTR_BITRATE, TSEL_ATTR_COARSE_GRAIN_SNR_SCALABILITY, TSEL_ATTR_CODEC,
     TSEL_ATTR_FINE_GRAIN_SNR_SCALABILITY, TSEL_ATTR_FRAME_RATE, TSEL_ATTR_MAX_PACKET_SIZE,
     TSEL_ATTR_MEDIA_LANGUAGE, TSEL_ATTR_MEDIA_TYPE, TSEL_ATTR_NUMBER_OF_VIEWS,
     TSEL_ATTR_REGION_OF_INTEREST_SCALABILITY, TSEL_ATTR_SCREEN_SIZE, TSEL_ATTR_SPATIAL_SCALABILITY,
-    TSEL_ATTR_TEMPORAL_SCALABILITY, TSEL_ATTR_VIEW_SCALABILITY,
+    TSEL_ATTR_TEMPORAL_SCALABILITY, TSEL_ATTR_VIEW_SCALABILITY, TrackSelection, TsAttributeRole,
+    find_tsel_in_udta, parse_tsel, ts_attribute_role,
 };
-pub use user_data::{iso_language_tag, parse_udta, UserDataEntry, UserDataKind};
-pub use uuid::{parse_uuid, Uuid, USERTYPE_LEN};
+pub use user_data::{UserDataEntry, UserDataKind, iso_language_tag, parse_udta};
+pub use uuid::{USERTYPE_LEN, Uuid, parse_uuid};

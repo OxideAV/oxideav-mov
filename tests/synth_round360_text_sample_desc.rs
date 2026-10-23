@@ -18,11 +18,11 @@ use std::io::Cursor;
 
 use common::*;
 use oxideav_core::ReadSeek;
-use oxideav_mov::text_sample::{
-    Rgb48, TextBox, TextJustification, TEXT_FACE_BOLD, TEXT_FACE_ITALIC, TEXT_FLAG_ANTI_ALIAS,
-    TEXT_FLAG_DROP_SHADOW, TEXT_SAMPLE_DESC_FIXED_LEN,
-};
 use oxideav_mov::MovDemuxer;
+use oxideav_mov::text_sample::{
+    Rgb48, TEXT_FACE_BOLD, TEXT_FACE_ITALIC, TEXT_FLAG_ANTI_ALIAS, TEXT_FLAG_DROP_SHADOW,
+    TEXT_SAMPLE_DESC_FIXED_LEN, TextBox, TextJustification,
+};
 
 /// Build a fully-populated QuickTime Text Sample Description body
 /// (the 43-byte fixed fields + a trailing Pascal font name), then wrap

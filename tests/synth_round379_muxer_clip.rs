@@ -130,12 +130,13 @@ fn clip_none_emits_no_box() {
 #[test]
 fn clip_unknown_track_errors() {
     let mut m = MovMuxer::new();
-    assert!(m
-        .set_track_clipping(
+    assert!(
+        m.set_track_clipping(
             9,
             Some(Clipping {
                 region: ClippingRegion::rectangular(QdRect::default()),
             }),
         )
-        .is_err());
+        .is_err()
+    );
 }

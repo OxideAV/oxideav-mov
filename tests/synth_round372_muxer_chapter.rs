@@ -16,8 +16,8 @@ use std::io::Cursor;
 
 use oxideav_core::ReadSeek;
 use oxideav_mov::{
-    encode_text_sample, MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, TextJustification,
-    TextSampleDescription, TrackReference,
+    MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, TextJustification, TextSampleDescription,
+    TrackReference, encode_text_sample,
 };
 
 fn add_video(m: &mut MovMuxer) -> u32 {

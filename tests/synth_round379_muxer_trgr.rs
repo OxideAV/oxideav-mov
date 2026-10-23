@@ -12,7 +12,7 @@ use std::io::Cursor;
 
 use oxideav_core::ReadSeek;
 use oxideav_mov::{
-    MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, TrackGroupTypeEntry, TRACK_GROUP_TYPE_MSRC,
+    MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, TRACK_GROUP_TYPE_MSRC, TrackGroupTypeEntry,
 };
 
 fn open(bytes: Vec<u8>) -> MovDemuxer {
@@ -132,7 +132,8 @@ fn empty_groups_emit_no_box() {
 #[test]
 fn group_unknown_track_errors() {
     let mut m = MovMuxer::new();
-    assert!(m
-        .set_track_groups(9, &[TrackGroupTypeEntry::msrc(1)])
-        .is_err());
+    assert!(
+        m.set_track_groups(9, &[TrackGroupTypeEntry::msrc(1)])
+            .is_err()
+    );
 }

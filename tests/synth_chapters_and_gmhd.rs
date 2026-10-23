@@ -268,10 +268,11 @@ fn chapters_for_track_without_tref_returns_none() {
     let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
     let mut d = MovDemuxer::open(cur).expect("open without chap");
     assert_eq!(d.tracks[0].chapter_track_ref(), None);
-    assert!(d
-        .chapters_for(0)
-        .expect("chapter resolution returns Ok(None)")
-        .is_none());
+    assert!(
+        d.chapters_for(0)
+            .expect("chapter resolution returns Ok(None)")
+            .is_none()
+    );
 }
 
 #[test]
@@ -377,9 +378,9 @@ fn build_mvhd_v1(ts: u32, dur: u64) -> Vec<u8> {
     // (preview/poster/selection/current) + 4 (next_track_id) = 112.
     let mut p = vec![0u8; 112];
     p[0] = 1; // version=1
-              // creation_time @ 4..12 = 0
-              // modification_time @ 12..20 = 0
-              // time_scale @ 20..24
+    // creation_time @ 4..12 = 0
+    // modification_time @ 12..20 = 0
+    // time_scale @ 20..24
     p[20..24].copy_from_slice(&ts.to_be_bytes());
     // duration @ 24..32
     p[24..32].copy_from_slice(&dur.to_be_bytes());

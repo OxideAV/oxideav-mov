@@ -28,7 +28,7 @@ use std::io::Cursor;
 
 use common::*;
 use oxideav_core::ReadSeek;
-use oxideav_mov::{MovDemuxer, MIN_IMAGE_DESCRIPTION_SIZE};
+use oxideav_mov::{MIN_IMAGE_DESCRIPTION_SIZE, MovDemuxer};
 
 /// Build a minimum-shape image description structure (QTFF p. 70):
 /// 4-byte size + 4-byte data format + 6 reserved + 2-byte
@@ -42,7 +42,7 @@ fn build_image_description(fourcc: &[u8; 4], extra_size: usize) -> Vec<u8> {
     out.extend_from_slice(fourcc);
     out.extend_from_slice(&[0u8; 6]);
     out.extend_from_slice(&1u16.to_be_bytes());
-    out.extend(std::iter::repeat(0u8).take(extra_size));
+    out.extend(std::iter::repeat_n(0u8, extra_size));
     out
 }
 

@@ -142,14 +142,14 @@ pub fn parse_styp(payload: &[u8]) -> Result<Styp> {
     let minor = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
 
     let rest = &payload[8..];
-    if rest.len() % 4 != 0 {
+    if !rest.len().is_multiple_of(4) {
         return Err(Error::invalid(format!(
             "MOV: styp compatible-brands tail {} bytes not 4-aligned",
             rest.len()
         )));
     }
     let mut brands = Vec::with_capacity(rest.len() / 4);
-    for chunk in rest.chunks_exact(4) {
+    for chunk in rest.as_chunks::<4>().0 {
         let mut b = [0u8; 4];
         b.copy_from_slice(chunk);
         brands.push(b);

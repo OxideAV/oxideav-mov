@@ -57,7 +57,7 @@ use oxideav_core::{Error, Result};
 #[cfg(not(feature = "registry"))]
 use crate::standalone::{Error, Result};
 
-use crate::atom::{read_payload, walk_children, AtomHeader};
+use crate::atom::{AtomHeader, read_payload, walk_children};
 use std::io::{Read, Seek, SeekFrom};
 
 /// `track_group_type` FourCC for the §8.3.4.3 multi-source-presentation

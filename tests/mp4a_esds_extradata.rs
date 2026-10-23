@@ -15,7 +15,7 @@ use std::fs::File;
 use std::path::PathBuf;
 
 use oxideav_core::{Demuxer, ReadSeek};
-use oxideav_mov::{esds_decoder_specific_info, MovDemuxer};
+use oxideav_mov::{MovDemuxer, esds_decoder_specific_info};
 
 #[test]
 fn mp4a_extradata_is_the_audio_specific_config() {

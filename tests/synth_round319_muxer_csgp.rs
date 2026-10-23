@@ -22,7 +22,7 @@
 use std::io::Cursor;
 
 use oxideav_core::{Demuxer, ReadSeek};
-use oxideav_mov::{parse_csgp, MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, SampleToGroupWrite};
+use oxideav_mov::{MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, SampleToGroupWrite, parse_csgp};
 
 /// Build an N-sample audio MOV with one sample-to-group assignment on
 /// the only track. Returns the encoded bytes.

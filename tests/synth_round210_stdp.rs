@@ -17,7 +17,7 @@ use std::io::Cursor;
 
 use common::*;
 use oxideav_core::ReadSeek;
-use oxideav_mov::{parse_stdp, MovDemuxer};
+use oxideav_mov::{MovDemuxer, parse_stdp};
 
 /// Build an `stdp` body for the given per-sample priorities. Layout
 /// per §8.5.3.2: `[version:1][flags:3]` then `sample_count × u16`.

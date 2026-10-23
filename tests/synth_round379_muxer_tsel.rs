@@ -12,8 +12,8 @@ use std::io::Cursor;
 
 use oxideav_core::ReadSeek;
 use oxideav_mov::{
-    KindEntry, MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, TrackSelection, TSEL_ATTR_BITRATE,
-    TSEL_ATTR_CODEC,
+    KindEntry, MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, TSEL_ATTR_BITRATE, TSEL_ATTR_CODEC,
+    TrackSelection,
 };
 
 fn open(bytes: Vec<u8>) -> MovDemuxer {
@@ -126,13 +126,14 @@ fn tsel_none_emits_no_box() {
 #[test]
 fn tsel_unknown_track_errors() {
     let mut m = MovMuxer::new();
-    assert!(m
-        .set_track_selection(
+    assert!(
+        m.set_track_selection(
             9,
             Some(TrackSelection {
                 switch_group: 1,
                 attributes: Vec::new()
             })
         )
-        .is_err());
+        .is_err()
+    );
 }

@@ -27,8 +27,8 @@ use std::io::Cursor;
 use common::*;
 use oxideav_core::ReadSeek;
 use oxideav_mov::{
-    MovDemuxer, TrackSelection, TsAttributeRole, TSEL_ATTR_BITRATE, TSEL_ATTR_CODEC,
-    TSEL_ATTR_MEDIA_LANGUAGE, TSEL_ATTR_TEMPORAL_SCALABILITY,
+    MovDemuxer, TSEL_ATTR_BITRATE, TSEL_ATTR_CODEC, TSEL_ATTR_MEDIA_LANGUAGE,
+    TSEL_ATTR_TEMPORAL_SCALABILITY, TrackSelection, TsAttributeRole,
 };
 
 /// Build a `tsel` FullBox body — `[ver:1][flags:3][switch_group:i32][attrs...]`.

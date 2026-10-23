@@ -26,7 +26,7 @@ use std::io::Cursor;
 
 use common::*;
 use oxideav_core::ReadSeek;
-use oxideav_mov::{parse_stz2, MovDemuxer, SampleSizeSource};
+use oxideav_mov::{MovDemuxer, SampleSizeSource, parse_stz2};
 
 /// Build a `stz2` payload for the given `field_size` (4 / 8 / 16) and
 /// per-sample sizes. The `reserved` 24-bit word is fixed at 0 per

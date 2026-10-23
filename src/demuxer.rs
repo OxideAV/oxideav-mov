@@ -12,47 +12,47 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::atom::{
-    read_atom_header, read_payload, walk_children, AtomHeader, CLEF, CLIP, CMOV, CO64, CSGP, CSLG,
-    CTAB, CTTS, DINF, DREF, EDTS, ELNG, ELST, ENOF, FREE, FTYP, GMHD, GMIN, HDLR, HMHD, IMAP, LOAD,
-    MATT, MAX_INMEMORY_ATOM_BODY, MDAT, MDHD, MDIA, META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, NMHD,
-    PADB, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS, RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP,
-    SDTP, SGPD, SIDX, SKIP, SMHD, SSIX, STBL, STCO, STDP, STHD, STSC, STSD, STSH, STSS, STSZ, STTS,
-    STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK, TREF, TRGR, UDTA, UUID, VMHD, WIDE,
+    AtomHeader, CLEF, CLIP, CMOV, CO64, CSGP, CSLG, CTAB, CTTS, DINF, DREF, EDTS, ELNG, ELST, ENOF,
+    FREE, FTYP, GMHD, GMIN, HDLR, HMHD, IMAP, LOAD, MATT, MAX_INMEMORY_ATOM_BODY, MDAT, MDHD, MDIA,
+    META, MFRA, MINF, MOOF, MOOV, MVEX, MVHD, NMHD, PADB, PDIN, PNOT, PRFT, PROF, RDRF, RMCD, RMCS,
+    RMDA, RMDR, RMQU, RMRA, RMVC, SAIO, SAIZ, SBGP, SDTP, SGPD, SIDX, SKIP, SMHD, SSIX, STBL, STCO,
+    STDP, STHD, STSC, STSD, STSH, STSS, STSZ, STTS, STYP, STZ2, SUBS, TAPT, TEXT, TKHD, TMCD, TRAK,
+    TREF, TRGR, UDTA, UUID, VMHD, WIDE, read_atom_header, read_payload, walk_children,
 };
-use crate::chapter::{decode_text_sample_full, ChapterEntry, ChapterList};
-use crate::clip::{parse_clip, Clipping};
+use crate::chapter::{ChapterEntry, ChapterList, decode_text_sample_full};
+use crate::clip::{Clipping, parse_clip};
 use crate::cmov::parse_cmov;
-use crate::ctab::{parse_ctab, Ctab};
+use crate::ctab::{Ctab, parse_ctab};
 use crate::edit::parse_elst_full;
-use crate::fragment::{parse_mfra, parse_mvex, resolve_traf_samples, Mehd, Tfra, TrexDefaults};
-use crate::gmhd::{parse_gmin, parse_tcmi, parse_text_header, Gmhd};
+use crate::fragment::{Mehd, Tfra, TrexDefaults, parse_mfra, parse_mvex, resolve_traf_samples};
+use crate::gmhd::{Gmhd, parse_gmin, parse_tcmi, parse_text_header};
 use crate::header::{
-    parse_elng, parse_ftyp, parse_hdlr, parse_hmhd, parse_mdhd, parse_mvhd, parse_tkhd, Ftyp,
-    MediaHeaderKind, Mvhd,
+    Ftyp, MediaHeaderKind, Mvhd, parse_elng, parse_ftyp, parse_hdlr, parse_hmhd, parse_mdhd,
+    parse_mvhd, parse_tkhd,
 };
 use crate::leva::Leva;
 use crate::matte::parse_matt;
-use crate::media_meta::{parse_cslg, parse_tapt_dims, MetaKeyValue, Tapt};
-use crate::pdin::{parse_pdin, Pdin};
-use crate::pnot::{parse_pnot, Pnot};
-use crate::prft::{parse_prft, Prft};
-use crate::qt_metadata::{parse_qt_metadata, QtMetadata};
-use crate::reference::{parse_dref, parse_rdrf, ReferenceMovie};
+use crate::media_meta::{MetaKeyValue, Tapt, parse_cslg, parse_tapt_dims};
+use crate::pdin::{Pdin, parse_pdin};
+use crate::pnot::{Pnot, parse_pnot};
+use crate::prft::{Prft, parse_prft};
+use crate::qt_metadata::{QtMetadata, parse_qt_metadata};
+use crate::reference::{ReferenceMovie, parse_dref, parse_rdrf};
 use crate::sample_aux::{parse_saio, parse_saiz};
 use crate::sample_groups::{parse_csgp, parse_sbgp, parse_sgpd};
 use crate::sample_table::{
-    parse_co64, parse_ctts, parse_padb, parse_sdtp, parse_stco, parse_stdp, parse_stsc, parse_stsh,
-    parse_stss, parse_stsz, parse_stts, parse_stz2, parse_subs, SampleEntry, SampleSizeSource,
-    SampleTable, SubSampleInfo,
+    SampleEntry, SampleSizeSource, SampleTable, SubSampleInfo, parse_co64, parse_ctts, parse_padb,
+    parse_sdtp, parse_stco, parse_stdp, parse_stsc, parse_stsh, parse_stss, parse_stsz, parse_stts,
+    parse_stz2, parse_subs,
 };
-use crate::sidx::{parse_sidx, Sidx};
-use crate::ssix::{parse_ssix, Ssix};
-use crate::styp::{parse_styp, Styp};
+use crate::sidx::{Sidx, parse_sidx};
+use crate::ssix::{Ssix, parse_ssix};
+use crate::styp::{Styp, parse_styp};
 use crate::timecode::{StartTimecode, TimecodeSample};
-use crate::track::{parse_stsd, Track, TrackRef, TrackRefKind};
+use crate::track::{Track, TrackRef, TrackRefKind, parse_stsd};
 use crate::track_load::parse_load;
-use crate::user_data::{parse_udta, UserDataEntry};
-use crate::uuid::{parse_uuid, Uuid};
+use crate::user_data::{UserDataEntry, parse_udta};
+use crate::uuid::{Uuid, parse_uuid};
 
 #[cfg(feature = "registry")]
 use oxideav_core::{
@@ -1285,12 +1285,12 @@ impl MovDemuxer {
             None => return Err(Error::invalid("MOV: chapter primary index out of range")),
         };
         // Refuse self-reference.
-        if let Some(primary) = self.tracks.get(primary_track_index) {
-            if primary.tkhd.track_id == chap_track_id {
-                return Err(Error::invalid(
-                    "MOV: chapter track-id points at the primary track (cycle)",
-                ));
-            }
+        if let Some(primary) = self.tracks.get(primary_track_index)
+            && primary.tkhd.track_id == chap_track_id
+        {
+            return Err(Error::invalid(
+                "MOV: chapter track-id points at the primary track (cycle)",
+            ));
         }
         // Resolve track-id → track-index.
         let chap_index = self
@@ -2050,10 +2050,10 @@ impl MovDemuxer {
         let mut by_group: std::collections::BTreeMap<i32, Vec<usize>> =
             std::collections::BTreeMap::new();
         for (idx, t) in self.tracks.iter().enumerate() {
-            if let Some(ts) = t.track_selection() {
-                if ts.switch_group != 0 {
-                    by_group.entry(ts.switch_group).or_default().push(idx);
-                }
+            if let Some(ts) = t.track_selection()
+                && ts.switch_group != 0
+            {
+                by_group.entry(ts.switch_group).or_default().push(idx);
             }
         }
         by_group.into_iter().collect()
@@ -2676,10 +2676,10 @@ impl MovDemuxer {
             // With discard emission on, a never-presented sample IS
             // the next packet — honour the "next packet's dts equals
             // this" contract with its extrapolated timing.
-            if self.emit_never_presented {
-                if let Some(t) = self.never_presented_timing_for(stream_index as usize, s) {
-                    return Ok(t.dts);
-                }
+            if self.emit_never_presented
+                && let Some(t) = self.never_presented_timing_for(stream_index as usize, s)
+            {
+                return Ok(t.dts);
             }
         }
         // Every remaining sample is dropped by the edit list; the
@@ -2745,7 +2745,7 @@ impl MovDemuxer {
             match seg.kind {
                 crate::EditSegmentKind::Empty => continue,
                 crate::EditSegmentKind::Dwell { media_time } => {
-                    return crate::edit::sat_i64(media_time as i128)
+                    return crate::edit::sat_i64(media_time as i128);
                 }
                 crate::EditSegmentKind::Media {
                     media_time_start,
@@ -2762,7 +2762,7 @@ impl MovDemuxer {
             match seg.kind {
                 crate::EditSegmentKind::Empty => continue,
                 crate::EditSegmentKind::Dwell { media_time } => {
-                    return crate::edit::sat_i64(media_time as i128)
+                    return crate::edit::sat_i64(media_time as i128);
                 }
                 crate::EditSegmentKind::Media {
                     media_time_start,
@@ -3176,25 +3176,25 @@ pub fn dref_file_opener(
             DataReference::Urn { .. } => {
                 return Err(unsupported(
                     "MOV: dref_file_opener: urn  reference carries no location".into(),
-                ))
+                ));
             }
             DataReference::Alias(_) | DataReference::Resource(_) => {
                 return Err(unsupported(
                     "MOV: dref_file_opener: Macintosh alias records are not resolvable \
                      from the QTFF spec alone; bring your own opener"
                         .into(),
-                ))
+                ));
             }
             DataReference::SelfRef => {
                 return Err(unsupported(
                     "MOV: dref_file_opener: self-reference reached the external opener".into(),
-                ))
+                ));
             }
             DataReference::Other(t, _) => {
                 return Err(unsupported(format!(
                     "MOV: dref_file_opener: unknown data-reference type {:?}",
                     String::from_utf8_lossy(t)
-                )))
+                )));
             }
         };
         // file:// (and legacy file:) URLs go through the absolute-path
@@ -3422,17 +3422,17 @@ fn build_streams(tracks: &[Track], resolver: &dyn CodecResolver) -> Vec<StreamIn
                         params.extradata = desc.extra.clone();
                     }
                 }
-            } else if t.is_video() {
-                if let Some(desc) = t.sample_descriptions.first() {
-                    if desc.width != 0 {
-                        params.width = Some(desc.width as u32);
-                    }
-                    if desc.height != 0 {
-                        params.height = Some(desc.height as u32);
-                    }
-                    if !desc.extra.is_empty() {
-                        params.extradata = desc.extra.clone();
-                    }
+            } else if t.is_video()
+                && let Some(desc) = t.sample_descriptions.first()
+            {
+                if desc.width != 0 {
+                    params.width = Some(desc.width as u32);
+                }
+                if desc.height != 0 {
+                    params.height = Some(desc.height as u32);
+                }
+                if !desc.extra.is_empty() {
+                    params.extradata = desc.extra.clone();
                 }
             }
         }
@@ -3819,25 +3819,25 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
     // Cross-validate cslg against ctts when both are present. The ISO
     // BMFF guarantees ctts deltas fall inside [least, greatest] (§8.6.1.4);
     // a mismatch is suspicious so we surface it as `InvalidData`.
-    if let Some(c) = track.cslg {
-        if !track.sample_table.ctts.is_empty() {
-            let mut min = i64::MAX;
-            let mut max = i64::MIN;
-            for e in &track.sample_table.ctts {
-                let v = e.composition_offset as i64;
-                if v < min {
-                    min = v;
-                }
-                if v > max {
-                    max = v;
-                }
+    if let Some(c) = track.cslg
+        && !track.sample_table.ctts.is_empty()
+    {
+        let mut min = i64::MAX;
+        let mut max = i64::MIN;
+        for e in &track.sample_table.ctts {
+            let v = e.composition_offset as i64;
+            if v < min {
+                min = v;
             }
-            if min < c.least_decode_to_display_delta || max > c.greatest_decode_to_display_delta {
-                return Err(Error::invalid(format!(
-                    "MOV: ctts range [{min}, {max}] outside cslg [{}, {}]",
-                    c.least_decode_to_display_delta, c.greatest_decode_to_display_delta,
-                )));
+            if v > max {
+                max = v;
             }
+        }
+        if min < c.least_decode_to_display_delta || max > c.greatest_decode_to_display_delta {
+            return Err(Error::invalid(format!(
+                "MOV: ctts range [{min}, {max}] outside cslg [{}, {}]",
+                c.least_decode_to_display_delta, c.greatest_decode_to_display_delta,
+            )));
         }
     }
     Ok(track)
@@ -3868,7 +3868,7 @@ fn parse_tref<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Ve
         // Each child's payload is a tightly-packed list of u32 track ids.
         let payload = read_payload(r, child)?;
         let mut ids = Vec::with_capacity(payload.len() / 4);
-        for chunk in payload.chunks_exact(4) {
+        for chunk in payload.as_chunks::<4>().0 {
             ids.push(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
         out.push(TrackRef {
@@ -4725,7 +4725,7 @@ mod tests {
         body.extend_from_slice(&0u32.to_be_bytes()); // first_offset
         body.extend_from_slice(&[0, 0]); // reserved
         body.extend_from_slice(&1u16.to_be_bytes()); // reference_count = 1
-                                                     // One media reference, starts with a SAP of type 1.
+        // One media reference, starts with a SAP of type 1.
         let w0 = 0x0000_1000u32; // reference_type=0, referenced_size=4096
         let w2 = (1u32 << 31) | (1u32 << 28); // starts_with_SAP=1, SAP_type=1
         body.extend_from_slice(&w0.to_be_bytes());

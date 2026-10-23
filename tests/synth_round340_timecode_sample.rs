@@ -17,7 +17,7 @@ use std::io::Cursor;
 
 use common::*;
 use oxideav_core::ReadSeek;
-use oxideav_mov::{MovDemuxer, TimecodeRecord, TimecodeSample, TMCD_FLAG_COUNTER};
+use oxideav_mov::{MovDemuxer, TMCD_FLAG_COUNTER, TimecodeRecord, TimecodeSample};
 
 /// Build a two-track movie: a video track (id 1) carrying a `tref/tmcd`
 /// pointing at a timecode track (id 2). The timecode track has a single

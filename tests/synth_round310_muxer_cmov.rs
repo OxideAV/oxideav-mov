@@ -24,7 +24,7 @@
 use std::io::Cursor;
 
 use oxideav_core::{Demuxer, ReadSeek};
-use oxideav_mov::{MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, DCOM_ALG_ZLIB};
+use oxideav_mov::{DCOM_ALG_ZLIB, MovDemuxer, MovMuxer, MuxSample, MuxTrackKind};
 
 /// Build a deterministic multi-sample video movie. `compress` selects
 /// the plain vs. compressed-movie-resource write path. Returns the
