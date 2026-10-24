@@ -14,6 +14,7 @@ pub mod atom;
 pub mod chapter;
 pub mod clip;
 pub mod cmov;
+pub mod codec_config;
 pub mod ctab;
 pub mod demuxer;
 pub mod edit;
@@ -68,6 +69,7 @@ pub use cmov::{
     CMVD_MIN_BODY_LEN, Cmov, Cmvd, DCOM_ALG_ZLIB, DCOM_BODY_LEN, Dcom,
     compress as compress_movie_resource, parse_cmov, parse_cmvd, parse_dcom,
 };
+pub use codec_config::{config_atom_for_format, config_record_from_extensions};
 pub use ctab::{ColorTableEntry, Ctab, parse_ctab};
 pub use demuxer::{
     DataReferenceOpener, MAX_ALIAS_DEPTH, MovDemuxer, dref_file_opener, open_file_url,

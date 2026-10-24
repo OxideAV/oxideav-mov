@@ -30,6 +30,13 @@ Decoding stays in codec crates: this crate calls
   selection / current time fields), per-track `tkhd` / `mdia`
   (`mdhd`, `hdlr`) / `minf/stbl`, plus the QuickTime `clip` / `crgn`,
   `matt` / `kmat`, `load`, `imap`, and Color Table atoms.
+- Stream `extradata` is the codec's configuration record, not the raw
+  sample-description extension atoms: `avcC` / `hvcC` / `av1C` bodies,
+  the `vpcC` body (with its FullBox word), the `esds`
+  DecoderSpecificInfo, `OpusHead` + the `dOps` body, the `dfLa` / `alac`
+  bodies after their FullBox word, and `dac3` / `dec3` verbatim — found
+  directly or inside a `wave` extension. The registry muxer frames it
+  back (`config_atom_for_format`), so demux → mux → demux is byte-exact.
 - Sample tables: `stsd`, `stts`, `stsc`, `stsz` / `stz2` (compact),
   `stco` / `co64`, `stss`, `stsh` (shadow sync), `sdtp`, `stdp`,
   `padb`, `subs` (sub-samples), `saiz` / `saio` (sample-aux), and

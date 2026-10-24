@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- H.264 (and HEVC / AV1 / VP8 / VP9 / Opus / FLAC / ALAC / AC-3 /
+  E-AC-3) streams in a QuickTime movie now carry the codec's
+  configuration record as `CodecParameters::extradata` (`avcC` /
+  `hvcC` / `av1C` / `vpcC` / `dOps` / `dfLa` / `alac` / `dac3` /
+  `dec3`, directly or inside the `wave` extension) instead of the raw
+  framed extension atoms, so an H.264 `.mov` decodes (50/50 frames,
+  bit-exact vs ffmpeg on the corpus fixture) and remuxes to MKV.
+- The registry muxer frames bare configuration-record extradata back
+  into the format's configuration atom (AAC gets a minimal
+  ES_Descriptor `esds`), so `.mov` → `.mov` remux keeps the decoder
+  configuration; already-framed atom lists pass through unchanged.
+
+### Added
+
+- `codec_config` module: `config_record_from_extensions` and its
+  inverse `config_atom_for_format`.
+
 ### Changed
 
 - edition 2024, MSRV 1.95

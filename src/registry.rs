@@ -116,9 +116,10 @@ struct PendingTrack {
     /// Ticks-per-value multiplier — the stream time base's numerator,
     /// so `value × tick_num` is in `media_timescale` units.
     tick_num: i64,
-    /// Codec-config extension atoms for the `stsd` entry, verbatim
-    /// (the same framed-atoms blob the demuxer surfaces as
-    /// `extradata`).
+    /// Codec-config extension atoms for the `stsd` entry: the
+    /// stream's extradata (a bare configuration record, as the
+    /// demuxer surfaces it) framed as the format's configuration atom
+    /// by [`crate::codec_config::config_atom_for_format`].
     extra: Vec<u8>,
     samples: Vec<PendingSample>,
     /// Synthesised decode time for the next packet that arrives
@@ -194,7 +195,7 @@ pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<
             kind,
             media_timescale: s.time_base.den() as u32,
             tick_num: s.time_base.num(),
-            extra: s.params.extradata.clone(),
+            extra: crate::codec_config::config_atom_for_format(&format, &s.params.extradata),
             samples: Vec::new(),
             next_auto_dts: 0,
         });
