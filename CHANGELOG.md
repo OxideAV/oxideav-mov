@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `codec_config` module: `config_record_from_extensions` and its
   inverse `config_atom_for_format`.
+- Video streams declare `pixel_format` (H.264 from the `avcC` SPS or,
+  without one, the record's high-profile fields; HEVC from `hvcC`;
+  AV1 from `av1C`; VP9 from the first frame's uncompressed header),
+  the output size after the H.264 / HEVC SPS cropping window, and
+  `frame_rate` when every sample bar the last lasts the same
+  (`time_scale / duration`, reduced — 30000/1001, 25/1, …).
+- Uncompressed sound tracks declare `sample_format` from the sound
+  description (QTFF Table 4-7 `raw ` / `twos` / `sowt` / `in24` /
+  `in32` / `fl32` / `fl64`; version-2 `lpcm` format-specific flags).
 
 ### Changed
 

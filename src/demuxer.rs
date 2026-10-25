@@ -1027,7 +1027,7 @@ impl MovDemuxer {
         // (only when the registry feature is on). The resolved
         // `CodecId` is stored alongside the per-track stream record.
         #[cfg(feature = "registry")]
-        let streams = build_streams(&tracks, resolver);
+        let mut streams = build_streams(&tracks, resolver);
 
         // Tfra-driven keyframe back-patch: a common fragmented writer
         // emits a `tfra` entry per per-moof-leading sample but
@@ -1093,6 +1093,8 @@ impl MovDemuxer {
             }
         }
         samples.sort_by_key(|(_, s)| s.offset);
+        #[cfg(feature = "registry")]
+        fill_params_from_samples(&mut streams, &tracks, &samples, input.as_mut())?;
 
         // Touch the resolver to silence unused warnings on the
         // standalone build path.
@@ -3426,7 +3428,27 @@ fn build_streams(tracks: &[Track], resolver: &dyn CodecResolver) -> Vec<StreamIn
             if (t.is_video() || t.is_audio())
                 && let Some(desc) = t.sample_descriptions.first()
             {
-                if let Some(rec) = crate::codec_config::config_record_from_extensions(&desc.extra) {
+                let record = crate::codec_config::config_record_from_extensions(&desc.extra);
+                if t.is_video()
+                    && let (Some(rec), Some(codec)) =
+                        (&record, crate::video_config::codec_for_format(&format))
+                {
+                    // The decoded-picture layout and output size the
+                    // configuration record states (the SPS cropping
+                    // window wins over a description that declares
+                    // the coded, macroblock-aligned size).
+                    params.pixel_format = crate::video_config::pixel_format_from_config(codec, rec);
+                    if let Some((w, h)) =
+                        crate::video_config::cropped_dimensions_from_config(codec, rec)
+                    {
+                        params.width = Some(w);
+                        params.height = Some(h);
+                    }
+                }
+                if t.is_audio() {
+                    params.sample_format = pcm_sample_format(desc);
+                }
+                if let Some(rec) = record {
                     params.extradata = rec;
                 } else if !desc.extra.is_empty() {
                     params.extradata = desc.extra.clone();
@@ -3450,6 +3472,150 @@ fn build_streams(tracks: &[Track], resolver: &dyn CodecResolver) -> Vec<StreamIn
         });
     }
     out
+}
+
+/// The sample format an uncompressed sound description states (QTFF
+/// 2012-08-14 Table 4-7, "Partial list of supported QuickTime audio
+/// formats", and p. 183 "LPCM flag values"): `raw ` is 8-bit offset
+/// binary; `twos` / `sowt` are two's complement at the description's
+/// sample size (8 or 16 bits); `in24` / `in32` / `fl32` / `fl64` name
+/// their width; a version-2 `lpcm` description spells the layout in
+/// its format-specific flags and constant bits per channel. The
+/// unspecified `0x00000000` / `NONE` codes are `raw ` or `twos` by
+/// sample size. `None` for compressed formats (the decoder's call),
+/// non-interleaved or fixed-point `lpcm`, and sizes without a packed
+/// [`SampleFormat`](oxideav_core::SampleFormat).
+#[cfg(feature = "registry")]
+fn pcm_sample_format(desc: &crate::track::SampleDescription) -> Option<oxideav_core::SampleFormat> {
+    use oxideav_core::SampleFormat::*;
+    let bits = desc.bits_per_sample;
+    Some(match &desc.format {
+        b"raw " => U8,
+        b"\0\0\0\0" | b"NONE" => match bits {
+            8 => U8,
+            16 => S16,
+            _ => return None,
+        },
+        b"twos" | b"sowt" => match bits {
+            8 => S8,
+            16 => S16,
+            24 => S24,
+            32 => S32,
+            _ => return None,
+        },
+        b"in24" => S24,
+        b"in32" => S32,
+        b"fl32" => F32,
+        b"fl64" => F64,
+        b"lpcm" => {
+            let v2 = desc.sound_v2?;
+            let f = v2.format_specific_flags;
+            if f.is_non_interleaved() || f.sample_fraction() != 0 {
+                return None;
+            }
+            match (
+                f.is_float(),
+                f.is_signed_integer(),
+                v2.const_bits_per_channel,
+            ) {
+                (true, _, 32) => F32,
+                (true, _, 64) => F64,
+                (false, false, 8) => U8,
+                (false, true, 8) => S8,
+                (false, true, 16) => S16,
+                (false, true, 24) => S24,
+                (false, true, 32) => S32,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// Stream parameters only the sample tables (or the samples
+/// themselves) state, filled once every moov and fragment sample is
+/// known:
+///
+/// * `frame_rate` of a video track whose samples all last the same
+///   (QTFF 2012-08-14 p. 70 `stts`, ISO/IEC 14496-12 §8.8.8 `trun`):
+///   one frame per duration, in the media time scale. The last sample
+///   in decoding order may differ — writers commonly trim it to the
+///   movie's end — and is not counted; varying durations leave it
+///   `None` (a variable-rate track has no nominal rate to declare).
+/// * `pixel_format` of a VP9 track, from the first frame's
+///   uncompressed header (`vpcC` is forwarded verbatim but not read).
+///   Only for tracks whose media lives in this file (every `dref`
+///   entry self-referencing).
+#[cfg(feature = "registry")]
+fn fill_params_from_samples(
+    streams: &mut [StreamInfo],
+    tracks: &[Track],
+    samples: &[(u32, SampleEntry)],
+    input: &mut dyn ReadSeek,
+) -> Result<()> {
+    for (i, (stream, t)) in streams.iter_mut().zip(tracks).enumerate() {
+        if !t.is_video() {
+            continue;
+        }
+        let track_samples = || {
+            samples
+                .iter()
+                .filter(move |(ti, _)| *ti as usize == i)
+                .map(|(_, s)| s)
+        };
+        let mut first: Option<&SampleEntry> = None;
+        let mut last: Option<&SampleEntry> = None;
+        for s in track_samples() {
+            if first.is_none_or(|f| s.dts < f.dts) {
+                first = Some(s);
+            }
+            if last.is_none_or(|l| s.dts >= l.dts) {
+                last = Some(s);
+            }
+        }
+        let (Some(first), Some(last)) = (first, last) else {
+            continue;
+        };
+        if stream.params.frame_rate.is_none() {
+            let mut delta: Option<u32> = None;
+            let mut constant = true;
+            for s in track_samples() {
+                if std::ptr::eq(s, last) && !std::ptr::eq(s, first) {
+                    continue;
+                }
+                match delta {
+                    None => delta = Some(s.duration),
+                    Some(d) if d == s.duration => {}
+                    Some(_) => {
+                        constant = false;
+                        break;
+                    }
+                }
+            }
+            let tb = stream.time_base.0;
+            if constant
+                && let Some(d) = delta
+                && d > 0
+                && tb.num > 0
+                && tb.den > 0
+                && let Some(n) = tb.num.checked_mul(i64::from(d))
+            {
+                stream.params.frame_rate = Some(oxideav_core::Rational::new(tb.den, n).reduced());
+            }
+        }
+        if t.primary_format() == Some(*b"vp09")
+            && stream.params.pixel_format.is_none()
+            && t.is_self_contained()
+            && first.size > 0
+        {
+            let mut head = vec![0u8; first.size.min(16) as usize];
+            input.seek(SeekFrom::Start(first.offset))?;
+            if input.read_exact(&mut head).is_ok() {
+                stream.params.pixel_format = crate::video_config::vp9_frame_pixel_format(&head);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4464,6 +4630,51 @@ pub fn probe(p: &oxideav_core::ProbeData) -> u8 {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn pcm_sample_format_follows_the_description() {
+        use crate::track::{LpcmFlags, SampleDescription, SoundV2};
+        use oxideav_core::SampleFormat::*;
+        let desc = |format: &[u8; 4], bits: u16| SampleDescription {
+            format: *format,
+            bits_per_sample: bits,
+            ..Default::default()
+        };
+        assert_eq!(pcm_sample_format(&desc(b"raw ", 8)), Some(U8));
+        assert_eq!(pcm_sample_format(&desc(b"twos", 8)), Some(S8));
+        assert_eq!(pcm_sample_format(&desc(b"twos", 16)), Some(S16));
+        assert_eq!(pcm_sample_format(&desc(b"NONE", 8)), Some(U8));
+        assert_eq!(pcm_sample_format(&desc(b"\0\0\0\0", 16)), Some(S16));
+        assert_eq!(pcm_sample_format(&desc(b"NONE", 12)), None);
+        assert_eq!(pcm_sample_format(&desc(b"in24", 24)), Some(S24));
+        assert_eq!(pcm_sample_format(&desc(b"mp4a", 16)), None);
+        assert_eq!(pcm_sample_format(&desc(b"ulaw", 16)), None);
+        let lpcm = |flags: u32, bits: u32| SampleDescription {
+            format: *b"lpcm",
+            sound_v2: Some(SoundV2 {
+                const_bits_per_channel: bits,
+                format_specific_flags: LpcmFlags(flags),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let signed = LpcmFlags::IS_SIGNED_INTEGER | LpcmFlags::IS_PACKED;
+        assert_eq!(pcm_sample_format(&lpcm(signed, 24)), Some(S24));
+        assert_eq!(
+            pcm_sample_format(&lpcm(signed | LpcmFlags::IS_BIG_ENDIAN, 16)),
+            Some(S16)
+        );
+        assert_eq!(pcm_sample_format(&lpcm(LpcmFlags::IS_FLOAT, 64)), Some(F64));
+        assert_eq!(pcm_sample_format(&lpcm(LpcmFlags::IS_PACKED, 8)), Some(U8));
+        assert_eq!(
+            pcm_sample_format(&lpcm(signed | LpcmFlags::IS_NON_INTERLEAVED, 16)),
+            None
+        );
+        assert_eq!(pcm_sample_format(&lpcm(signed | (8 << 7), 32)), None);
+        assert_eq!(pcm_sample_format(&lpcm(signed, 20)), None);
+        // A version-0 `lpcm` has no flags to read.
+        assert_eq!(pcm_sample_format(&desc(b"lpcm", 16)), None);
+    }
 
     /// Minimal demuxer-open round trip: a hand-built one-track,
     /// one-sample QTFF file with brand 'qt  '. The synthetic builder

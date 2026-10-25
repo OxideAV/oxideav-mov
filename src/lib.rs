@@ -52,6 +52,9 @@ pub mod uuid;
 #[cfg(feature = "registry")]
 pub mod registry;
 
+#[cfg(feature = "registry")]
+mod video_config;
+
 #[cfg(not(feature = "registry"))]
 pub mod standalone;
 
