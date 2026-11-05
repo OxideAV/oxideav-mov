@@ -161,6 +161,26 @@ fuzz_target!(|data: &[u8]| {
     let _ = dmx.user_data.len();
     let ntracks = dmx.tracks.len();
 
+    // Audio stream parameters (round 481): every sound description's
+    // PCM layout, `esds` DecoderConfigDescriptor and AudioSpecificConfig
+    // (GASpecificConfig, program_config_element, SBR / PS sync
+    // extensions — bit-level reads bounded by the DSI length), plus
+    // the raw input bytes read as an AudioSpecificConfig so arbitrary
+    // bit patterns reach the bit reader directly.
+    for t in dmx.tracks.iter().take(16) {
+        for desc in t.sample_descriptions.iter().take(4) {
+            let _ = oxideav_mov::pcm_layout(desc).and_then(|l| l.codec_id());
+            if let Some(dcd) = oxideav_mov::es_decoder_config(desc)
+                && let Some(asc) = dcd.audio_specific_config()
+            {
+                let _ = (asc.output_sample_rate(), asc.output_channels());
+            }
+        }
+    }
+    if let Some(asc) = oxideav_mov::AudioSpecificConfig::parse(&data[..data.len().min(64)]) {
+        let _ = (asc.output_sample_rate(), asc.output_channels(), asc.coded_channels());
+    }
+
     // Touch the round-162 / round-105 / round-114 / round-125 /
     // round-128 / round-137 / round-157 file-scope surfaces. Each
     // field is an immediate value populated by the open() path,

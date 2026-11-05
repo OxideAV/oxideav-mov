@@ -931,6 +931,33 @@ mod tests {
         assert_eq!(layout_for_channel_configuration(0), None);
     }
 
+    #[test]
+    fn arbitrary_bytes_never_panic() {
+        // Deterministic xorshift sweep over short configs and
+        // descriptors: every read is bounds-checked.
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let rounds = if cfg!(miri) { 200 } else { 50_000 };
+        for _ in 0..rounds {
+            let len = (next() % 24) as usize;
+            let buf: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            if let Some(a) = AudioSpecificConfig::parse(&buf) {
+                let _ = (a.output_sample_rate(), a.output_channels());
+            }
+            let _ = EsDecoderConfig::parse(&buf);
+            let mut esds = vec![0x03, len as u8, 0, 1, 0, 0x04, len.saturating_sub(5) as u8];
+            esds.extend_from_slice(&buf);
+            if let Some(d) = EsDecoderConfig::parse(&esds) {
+                let _ = d.audio_specific_config();
+            }
+        }
+    }
+
     #[derive(Default)]
     struct BitWriter {
         bytes: Vec<u8>,
