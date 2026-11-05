@@ -82,6 +82,12 @@ pub fn config_record_from_extensions(extra: &[u8]) -> Option<Vec<u8>> {
         .find_map(|(fc, p)| record_from_atom(&fc, p))
 }
 
+/// `true` when a buffer of framed atoms has a top-level `fourcc` atom.
+#[cfg(feature = "registry")]
+pub(crate) fn has_top_level_atom(buf: &[u8], fourcc: &[u8; 4]) -> bool {
+    atoms(buf).iter().any(|(fc, _)| fc == fourcc)
+}
+
 /// Frame one atom.
 fn frame(fourcc: &[u8; 4], parts: &[&[u8]]) -> Vec<u8> {
     let len: usize = 8 + parts.iter().map(|p| p.len()).sum::<usize>();

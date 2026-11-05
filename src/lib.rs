@@ -11,6 +11,7 @@
 //! 2001-03-01) — primarily Chapters 1–3.
 
 pub mod atom;
+pub mod audio_params;
 pub mod chapter;
 pub mod clip;
 pub mod cmov;
@@ -61,6 +62,9 @@ pub mod standalone;
 pub use atom::{
     AtomHeader, MAX_INMEMORY_ATOM_BODY, read_atom_header, read_payload, read_payload_bounded,
     skip_payload, walk_children,
+};
+pub use audio_params::{
+    AudioSpecificConfig, EsDecoderConfig, PcmLayout, ProgramConfig, es_decoder_config, pcm_layout,
 };
 pub use chapter::{
     ChapterEntry, ChapterList, ColorRgba, FontTableEntry, HighlightColor, HighlightRange,

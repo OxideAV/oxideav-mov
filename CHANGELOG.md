@@ -34,10 +34,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uncompressed sound tracks declare `sample_format` from the sound
   description (QTFF Table 4-7 `raw ` / `twos` / `sowt` / `in24` /
   `in32` / `fl32` / `fl64`; version-2 `lpcm` format-specific flags).
+- Audio streams carry complete, truthful parameters
+  (`audio_params` module):
+  - PCM codec ids from the sound description instead of `unknown` —
+    `raw ` → `pcm_u8`, `twos` → `pcm_s8` / `pcm_s16be` (version-1
+    `bytesPerPacket` width), `sowt` → `pcm_s16le` …, `in24` / `in32`
+    / `fl32` / `fl64` big-endian unless the `wave` `enda` datum says
+    little-endian, version-2 `lpcm` from its float / big-endian /
+    signed flags (padded containers, fixed-point and non-interleaved
+    layouts stay undescribed); `ulaw` / `alaw` / `ima4` / the
+    Microsoft ACM ADPCM codes / `.mp3` / `ac-3` / `alac` name their
+    codec when the resolver knows none. 31 fixtures match `ffprobe`.
+  - `mp4a`: the `esds` AudioSpecificConfig (ISO/IEC 14496-3 Table
+    1.19, GASpecificConfig, program_config_element, hierarchical and
+    backward-compatible SBR / PS signalling) gives the output sample
+    rate (the SBR rate for HE-AAC), channel count (two for a PS /
+    implicit-PS mono stream, the PCE's speakers for configuration 0)
+    and the `channelConfiguration` layout; `avgBitrate` is the
+    `bit_rate`. Extradata stays the AudioSpecificConfig.
+  - `chan` atoms naming a predefined layout tag set `channel_layout`
+    (orders core cannot name give `DiscreteN`).
+  - New public `AudioSpecificConfig`, `ProgramConfig`,
+    `EsDecoderConfig`, `PcmLayout`, `pcm_layout`, `es_decoder_config`.
 
 ### Changed
 
 - edition 2024, MSRV 1.95
+- Uncompressed audio streams no longer forward the raw extension
+  atoms as extradata — the codec id and sample format state the
+  layout.
+- The registry muxer writes the audio facts back: 8 / 16-bit PCM in
+  one or two channels keeps `raw ` / `twos` / `sowt` with the true
+  sample size (was always 16), every other PCM layout becomes a
+  version-2 `lpcm` description with matching flags, other codecs
+  with more than two channels or a rate past 65535 Hz use the
+  version-2 layout, and a stream channel layout with a predefined tag
+  is written as a `chan` atom. Demux → mux → demux keeps codec id,
+  rate, channels, layout, sample format and extradata on 20 fixtures.
 
 ## [0.0.6](https://github.com/OxideAV/oxideav-mov/compare/v0.0.5...v0.0.6) - 2026-10-04
 

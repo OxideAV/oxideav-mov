@@ -10,8 +10,10 @@
 //! [`open_muxer`]) and the direct [`crate::MovDemuxer`] /
 //! [`crate::MovMuxer`] types remain equally supported entry points.
 
+use crate::audio_params::PcmLayout;
 use crate::demuxer;
-use crate::muxer::{MovMuxer, MuxSample, MuxTrackKind};
+use crate::muxer::{AudioEntryV2, MovMuxer, MuxSample, MuxTrackKind};
+use crate::track::LpcmFlags;
 
 use oxideav_core::{
     CodecParameters, CodecTag, ContainerRegistry, Error, MediaType, Muxer, Packet, Result,
@@ -53,9 +55,10 @@ oxideav_core::register!("mov", register);
 /// FourCC.
 ///
 /// The codec-id table is consulted first: it carries the
-/// case-sensitive QTFF spellings (sound formats per the QTFF sound
-/// sample description tables — `twos`/`sowt`/`fl32`/… — and the
-/// conventional ISO video entry types). When the id is unknown but the
+/// case-sensitive QTFF spellings (compressed sound formats per the
+/// QTFF sound sample description tables — `ulaw` / `alaw` / … — and
+/// the conventional ISO video entry types; PCM is written by
+/// [`audio_description`]). When the id is unknown but the
 /// stream carries a [`CodecTag::Fourcc`] (e.g. a remux straight out of
 /// [`crate::MovDemuxer`], which tags every stream with its on-wire
 /// format), the tag's bytes are used with alphabetic bytes folded to
@@ -71,13 +74,6 @@ fn fourcc_for(params: &CodecParameters) -> Result<[u8; 4]> {
         "rawvideo" => Some(b"raw "),
         "aac" => Some(b"mp4a"),
         "alac" => Some(b"alac"),
-        "pcm_s16be" => Some(b"twos"),
-        "pcm_s16le" => Some(b"sowt"),
-        "pcm_u8" => Some(b"raw "),
-        "pcm_f32be" => Some(b"fl32"),
-        "pcm_f64be" => Some(b"fl64"),
-        "pcm_s24be" => Some(b"in24"),
-        "pcm_s32be" => Some(b"in32"),
         "pcm_mulaw" | "ulaw" => Some(b"ulaw"),
         "pcm_alaw" | "alaw" => Some(b"alaw"),
         _ => None,
@@ -96,6 +92,97 @@ fn fourcc_for(params: &CodecParameters) -> Result<[u8; 4]> {
         "MOV muxer: no QTFF sample-description format known for codec '{}' (no FourCC tag on the stream either)",
         params.codec_id.as_str()
     )))
+}
+
+/// How an audio stream's sound sample description is written.
+struct AudioPlan {
+    format: [u8; 4],
+    channels: u16,
+    /// The version-0 sample size field.
+    bits: u16,
+    v2: Option<AudioEntryV2>,
+    /// A framed `chan` extension atom, or empty.
+    chan: Vec<u8>,
+}
+
+/// The sound sample description that states an audio stream's facts
+/// (the inverse of the demuxer's reading):
+///
+/// * 8-bit and 16-bit PCM in at most two channels at a 16-bit rate
+///   keep the classic version-0 codes (QTFF 2012-08-14 pp. 176 – 178:
+///   `raw ` 8-bit offset binary, `twos` big-endian / 8-bit signed,
+///   `sowt` little-endian, "8 or 16 bits per sample");
+/// * every other PCM layout — wider samples, little-endian 24 / 32-bit
+///   or float, more channels, higher rates — is an `lpcm` version-2
+///   description (pp. 181 – 183) whose format-specific flags and
+///   constant bits per channel spell the layout;
+/// * other codecs keep their format code; more than two channels or a
+///   rate past the 16.16 field take the version-2 layout, which those
+///   need ("Audio channel layouts with more than two channels per
+///   track require … a version 2 sound sample description", p. 186);
+/// * a stream channel layout with a predefined `chan` tag is written
+///   as a `chan` extension atom.
+fn audio_description(params: &CodecParameters, sample_rate: u32) -> Result<AudioPlan> {
+    let channels = params.resolved_channels().unwrap_or(1);
+    let chan = params
+        .channel_layout
+        .filter(|l| l.channel_count() == channels)
+        .and_then(crate::audio_params::chan_tag_for_layout)
+        .map(crate::audio_params::chan_atom_for_tag)
+        .unwrap_or_default();
+    let classic = channels <= 2 && sample_rate <= 0xFFFF;
+    if let Some(l) = PcmLayout::from_codec_id(params.codec_id.as_str()) {
+        let v0 = match (l.float, l.signed, l.bits, l.big_endian) {
+            (false, false, 8, _) => Some((*b"raw ", 8)),
+            (false, true, 8, _) => Some((*b"twos", 8)),
+            (false, true, 16, true) => Some((*b"twos", 16)),
+            (false, true, 16, false) => Some((*b"sowt", 16)),
+            _ => None,
+        };
+        if let (Some((format, bits)), true) = (v0, classic) {
+            return Ok(AudioPlan {
+                format,
+                channels,
+                bits,
+                v2: None,
+                chan,
+            });
+        }
+        let mut flags = LpcmFlags::IS_PACKED;
+        if l.float {
+            flags |= LpcmFlags::IS_FLOAT;
+        } else if l.signed {
+            flags |= LpcmFlags::IS_SIGNED_INTEGER;
+        }
+        if l.big_endian && l.bits > 8 {
+            flags |= LpcmFlags::IS_BIG_ENDIAN;
+        }
+        return Ok(AudioPlan {
+            format: *b"lpcm",
+            channels,
+            bits: 16,
+            v2: Some(AudioEntryV2 {
+                audio_sample_rate: f64::from(sample_rate),
+                const_bits_per_channel: l.bits,
+                format_specific_flags: LpcmFlags(flags),
+                const_bytes_per_audio_packet: l.bits / 8 * u32::from(channels),
+                const_lpcm_frames_per_audio_packet: 1,
+            }),
+            chan,
+        });
+    }
+    let format = fourcc_for(params)?;
+    let v2 = (!classic).then(|| AudioEntryV2 {
+        audio_sample_rate: f64::from(sample_rate),
+        ..AudioEntryV2::default()
+    });
+    Ok(AudioPlan {
+        format,
+        channels,
+        bits: 16,
+        v2,
+        chan,
+    })
 }
 
 /// One buffered input packet, timestamps in the stream's own
@@ -121,6 +208,9 @@ struct PendingTrack {
     /// demuxer surfaces it) framed as the format's configuration atom
     /// by [`crate::codec_config::config_atom_for_format`].
     extra: Vec<u8>,
+    /// The QTFF version-2 sound description the track is written
+    /// with (`lpcm` and multichannel / high-rate audio).
+    sound_v2: Option<AudioEntryV2>,
     samples: Vec<PendingSample>,
     /// Synthesised decode time for the next packet that arrives
     /// without any timestamp of its own.
@@ -163,10 +253,11 @@ pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<
                 s.time_base.den()
             )));
         }
-        let format = fourcc_for(&s.params)?;
+        let mut v2 = None;
+        let mut chan = Vec::new();
         let kind = match s.params.media_type {
             MediaType::Video => MuxTrackKind::Video {
-                format,
+                format: fourcc_for(&s.params)?,
                 width: s.params.width.unwrap_or(0).min(u16::MAX as u32) as u16,
                 height: s.params.height.unwrap_or(0).min(u16::MAX as u32) as u16,
             },
@@ -177,10 +268,13 @@ pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<
                         s.index
                     ))
                 })?;
+                let plan = audio_description(&s.params, sample_rate)?;
+                v2 = plan.v2;
+                chan = plan.chan;
                 MuxTrackKind::Audio {
-                    format,
-                    channels: s.params.channels.unwrap_or(1),
-                    bits_per_sample: 16,
+                    format: plan.format,
+                    channels: plan.channels,
+                    bits_per_sample: plan.bits,
                     sample_rate,
                 }
             }
@@ -191,11 +285,22 @@ pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<
                 )));
             }
         };
+        let format = match &kind {
+            MuxTrackKind::Video { format, .. } | MuxTrackKind::Audio { format, .. } => *format,
+            _ => unreachable!("only video and audio kinds are built above"),
+        };
+        let mut extra = crate::codec_config::config_atom_for_format(&format, &s.params.extradata);
+        // Extradata passed through as raw extension atoms may carry
+        // its own `chan` already.
+        if !crate::codec_config::has_top_level_atom(&extra, b"chan") {
+            extra.extend_from_slice(&chan);
+        }
         tracks.push(PendingTrack {
             kind,
             media_timescale: s.time_base.den() as u32,
             tick_num: s.time_base.num(),
-            extra: crate::codec_config::config_atom_for_format(&format, &s.params.extradata),
+            extra,
+            sound_v2: v2,
             samples: Vec::new(),
             next_auto_dts: 0,
         });
@@ -303,7 +408,10 @@ impl Muxer for MovRegistryMuxer {
                     composition_offset,
                 });
             }
-            m.add_track(t.kind.clone(), t.media_timescale, samples, &t.extra);
+            let id = m.add_track(t.kind.clone(), t.media_timescale, samples, &t.extra);
+            if let Some(v2) = t.sound_v2 {
+                m.set_sound_description_v2(id, v2)?;
+            }
         }
         m.write_to(&mut self.out)?;
         self.out.flush().map_err(Error::from)?;

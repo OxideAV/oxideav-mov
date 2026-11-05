@@ -3406,8 +3406,7 @@ fn build_streams(tracks: &[Track], resolver: &dyn CodecResolver) -> Vec<StreamIn
             params = params.with_tag(tag);
             if t.is_audio() {
                 if let Some(desc) = t.sample_descriptions.first() {
-                    params.channels = Some(desc.channels);
-                    params.sample_rate = Some(desc.sample_rate);
+                    fill_audio_params(&mut params, desc);
                 }
             } else if t.is_video()
                 && let Some(desc) = t.sample_descriptions.first()
@@ -3445,11 +3444,12 @@ fn build_streams(tracks: &[Track], resolver: &dyn CodecResolver) -> Vec<StreamIn
                         params.height = Some(h);
                     }
                 }
-                if t.is_audio() {
-                    params.sample_format = pcm_sample_format(desc);
-                }
                 if let Some(rec) = record {
                     params.extradata = rec;
+                } else if t.is_audio() && crate::audio_params::pcm_layout(desc).is_some() {
+                    // Uncompressed audio needs no decoder
+                    // configuration: its codec id and sample format
+                    // state the layout.
                 } else if !desc.extra.is_empty() {
                     params.extradata = desc.extra.clone();
                 }
@@ -3474,60 +3474,90 @@ fn build_streams(tracks: &[Track], resolver: &dyn CodecResolver) -> Vec<StreamIn
     out
 }
 
-/// The sample format an uncompressed sound description states (QTFF
-/// 2012-08-14 Table 4-7, "Partial list of supported QuickTime audio
-/// formats", and p. 183 "LPCM flag values"): `raw ` is 8-bit offset
-/// binary; `twos` / `sowt` are two's complement at the description's
-/// sample size (8 or 16 bits); `in24` / `in32` / `fl32` / `fl64` name
-/// their width; a version-2 `lpcm` description spells the layout in
-/// its format-specific flags and constant bits per channel. The
-/// unspecified `0x00000000` / `NONE` codes are `raw ` or `twos` by
-/// sample size. `None` for compressed formats (the decoder's call),
-/// non-interleaved or fixed-point `lpcm`, and sizes without a packed
-/// [`SampleFormat`](oxideav_core::SampleFormat).
+/// The audio stream facts a sound sample description states, each
+/// from the source the format code makes authoritative:
+///
+/// * uncompressed formats ([`crate::audio_params::pcm_layout`]) name
+///   their codec id (`pcm_s24le`, `pcm_f32be`, …) and sample format
+///   themselves — the layout depends on the description's version-1
+///   / version-2 fields and `wave` data, which a tag lookup cannot
+///   see, so it overrides the resolver;
+/// * compressed formats whose format code names one codec
+///   ([`crate::audio_params::compressed_codec_id`]) and `mp4a` with
+///   an ISO/IEC 14496-3 / 13818-7 object type fall back to that id
+///   when the resolver knows none;
+/// * an `mp4a` AudioSpecificConfig states the output sample rate and
+///   channel count (SBR / PS signalling included) and the speaker set
+///   of its `channelConfiguration`, overriding the description's
+///   fields; the `esds` `avgBitrate` is the nominal bit rate;
+/// * a `chan` atom naming a predefined layout states the channel
+///   layout when its count agrees.
 #[cfg(feature = "registry")]
-fn pcm_sample_format(desc: &crate::track::SampleDescription) -> Option<oxideav_core::SampleFormat> {
-    use oxideav_core::SampleFormat::*;
-    let bits = desc.bits_per_sample;
-    Some(match &desc.format {
-        b"raw " => U8,
-        b"\0\0\0\0" | b"NONE" => match bits {
-            8 => U8,
-            16 => S16,
-            _ => return None,
-        },
-        b"twos" | b"sowt" => match bits {
-            8 => S8,
-            16 => S16,
-            24 => S24,
-            32 => S32,
-            _ => return None,
-        },
-        b"in24" => S24,
-        b"in32" => S32,
-        b"fl32" => F32,
-        b"fl64" => F64,
-        b"lpcm" => {
-            let v2 = desc.sound_v2?;
-            let f = v2.format_specific_flags;
-            if f.is_non_interleaved() || f.sample_fraction() != 0 {
-                return None;
-            }
-            match (
-                f.is_float(),
-                f.is_signed_integer(),
-                v2.const_bits_per_channel,
-            ) {
-                (true, _, 32) => F32,
-                (true, _, 64) => F64,
-                (false, false, 8) => U8,
-                (false, true, 8) => S8,
-                (false, true, 16) => S16,
-                (false, true, 24) => S24,
-                (false, true, 32) => S32,
-                _ => return None,
-            }
+fn fill_audio_params(params: &mut CodecParameters, desc: &crate::track::SampleDescription) {
+    use crate::audio_params as ap;
+    params.channels = Some(desc.channels);
+    params.sample_rate = Some(desc.effective_sample_rate());
+    if let Some(layout) = ap::pcm_layout(desc) {
+        if let Some(id) = layout.codec_id() {
+            params.codec_id = CodecId::new(id);
         }
+        params.sample_format = pcm_sample_format(&layout);
+    } else if params.codec_id.as_str() == "unknown"
+        && let Some(id) = ap::compressed_codec_id(&desc.format)
+    {
+        params.codec_id = CodecId::new(id);
+    }
+    let mut layout = None;
+    if &desc.format == b"mp4a"
+        && let Some(dcd) = ap::es_decoder_config(desc)
+    {
+        if params.codec_id.as_str() == "unknown"
+            && matches!(dcd.object_type_indication, 0x40 | 0x66..=0x68)
+        {
+            params.codec_id = CodecId::new("aac");
+        }
+        if dcd.avg_bitrate != 0 {
+            params.bit_rate = Some(u64::from(dcd.avg_bitrate));
+        }
+        if let Some(asc) = dcd.audio_specific_config() {
+            if let Some(rate) = asc.output_sample_rate() {
+                params.sample_rate = Some(rate);
+            }
+            if let Some(n) = asc.output_channels() {
+                params.channels = Some(n);
+            }
+            layout = if asc.parametric_stereo_upmix() {
+                Some(oxideav_core::ChannelLayout::Stereo)
+            } else {
+                ap::layout_for_channel_configuration(asc.channel_configuration)
+            };
+        }
+    }
+    if let Some(chan) = &desc.chan
+        && let Some(l) = ap::layout_for_chan(chan)
+    {
+        layout = Some(l);
+    }
+    params.channel_layout = layout.filter(|l| Some(l.channel_count()) == params.channels);
+}
+
+/// The core sample format of an uncompressed layout: the packed
+/// interleaved format of that width and kind (core formats name the
+/// in-memory layout; the wire byte order is the codec id's). `None`
+/// for widths core has no packed format for.
+#[cfg(feature = "registry")]
+fn pcm_sample_format(
+    layout: &crate::audio_params::PcmLayout,
+) -> Option<oxideav_core::SampleFormat> {
+    use oxideav_core::SampleFormat::*;
+    Some(match (layout.float, layout.signed, layout.bits) {
+        (true, _, 32) => F32,
+        (true, _, 64) => F64,
+        (false, false, 8) => U8,
+        (false, true, 8) => S8,
+        (false, true, 16) => S16,
+        (false, true, 24) => S24,
+        (false, true, 32) => S32,
         _ => return None,
     })
 }
@@ -4632,23 +4662,61 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn pcm_sample_format_follows_the_description() {
-        use crate::track::{LpcmFlags, SampleDescription, SoundV2};
-        use oxideav_core::SampleFormat::*;
+    fn pcm_codec_and_sample_format_follow_the_description() {
+        use crate::track::{LpcmFlags, SampleDescription, SoundV1, SoundV2, WaveChild};
+        use oxideav_core::SampleFormat::{self, *};
+        fn pcm(desc: &SampleDescription) -> Option<(&'static str, Option<SampleFormat>)> {
+            let l = crate::audio_params::pcm_layout(desc)?;
+            Some((l.codec_id()?, pcm_sample_format(&l)))
+        }
         let desc = |format: &[u8; 4], bits: u16| SampleDescription {
             format: *format,
             bits_per_sample: bits,
             ..Default::default()
         };
-        assert_eq!(pcm_sample_format(&desc(b"raw ", 8)), Some(U8));
-        assert_eq!(pcm_sample_format(&desc(b"twos", 8)), Some(S8));
-        assert_eq!(pcm_sample_format(&desc(b"twos", 16)), Some(S16));
-        assert_eq!(pcm_sample_format(&desc(b"NONE", 8)), Some(U8));
-        assert_eq!(pcm_sample_format(&desc(b"\0\0\0\0", 16)), Some(S16));
-        assert_eq!(pcm_sample_format(&desc(b"NONE", 12)), None);
-        assert_eq!(pcm_sample_format(&desc(b"in24", 24)), Some(S24));
-        assert_eq!(pcm_sample_format(&desc(b"mp4a", 16)), None);
-        assert_eq!(pcm_sample_format(&desc(b"ulaw", 16)), None);
+        assert_eq!(pcm(&desc(b"raw ", 8)), Some(("pcm_u8", Some(U8))));
+        assert_eq!(pcm(&desc(b"twos", 8)), Some(("pcm_s8", Some(S8))));
+        assert_eq!(pcm(&desc(b"twos", 16)), Some(("pcm_s16be", Some(S16))));
+        assert_eq!(pcm(&desc(b"sowt", 16)), Some(("pcm_s16le", Some(S16))));
+        assert_eq!(pcm(&desc(b"NONE", 8)), Some(("pcm_u8", Some(U8))));
+        assert_eq!(pcm(&desc(b"\0\0\0\0", 16)), Some(("pcm_s16be", Some(S16))));
+        assert_eq!(pcm(&desc(b"NONE", 12)), None);
+        assert_eq!(pcm(&desc(b"in24", 16)), Some(("pcm_s24be", Some(S24))));
+        assert_eq!(pcm(&desc(b"in32", 16)), Some(("pcm_s32be", Some(S32))));
+        assert_eq!(pcm(&desc(b"fl32", 16)), Some(("pcm_f32be", Some(F32))));
+        assert_eq!(pcm(&desc(b"fl64", 16)), Some(("pcm_f64be", Some(F64))));
+        assert_eq!(pcm(&desc(b"mp4a", 16)), None);
+        assert_eq!(pcm(&desc(b"ulaw", 16)), None);
+        // Version 1: bytesPerPacket replaces the sample size field.
+        let v1 = SampleDescription {
+            format: *b"sowt",
+            bits_per_sample: 16,
+            audio_version: 1,
+            sound_v1: Some(SoundV1 {
+                samples_per_packet: 1,
+                bytes_per_packet: 3,
+                bytes_per_frame: 6,
+                bytes_per_sample: 2,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(pcm(&v1), Some(("pcm_s24le", Some(S24))));
+        // The `wave` `enda` datum flips in24 / fl32 to little-endian.
+        let le = |format: &[u8; 4]| SampleDescription {
+            format: *format,
+            bits_per_sample: 16,
+            si_decompression_param: Some(crate::track::SiDecompressionParam {
+                children: vec![
+                    WaveChild::format(*format),
+                    WaveChild::new(*b"enda", vec![0, 1]),
+                ],
+                terminated: true,
+                non_atom_data: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(pcm(&le(b"in24")), Some(("pcm_s24le", Some(S24))));
+        assert_eq!(pcm(&le(b"fl32")), Some(("pcm_f32le", Some(F32))));
         let lpcm = |flags: u32, bits: u32| SampleDescription {
             format: *b"lpcm",
             sound_v2: Some(SoundV2 {
@@ -4659,21 +4727,35 @@ mod tests {
             ..Default::default()
         };
         let signed = LpcmFlags::IS_SIGNED_INTEGER | LpcmFlags::IS_PACKED;
-        assert_eq!(pcm_sample_format(&lpcm(signed, 24)), Some(S24));
+        assert_eq!(pcm(&lpcm(signed, 24)), Some(("pcm_s24le", Some(S24))));
         assert_eq!(
-            pcm_sample_format(&lpcm(signed | LpcmFlags::IS_BIG_ENDIAN, 16)),
-            Some(S16)
+            pcm(&lpcm(signed | LpcmFlags::IS_BIG_ENDIAN, 16)),
+            Some(("pcm_s16be", Some(S16)))
         );
-        assert_eq!(pcm_sample_format(&lpcm(LpcmFlags::IS_FLOAT, 64)), Some(F64));
-        assert_eq!(pcm_sample_format(&lpcm(LpcmFlags::IS_PACKED, 8)), Some(U8));
         assert_eq!(
-            pcm_sample_format(&lpcm(signed | LpcmFlags::IS_NON_INTERLEAVED, 16)),
-            None
+            pcm(&lpcm(LpcmFlags::IS_FLOAT, 64)),
+            Some(("pcm_f64le", Some(F64)))
         );
-        assert_eq!(pcm_sample_format(&lpcm(signed | (8 << 7), 32)), None);
-        assert_eq!(pcm_sample_format(&lpcm(signed, 20)), None);
+        assert_eq!(
+            pcm(&lpcm(LpcmFlags::IS_PACKED, 8)),
+            Some(("pcm_u8", Some(U8)))
+        );
+        assert_eq!(
+            pcm(&lpcm(LpcmFlags::IS_PACKED, 16)),
+            Some(("pcm_u16le", None))
+        );
+        assert_eq!(pcm(&lpcm(signed | LpcmFlags::IS_NON_INTERLEAVED, 16)), None);
+        assert_eq!(pcm(&lpcm(signed | (8 << 7), 32)), None);
+        assert_eq!(pcm(&lpcm(signed, 20)), None);
+        // 24-bit samples in 32-bit containers carry padding bits.
+        let mut padded = lpcm(signed, 24);
+        if let Some(v2) = padded.sound_v2.as_mut() {
+            v2.num_audio_channels = 2;
+            v2.const_bytes_per_audio_packet = 8;
+        }
+        assert_eq!(pcm(&padded), None);
         // A version-0 `lpcm` has no flags to read.
-        assert_eq!(pcm_sample_format(&desc(b"lpcm", 16)), None);
+        assert_eq!(pcm(&desc(b"lpcm", 16)), None);
     }
 
     /// Minimal demuxer-open round trip: a hand-built one-track,
