@@ -64,11 +64,12 @@ fn source_movie() -> Vec<u8> {
     // Decode order I P B B: ctts offsets displace pts from dts.
     let offsets = [200i32, 400, 0, 100, 200, 400, 0, 100];
     let video: Vec<MuxSample> = (0..8)
-        .map(|i| MuxSample {
-            data: vec![0x50 + i as u8; 40],
-            duration: 200,
-            keyframe: i == 0 || i == 4,
-            composition_offset: offsets[i],
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![0x50 + i as u8; 40])
+                .with_duration(200)
+                .with_keyframe(i == 0 || i == 4)
+                .with_composition_offset(offsets[i])
         })
         .collect();
     m.add_track(
@@ -82,11 +83,12 @@ fn source_movie() -> Vec<u8> {
         &[],
     );
     let audio: Vec<MuxSample> = (0..10)
-        .map(|i| MuxSample {
-            data: vec![0xC0u8.wrapping_add(i as u8); 13],
-            duration: 512,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![0xC0u8.wrapping_add(i as u8); 13])
+                .with_duration(512)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     m.add_track(

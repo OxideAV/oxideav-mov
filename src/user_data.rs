@@ -53,6 +53,7 @@ pub struct UserDataEntry {
 
 /// Decoded variants of a `udta` entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UserDataKind {
     /// Apple international-text record (©XXX). One per `[size, lang,
     /// text]` block inside the entry's payload.

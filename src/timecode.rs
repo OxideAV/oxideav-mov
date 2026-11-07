@@ -177,6 +177,7 @@ impl Tmcd {
 /// by the bytes themselves — call [`Tmcd::decode_sample`] which consults
 /// the owning [`Tmcd`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TimecodeSample {
     /// A 32-bit tape-counter value (Counter flag set). Interpreted in
     /// units of the sample description's `number_of_frames` "frames per

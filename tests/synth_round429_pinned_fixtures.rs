@@ -28,22 +28,24 @@ fn open(bytes: Vec<u8>) -> MovDemuxer {
 
 fn video_samples(n: usize, offsets: Option<&[i32]>) -> Vec<MuxSample> {
     (0..n)
-        .map(|i| MuxSample {
-            data: vec![0x20 + i as u8; 48],
-            duration: 200,
-            keyframe: offsets.is_none() || i % 4 == 0,
-            composition_offset: offsets.map(|o| o[i % o.len()]).unwrap_or(0),
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![0x20 + i as u8; 48])
+                .with_duration(200)
+                .with_keyframe(offsets.is_none() || i % 4 == 0)
+                .with_composition_offset(offsets.map(|o| o[i % o.len()]).unwrap_or(0))
         })
         .collect()
 }
 
 fn audio_samples(n: usize) -> Vec<MuxSample> {
     (0..n)
-        .map(|i| MuxSample {
-            data: vec![0xE0u8.wrapping_add(i as u8); 17],
-            duration: 400,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![0xE0u8.wrapping_add(i as u8); 17])
+                .with_duration(400)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect()
 }

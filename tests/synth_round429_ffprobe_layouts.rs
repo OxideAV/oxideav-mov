@@ -100,11 +100,12 @@ fn own_packets(bytes: Vec<u8>) -> Vec<(u32, u64, u64)> {
 
 fn video_samples(n: usize) -> Vec<MuxSample> {
     (0..n)
-        .map(|i| MuxSample {
-            data: vec![0x11 + i as u8; 192], // 8×8 rgb24 "raw " frame
-            duration: 100,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![0x11 + i as u8; 192])
+                .with_duration(100)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect()
 }
@@ -113,11 +114,12 @@ fn audio_samples(n: usize) -> Vec<MuxSample> {
     // 800 ticks at ts 16000 = 50 ms per sample: 40 samples span the
     // same 2 s as the 20 video frames.
     (0..n)
-        .map(|i| MuxSample {
-            data: vec![0x99u8.wrapping_add(i as u8); 1600], // 800 × s16be
-            duration: 800,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![0x99u8.wrapping_add(i as u8); 1600])
+                .with_duration(800)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect()
 }

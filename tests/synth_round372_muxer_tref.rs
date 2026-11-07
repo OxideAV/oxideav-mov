@@ -20,12 +20,13 @@ use oxideav_core::{Demuxer, ReadSeek};
 use oxideav_mov::{MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, TrackRefKind, TrackReference};
 
 fn one_sample() -> Vec<MuxSample> {
-    vec![MuxSample {
-        data: vec![0x22u8; 8],
-        duration: 1024,
-        keyframe: true,
-        composition_offset: 0,
-    }]
+    vec![
+        MuxSample::default()
+            .with_data(vec![0x22u8; 8])
+            .with_duration(1024)
+            .with_keyframe(true)
+            .with_composition_offset(0),
+    ]
 }
 
 fn add_video(m: &mut MovMuxer) -> u32 {
@@ -129,14 +130,8 @@ fn reference_with_multiple_track_ids() {
     let a = add_video(&mut m);
     let b = add_text(&mut m);
     let c = add_text(&mut m);
-    m.set_track_references(
-        a,
-        &[TrackReference {
-            reference_type: *b"sync",
-            track_ids: vec![b, c],
-        }],
-    )
-    .expect("attach multi-id ref");
+    m.set_track_references(a, &[TrackReference::new(*b"sync", vec![b, c])])
+        .expect("attach multi-id ref");
     let d = open(m.encode_to_vec().expect("encode"));
 
     let sync = &d.tracks[0].references[0];
@@ -167,13 +162,7 @@ fn unknown_referenced_track_id_is_rejected() {
 fn zero_referenced_track_id_is_rejected() {
     let mut m = MovMuxer::new();
     let video = add_video(&mut m);
-    let err = m.set_track_references(
-        video,
-        &[TrackReference {
-            reference_type: *b"sync",
-            track_ids: vec![0],
-        }],
-    );
+    let err = m.set_track_references(video, &[TrackReference::new(*b"sync", vec![0])]);
     assert!(err.is_err(), "reference to track id 0 must error");
 }
 

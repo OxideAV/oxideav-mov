@@ -28,12 +28,13 @@ fn add_video(m: &mut MovMuxer) -> u32 {
             height: 360,
         },
         600,
-        vec![MuxSample {
-            data: vec![0x66u8; 8],
-            duration: 600,
-            keyframe: true,
-            composition_offset: 0,
-        }],
+        vec![
+            MuxSample::default()
+                .with_data(vec![0x66u8; 8])
+                .with_duration(600)
+                .with_keyframe(true)
+                .with_composition_offset(0),
+        ],
         &[],
     )
 }
@@ -43,11 +44,12 @@ fn add_video(m: &mut MovMuxer) -> u32 {
 fn add_chapter_track(m: &mut MovMuxer, titles: &[(&str, u32)]) -> u32 {
     let samples: Vec<MuxSample> = titles
         .iter()
-        .map(|(title, dur)| MuxSample {
-            data: encode_text_sample(title, None),
-            duration: *dur,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|(title, dur)| {
+            MuxSample::default()
+                .with_data(encode_text_sample(title, None))
+                .with_duration(*dur)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     m.add_track(
@@ -98,12 +100,13 @@ fn text_sample_description_roundtrips() {
             description: desc.clone(),
         },
         600,
-        vec![MuxSample {
-            data: encode_text_sample("X", None),
-            duration: 600,
-            keyframe: true,
-            composition_offset: 0,
-        }],
+        vec![
+            MuxSample::default()
+                .with_data(encode_text_sample("X", None))
+                .with_duration(600)
+                .with_keyframe(true)
+                .with_composition_offset(0),
+        ],
         &[],
     );
     let d = open(m.encode_to_vec().expect("encode"));
@@ -145,12 +148,11 @@ fn chapter_with_encoding_trailer_roundtrips() {
     // encode_text_sample with an encd trailer surfaces text_encoding.
     let mut m = MovMuxer::new();
     let video = add_video(&mut m);
-    let sample = MuxSample {
-        data: encode_text_sample("Café", Some(0x0000_0100)), // some Mac encoding id
-        duration: 600,
-        keyframe: true,
-        composition_offset: 0,
-    };
+    let sample = MuxSample::default()
+        .with_data(encode_text_sample("Café", Some(0x0000_0100)))
+        .with_duration(600)
+        .with_keyframe(true)
+        .with_composition_offset(0);
     let chap = m.add_track(
         MuxTrackKind::Text {
             description: TextSampleDescription::default(),

@@ -24,12 +24,13 @@ fn add_audio(m: &mut MovMuxer) -> u32 {
             sample_rate: 48000,
         },
         48000,
-        vec![MuxSample {
-            data: vec![0x77u8; 8],
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
-        }],
+        vec![
+            MuxSample::default()
+                .with_data(vec![0x77u8; 8])
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0),
+        ],
         &[],
     )
 }

@@ -49,6 +49,7 @@ pub struct Gmin {
 /// this enum surfaces the named modes plus a fall-through that keeps
 /// the raw 16-bit value for vendor or future-spec codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GraphicsMode {
     /// `0x0000` — Copy the source image over the destination.
     Copy,
@@ -181,6 +182,7 @@ pub struct Tcmi {
 /// caller can introspect future combined-shape `gmhd` atoms without
 /// re-walking the tree.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Gmhd {
     pub gmin: Option<Gmin>,
     pub text: Option<TextHeader>,

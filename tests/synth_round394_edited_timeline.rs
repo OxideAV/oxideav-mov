@@ -25,11 +25,12 @@ use oxideav_mov::{MovDemuxer, MovMuxer, MuxEdit, MuxSample, MuxTrackKind};
 /// `n` uniform samples of `dur` media ticks each, all keyframes.
 fn uniform_samples(n: usize, dur: u32) -> Vec<MuxSample> {
     (0..n)
-        .map(|i| MuxSample {
-            data: vec![i as u8; 4],
-            duration: dur,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![i as u8; 4])
+                .with_duration(dur)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect()
 }
@@ -157,11 +158,7 @@ fn rate_two_segment_halves_spacing_and_duration() {
     // ticks (QTFF pp. 226–227 consumption model): presentation
     // spacing and durations halve.
     let pkts = drain_edited(
-        &[MuxEdit {
-            track_duration: 500,
-            media_time: 0,
-            media_rate: 0x0002_0000,
-        }],
+        &[MuxEdit::segment(500, 0).with_media_rate(0x0002_0000)],
         uniform_samples(10, 100),
         1000,
         1000,
@@ -182,11 +179,7 @@ fn dwell_segment_stretches_held_sample() {
     let pkts = drain_edited(
         &[
             MuxEdit::segment(200, 0),
-            MuxEdit {
-                track_duration: 300,
-                media_time: 200,
-                media_rate: 0,
-            },
+            MuxEdit::segment(300, 200).with_media_rate(0),
         ],
         uniform_samples(5, 100),
         1000,
@@ -239,11 +232,12 @@ fn bframe_composition_offsets_survive_trim() {
     // [200, 700) drops the first sample (pts 100) and shifts every
     // kept pts/dts by −200 while preserving the offset.
     let samples: Vec<MuxSample> = (0..6)
-        .map(|i| MuxSample {
-            data: vec![i as u8; 4],
-            duration: 100,
-            keyframe: i == 0,
-            composition_offset: 100,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![i as u8; 4])
+                .with_duration(100)
+                .with_keyframe(i == 0)
+                .with_composition_offset(100)
         })
         .collect();
     let mut m = MovMuxer::new().with_movie_timescale(1000);
@@ -343,11 +337,12 @@ fn ffprobe_oracle_agrees_on_trimmed_timeline() {
     // probing happy (192 bytes = 8×8×3 per sample).
     let mut m = MovMuxer::new().with_movie_timescale(1000);
     let samples: Vec<MuxSample> = (0..10)
-        .map(|i| MuxSample {
-            data: vec![i as u8; 192],
-            duration: 100,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![i as u8; 192])
+                .with_duration(100)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let tid = m.add_track(

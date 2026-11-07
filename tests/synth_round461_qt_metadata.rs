@@ -30,12 +30,13 @@ use oxideav_mov::{
 
 fn one_audio_track(m: &mut MovMuxer) -> u32 {
     // Raw PCM so black-box validators can open the sample data.
-    let samples = vec![MuxSample {
-        data: vec![0u8; 4 * 480],
-        duration: 480,
-        keyframe: true,
-        composition_offset: 0,
-    }];
+    let samples = vec![
+        MuxSample::default()
+            .with_data(vec![0u8; 4 * 480])
+            .with_duration(480)
+            .with_keyframe(true)
+            .with_composition_offset(0),
+    ];
     m.add_track(
         MuxTrackKind::Audio {
             format: *b"sowt",

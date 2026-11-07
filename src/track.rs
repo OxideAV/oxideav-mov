@@ -57,6 +57,7 @@ pub struct TrackRef {
 
 /// High-level discriminator for [`TrackRef::kind`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TrackRefKind {
     /// `chap` — chapter list (typically references a text track).
     Chapter,
@@ -644,6 +645,7 @@ pub struct SpeakerPosition {
 /// raw bytes plus parsed dims/sample-rate when we recognise the
 /// media type.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct SampleDescription {
     pub format: [u8; 4],
     pub data_reference_index: u16,
@@ -889,6 +891,7 @@ impl SampleDescription {
 
 /// One track's accumulated state.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Track {
     pub tkhd: Tkhd,
     pub mdhd: Mdhd,

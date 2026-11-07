@@ -31,11 +31,12 @@ fn build_audio_mov_with_aux(
     blobs: Vec<Vec<u8>>,
 ) -> Vec<u8> {
     let samples: Vec<MuxSample> = (0..blobs.len())
-        .map(|i| MuxSample {
-            data: vec![(0xA0 | i) as u8; 8],
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(0xA0 | i) as u8; 8])
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new().with_movie_timescale(600);
@@ -52,11 +53,9 @@ fn build_audio_mov_with_aux(
     );
     m.set_sample_aux(
         id,
-        SampleAuxStream {
-            aux_info_type,
-            aux_info_type_parameter,
-            per_sample: blobs,
-        },
+        SampleAuxStream::new(blobs)
+            .with_aux_info_type(aux_info_type)
+            .with_aux_info_type_parameter(aux_info_type_parameter),
     )
     .expect("attach sample-aux stream");
     m.encode_to_vec().expect("encode audio MOV with sample-aux")
@@ -155,12 +154,13 @@ fn implicit_discriminator_matches_zero_pair() {
 #[test]
 fn no_sample_aux_track_emits_no_boxes() {
     // A plain track (no stream attached) carries no saiz/saio.
-    let samples = vec![MuxSample {
-        data: vec![0u8; 8],
-        duration: 1024,
-        keyframe: true,
-        composition_offset: 0,
-    }];
+    let samples = vec![
+        MuxSample::default()
+            .with_data(vec![0u8; 8])
+            .with_duration(1024)
+            .with_keyframe(true)
+            .with_composition_offset(0),
+    ];
     let mut m = MovMuxer::new();
     m.add_track(
         MuxTrackKind::Audio {

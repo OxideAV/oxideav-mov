@@ -27,12 +27,13 @@ fn open(bytes: Vec<u8>) -> MovDemuxer {
 }
 
 fn one_sample(data: Vec<u8>) -> Vec<MuxSample> {
-    vec![MuxSample {
-        data,
-        duration: 100,
-        keyframe: true,
-        composition_offset: 0,
-    }]
+    vec![
+        MuxSample::default()
+            .with_data(data)
+            .with_duration(100)
+            .with_keyframe(true)
+            .with_composition_offset(0),
+    ]
 }
 
 fn nondrop_tcmi() -> Tcmi {

@@ -87,6 +87,7 @@ use std::io::Write;
 /// `stss` keyframe-flag entries, plus a `ctts` composition-offset entry
 /// when [`composition_offset`](Self::composition_offset) is non-zero.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct MuxSample {
     /// Raw sample bytes — one access unit (NAL, AAC frame, PCM run).
     pub data: Vec<u8>,
@@ -109,6 +110,29 @@ pub struct MuxSample {
     pub composition_offset: i32,
 }
 
+impl MuxSample {
+    /// Builder-style setter for [`data`](Self::data).
+    pub fn with_data(mut self, data: Vec<u8>) -> Self {
+        self.data = data;
+        self
+    }
+    /// Builder-style setter for [`duration`](Self::duration).
+    pub fn with_duration(mut self, duration: u32) -> Self {
+        self.duration = duration;
+        self
+    }
+    /// Builder-style setter for [`keyframe`](Self::keyframe).
+    pub fn with_keyframe(mut self, keyframe: bool) -> Self {
+        self.keyframe = keyframe;
+        self
+    }
+    /// Builder-style setter for [`composition_offset`](Self::composition_offset).
+    pub fn with_composition_offset(mut self, composition_offset: i32) -> Self {
+        self.composition_offset = composition_offset;
+        self
+    }
+}
+
 /// Location of one sample inside an **external** media file.
 ///
 /// QTFF's appendix "Defining Media Data Layouts" ("Using QuickTime
@@ -128,11 +152,25 @@ pub struct MuxSample {
 /// first byte within the external file, `size` its byte length (what
 /// the `stsz`/`stz2` table will carry).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExternalSampleLocation {
     /// Absolute byte offset of the sample within the external file.
     pub offset: u64,
     /// Sample length in bytes.
     pub size: u32,
+}
+
+impl ExternalSampleLocation {
+    /// Builder-style setter for [`offset`](Self::offset).
+    pub fn with_offset(mut self, offset: u64) -> Self {
+        self.offset = offset;
+        self
+    }
+    /// Builder-style setter for [`size`](Self::size).
+    pub fn with_size(mut self, size: u32) -> Self {
+        self.size = size;
+        self
+    }
 }
 
 /// Internal record of a track marked external via
@@ -171,6 +209,7 @@ struct ExternalMediaWrite {
 /// with this stream round-trips back through `MovDemuxer` with the same
 /// per-sample sizes and the same discriminator pair.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SampleAuxStream {
     /// `aux_info_type` discriminator (§8.7.8.3). When `None`, the
     /// muxer emits the box with the `flags & 1` bit clear, so the
@@ -188,6 +227,37 @@ pub struct SampleAuxStream {
     /// associated auxiliary information") and a sample with no blob is
     /// represented by an empty `Vec`.
     pub per_sample: Vec<Vec<u8>>,
+}
+
+impl SampleAuxStream {
+    /// One opaque blob per sample, with no explicit `aux_info_type`
+    /// pair (the §8.7.8.1 implicit fallback applies on read).
+    pub fn new(per_sample: Vec<Vec<u8>>) -> Self {
+        Self {
+            aux_info_type: None,
+            aux_info_type_parameter: 0,
+            per_sample,
+        }
+    }
+
+    /// Builder-style setter for [`aux_info_type`](Self::aux_info_type).
+    pub fn with_aux_info_type(mut self, aux_info_type: Option<[u8; 4]>) -> Self {
+        self.aux_info_type = aux_info_type;
+        self
+    }
+
+    /// Builder-style setter for
+    /// [`aux_info_type_parameter`](Self::aux_info_type_parameter).
+    pub fn with_aux_info_type_parameter(mut self, aux_info_type_parameter: u32) -> Self {
+        self.aux_info_type_parameter = aux_info_type_parameter;
+        self
+    }
+
+    /// Builder-style setter for [`per_sample`](Self::per_sample).
+    pub fn with_per_sample(mut self, per_sample: Vec<Vec<u8>>) -> Self {
+        self.per_sample = per_sample;
+        self
+    }
 }
 
 /// Per-track sample-to-group assignment destined for a `stbl`-scope
@@ -214,6 +284,7 @@ pub struct SampleAuxStream {
 /// `docs/container/isobmff/post-2015-additions.md`
 /// ("`csgp` — Compact Sample to Group Box").
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SampleToGroupWrite {
     /// `grouping_type` FourCC (`roll`, `rap `, `prol`, …) naming the
     /// sibling `sgpd` whose descriptions these indices reference.
@@ -231,6 +302,38 @@ pub struct SampleToGroupWrite {
     /// `0x8000_0000` fragment-local msb if a caller chooses to set it
     /// (see [`crate::sample_groups::split_csgp_index`]).
     pub indices: Vec<u32>,
+}
+
+impl SampleToGroupWrite {
+    /// Assign each sample (decode order) the 1-based
+    /// `group_description_index` in `indices` for `grouping_type`, with
+    /// no `grouping_type_parameter`.
+    pub fn new(grouping_type: [u8; 4], indices: Vec<u32>) -> Self {
+        Self {
+            grouping_type,
+            grouping_type_parameter: None,
+            indices,
+        }
+    }
+
+    /// Builder-style setter for [`grouping_type`](Self::grouping_type).
+    pub fn with_grouping_type(mut self, grouping_type: [u8; 4]) -> Self {
+        self.grouping_type = grouping_type;
+        self
+    }
+
+    /// Builder-style setter for
+    /// [`grouping_type_parameter`](Self::grouping_type_parameter).
+    pub fn with_grouping_type_parameter(mut self, grouping_type_parameter: Option<u32>) -> Self {
+        self.grouping_type_parameter = grouping_type_parameter;
+        self
+    }
+
+    /// Builder-style setter for [`indices`](Self::indices).
+    pub fn with_indices(mut self, indices: Vec<u32>) -> Self {
+        self.indices = indices;
+        self
+    }
 }
 
 /// Which on-disk Sample-to-Group box carries a [`SampleToGroupWrite`].
@@ -288,6 +391,7 @@ pub enum SampleGroupBoxForm {
 /// ([`crate::sample_groups::decode_roll`], …) recover the structured
 /// fields.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SampleGroupDescriptionWrite {
     /// `grouping_type` FourCC — must equal the matching
     /// [`SampleToGroupWrite::grouping_type`].
@@ -298,6 +402,19 @@ pub struct SampleGroupDescriptionWrite {
     /// `sap_entry` constructors for the standard §10 types, or supply
     /// raw bytes for a codec-specific grouping.
     pub entries: Vec<Vec<u8>>,
+}
+
+impl SampleGroupDescriptionWrite {
+    /// Builder-style setter for [`grouping_type`](Self::grouping_type).
+    pub fn with_grouping_type(mut self, grouping_type: [u8; 4]) -> Self {
+        self.grouping_type = grouping_type;
+        self
+    }
+    /// Builder-style setter for [`entries`](Self::entries).
+    pub fn with_entries(mut self, entries: Vec<Vec<u8>>) -> Self {
+        self.entries = entries;
+        self
+    }
 }
 
 impl SampleGroupDescriptionWrite {
@@ -384,6 +501,7 @@ enum CslgWrite {
 /// round-trips back through `MovDemuxer` with the same per-segment
 /// `track_duration` / `media_time` / `media_rate`.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct MuxEdit {
     /// Duration of this segment in **movie-timescale** units (the
     /// [`MovMuxer::with_movie_timescale`] scale, not the track's media
@@ -403,6 +521,24 @@ pub struct MuxEdit {
     /// [`MovMuxer::set_edit_list`]. See [`MuxEdit::dwell`] /
     /// [`MuxEdit::segment_with_rate`].
     pub media_rate: i32,
+}
+
+impl MuxEdit {
+    /// Builder-style setter for [`track_duration`](Self::track_duration).
+    pub fn with_track_duration(mut self, track_duration: u64) -> Self {
+        self.track_duration = track_duration;
+        self
+    }
+    /// Builder-style setter for [`media_time`](Self::media_time).
+    pub fn with_media_time(mut self, media_time: i64) -> Self {
+        self.media_time = media_time;
+        self
+    }
+    /// Builder-style setter for [`media_rate`](Self::media_rate).
+    pub fn with_media_rate(mut self, media_rate: i32) -> Self {
+        self.media_rate = media_rate;
+        self
+    }
 }
 
 impl MuxEdit {
@@ -469,6 +605,7 @@ impl MuxEdit {
 /// optional boxes below follow the codec-config `extra_stsd_atoms` in
 /// the entry's trailing box area.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct AudioEntryV1 {
     /// Emit a `srat` SamplingRateBox carrying the *actual* sampling
     /// rate (use when it exceeds what the 16.16 `samplerate` field
@@ -485,6 +622,19 @@ pub struct AudioEntryV1 {
     pub channel_layout: Option<ChannelLayout>,
 }
 
+impl AudioEntryV1 {
+    /// Builder-style setter for [`sampling_rate`](Self::sampling_rate).
+    pub fn with_sampling_rate(mut self, sampling_rate: Option<u32>) -> Self {
+        self.sampling_rate = sampling_rate;
+        self
+    }
+    /// Builder-style setter for [`channel_layout`](Self::channel_layout).
+    pub fn with_channel_layout(mut self, channel_layout: Option<ChannelLayout>) -> Self {
+        self.channel_layout = channel_layout;
+        self
+    }
+}
+
 /// Write-side configuration for a QTFF **Sound Sample Description
 /// version 2** (QTFF 2012-08-14 pp. 181–182), set via
 /// [`MovMuxer::set_sound_description_v2`]. The muxer derives the
@@ -492,6 +642,7 @@ pub struct AudioEntryV1 {
 /// `sizeOfStructOnly` = 72 (extensions start right after the fixed
 /// struct), and `numAudioChannels` from the track's channel count.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct AudioEntryV2 {
     /// Audio frames per second (`audioSampleRate`, Float64) — use
     /// this form when the rate exceeds the 16.16 field's 65535 Hz
@@ -509,6 +660,37 @@ pub struct AudioEntryV2 {
     /// LPCM frames per audio packet, only if constant; else `0`
     /// (`constLPCMFramesPerAudioPacket`).
     pub const_lpcm_frames_per_audio_packet: u32,
+}
+
+impl AudioEntryV2 {
+    /// Builder-style setter for [`audio_sample_rate`](Self::audio_sample_rate).
+    pub fn with_audio_sample_rate(mut self, audio_sample_rate: f64) -> Self {
+        self.audio_sample_rate = audio_sample_rate;
+        self
+    }
+    /// Builder-style setter for [`const_bits_per_channel`](Self::const_bits_per_channel).
+    pub fn with_const_bits_per_channel(mut self, const_bits_per_channel: u32) -> Self {
+        self.const_bits_per_channel = const_bits_per_channel;
+        self
+    }
+    /// Builder-style setter for [`format_specific_flags`](Self::format_specific_flags).
+    pub fn with_format_specific_flags(mut self, format_specific_flags: LpcmFlags) -> Self {
+        self.format_specific_flags = format_specific_flags;
+        self
+    }
+    /// Builder-style setter for [`const_bytes_per_audio_packet`](Self::const_bytes_per_audio_packet).
+    pub fn with_const_bytes_per_audio_packet(mut self, const_bytes_per_audio_packet: u32) -> Self {
+        self.const_bytes_per_audio_packet = const_bytes_per_audio_packet;
+        self
+    }
+    /// Builder-style setter for [`const_lpcm_frames_per_audio_packet`](Self::const_lpcm_frames_per_audio_packet).
+    pub fn with_const_lpcm_frames_per_audio_packet(
+        mut self,
+        const_lpcm_frames_per_audio_packet: u32,
+    ) -> Self {
+        self.const_lpcm_frames_per_audio_packet = const_lpcm_frames_per_audio_packet;
+        self
+    }
 }
 
 /// Which audio sample-description layout a track's `stsd` entry uses.
@@ -886,6 +1068,7 @@ impl MovMetaItem {
 /// Per-track media kind dispatch — drives `hdlr.component_subtype`,
 /// the `vmhd`/`smhd` choice, and the `stsd` body shape.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum MuxTrackKind {
     /// Video track. Emits `hdlr.component_subtype = vide`, `vmhd`, and
     /// a `stsd` whose entry carries the 70-byte video sample
@@ -1016,6 +1199,7 @@ pub enum MuxTrackKind {
 /// [`crate::track::SampleDescription`]'s `pasp` / `colr` / `clap` /
 /// `fiel` / `gamma` fields.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VisualExtensions {
     /// Pixel Aspect Ratio (`pasp`, §12.1.4.2).
     pub pasp: Option<Pasp>,
@@ -1030,6 +1214,34 @@ pub struct VisualExtensions {
     /// value — the same `u32` representation the demuxer surfaces on
     /// `SampleDescription::gamma`.
     pub gamma: Option<u32>,
+}
+
+impl VisualExtensions {
+    /// Builder-style setter for [`pasp`](Self::pasp).
+    pub fn with_pasp(mut self, pasp: Option<Pasp>) -> Self {
+        self.pasp = pasp;
+        self
+    }
+    /// Builder-style setter for [`colr`](Self::colr).
+    pub fn with_colr(mut self, colr: Option<ColorParameters>) -> Self {
+        self.colr = colr;
+        self
+    }
+    /// Builder-style setter for [`clap`](Self::clap).
+    pub fn with_clap(mut self, clap: Option<Clap>) -> Self {
+        self.clap = clap;
+        self
+    }
+    /// Builder-style setter for [`fiel`](Self::fiel).
+    pub fn with_fiel(mut self, fiel: Option<Fiel>) -> Self {
+        self.fiel = fiel;
+        self
+    }
+    /// Builder-style setter for [`gamma`](Self::gamma).
+    pub fn with_gamma(mut self, gamma: Option<u32>) -> Self {
+        self.gamma = gamma;
+        self
+    }
 }
 
 impl VisualExtensions {
@@ -1321,6 +1533,7 @@ pub const MDHD_LANGUAGE_UND: u16 = 0x55C4;
 /// packed list of `u32` referenced track ids. This type is the
 /// write-side mirror of the read-side [`crate::track::TrackRef`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TrackReference {
     /// Reference-type FourCC (e.g. `*b"chap"`, `*b"tmcd"`).
     pub reference_type: [u8; 4],
@@ -1328,6 +1541,27 @@ pub struct TrackReference {
     /// [`MovMuxer::add_track`]). At least one id should be present; an
     /// empty list emits an empty child atom (legal but inert).
     pub track_ids: Vec<u32>,
+}
+
+impl TrackReference {
+    /// A `reference_type` entry pointing at every id in `track_ids`.
+    pub fn new(reference_type: [u8; 4], track_ids: Vec<u32>) -> Self {
+        Self {
+            reference_type,
+            track_ids,
+        }
+    }
+
+    /// Builder-style setter for [`reference_type`](Self::reference_type).
+    pub fn with_reference_type(mut self, reference_type: [u8; 4]) -> Self {
+        self.reference_type = reference_type;
+        self
+    }
+    /// Builder-style setter for [`track_ids`](Self::track_ids).
+    pub fn with_track_ids(mut self, track_ids: Vec<u32>) -> Self {
+        self.track_ids = track_ids;
+        self
+    }
 }
 
 impl TrackReference {
@@ -1370,6 +1604,7 @@ impl TrackReference {
 /// [`Url`]: DataReferenceWrite::Url
 /// [`Urn`]: DataReferenceWrite::Urn
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DataReferenceWrite {
     /// `url ` self-reference (`flags = 1`): the media bytes are in this
     /// file. Written with an empty data slot per §8.7.2.
@@ -1400,6 +1635,7 @@ pub enum DataReferenceWrite {
 /// each carrying a `moof` (with `mfhd` + per-track `traf`) plus a
 /// trailing `mdat` whose bytes the `trun` rows index into.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum FragmentationMode {
     /// Close the current fragment once its accumulated *primary-track
     /// media-timescale* duration meets or exceeds the threshold. The
@@ -1423,6 +1659,7 @@ pub enum FragmentationMode {
 /// the physical byte order inside `mdat` and therefore the seek
 /// pattern a player needs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChunkStrategy {
     /// One chunk per track, tracks laid back-to-back in `add_track`
     /// order — the historical (round-19) layout. Fine for in-memory
@@ -1455,6 +1692,7 @@ pub enum ChunkStrategy {
 /// reports the layout via
 /// [`is_faststart`](crate::MovDemuxer::is_faststart).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MoovPlacement {
     /// `ftyp` + `mdat` + `moov` — the historical default. Chunk
     /// offsets are independent of the `moov` size, and the compressed

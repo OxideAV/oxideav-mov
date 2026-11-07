@@ -34,11 +34,12 @@ fn build_video_mov(frames: &[(i32, u32, bool)], cslg: Option<Cslg>, auto: bool) 
     let samples: Vec<MuxSample> = frames
         .iter()
         .enumerate()
-        .map(|(i, &(off, dur, kf))| MuxSample {
-            data: vec![(0xE0 | (i & 0x0F)) as u8; 12],
-            duration: dur,
-            keyframe: kf,
-            composition_offset: off,
+        .map(|(i, &(off, dur, kf))| {
+            MuxSample::default()
+                .with_data(vec![(0xE0 | (i & 0x0F)) as u8; 12])
+                .with_duration(dur)
+                .with_keyframe(kf)
+                .with_composition_offset(off)
         })
         .collect();
     let mut m = MovMuxer::new().with_movie_timescale(600);

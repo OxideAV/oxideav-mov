@@ -28,11 +28,12 @@ use oxideav_mov::{MovDemuxer, MovMuxer, MuxSample, MuxTrackKind, SampleToGroupWr
 /// the only track. Returns the encoded bytes.
 fn build_audio_mov_with_group(grouping_type: [u8; 4], indices: Vec<u32>) -> Vec<u8> {
     let samples: Vec<MuxSample> = (0..indices.len())
-        .map(|i| MuxSample {
-            data: vec![(0xA0 | (i & 0x0F)) as u8; 8],
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(0xA0 | (i & 0x0F)) as u8; 8])
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new().with_movie_timescale(600);
@@ -49,11 +50,7 @@ fn build_audio_mov_with_group(grouping_type: [u8; 4], indices: Vec<u32>) -> Vec<
     );
     m.add_sample_to_group(
         id,
-        SampleToGroupWrite {
-            grouping_type,
-            grouping_type_parameter: None,
-            indices,
-        },
+        SampleToGroupWrite::new(grouping_type, indices).with_grouping_type_parameter(None),
     )
     .expect("attach sample-to-group");
     m.encode_to_vec().expect("encode audio MOV with csgp")
@@ -114,11 +111,12 @@ fn csgp_does_not_corrupt_sample_data() {
 #[test]
 fn multiple_grouping_types_emit_multiple_csgp() {
     let samples: Vec<MuxSample> = (0..3)
-        .map(|i| MuxSample {
-            data: vec![(0xB0 | i) as u8; 6],
-            duration: 1000,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(0xB0 | i) as u8; 6])
+                .with_duration(1000)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new();
@@ -135,20 +133,12 @@ fn multiple_grouping_types_emit_multiple_csgp() {
     );
     m.add_sample_to_group(
         id,
-        SampleToGroupWrite {
-            grouping_type: *b"roll",
-            grouping_type_parameter: None,
-            indices: vec![1, 1, 1],
-        },
+        SampleToGroupWrite::new(*b"roll", vec![1, 1, 1]).with_grouping_type_parameter(None),
     )
     .expect("attach roll");
     m.add_sample_to_group(
         id,
-        SampleToGroupWrite {
-            grouping_type: *b"rap ",
-            grouping_type_parameter: None,
-            indices: vec![1, 0, 2],
-        },
+        SampleToGroupWrite::new(*b"rap ", vec![1, 0, 2]).with_grouping_type_parameter(None),
     )
     .expect("attach rap");
     let bytes = m.encode_to_vec().expect("encode");
@@ -163,12 +153,13 @@ fn multiple_grouping_types_emit_multiple_csgp() {
 
 #[test]
 fn add_sample_to_group_rejects_wrong_index_count() {
-    let samples = vec![MuxSample {
-        data: vec![0u8; 8],
-        duration: 1024,
-        keyframe: true,
-        composition_offset: 0,
-    }];
+    let samples = vec![
+        MuxSample::default()
+            .with_data(vec![0u8; 8])
+            .with_duration(1024)
+            .with_keyframe(true)
+            .with_composition_offset(0),
+    ];
     let mut m = MovMuxer::new();
     let id = m.add_track(
         MuxTrackKind::Audio {
@@ -184,11 +175,7 @@ fn add_sample_to_group_rejects_wrong_index_count() {
     // Track has 1 sample but we supply 2 indices.
     let err = m.add_sample_to_group(
         id,
-        SampleToGroupWrite {
-            grouping_type: *b"roll",
-            grouping_type_parameter: None,
-            indices: vec![1, 1],
-        },
+        SampleToGroupWrite::new(*b"roll", vec![1, 1]).with_grouping_type_parameter(None),
     );
     assert!(err.is_err(), "index count must match sample count");
 }
@@ -197,11 +184,12 @@ fn add_sample_to_group_rejects_wrong_index_count() {
 fn replacing_grouping_type_keeps_one_box() {
     let bytes = {
         let samples: Vec<MuxSample> = (0..2)
-            .map(|_| MuxSample {
-                data: vec![0u8; 8],
-                duration: 1024,
-                keyframe: true,
-                composition_offset: 0,
+            .map(|_| {
+                MuxSample::default()
+                    .with_data(vec![0u8; 8])
+                    .with_duration(1024)
+                    .with_keyframe(true)
+                    .with_composition_offset(0)
             })
             .collect();
         let mut m = MovMuxer::new();
@@ -218,21 +206,13 @@ fn replacing_grouping_type_keeps_one_box() {
         );
         m.add_sample_to_group(
             id,
-            SampleToGroupWrite {
-                grouping_type: *b"roll",
-                grouping_type_parameter: None,
-                indices: vec![1, 1],
-            },
+            SampleToGroupWrite::new(*b"roll", vec![1, 1]).with_grouping_type_parameter(None),
         )
         .unwrap();
         // Second call with same grouping_type replaces, not appends.
         m.add_sample_to_group(
             id,
-            SampleToGroupWrite {
-                grouping_type: *b"roll",
-                grouping_type_parameter: None,
-                indices: vec![2, 2],
-            },
+            SampleToGroupWrite::new(*b"roll", vec![2, 2]).with_grouping_type_parameter(None),
         )
         .unwrap();
         m.encode_to_vec().unwrap()

@@ -23,22 +23,24 @@ use oxideav_mov::{
 
 fn record_sample(rec: TimecodeRecord) -> Vec<MuxSample> {
     let bytes = Tmcd::encode_sample(&TimecodeSample::Record(rec));
-    vec![MuxSample {
-        data: bytes.to_vec(),
-        duration: 100,
-        keyframe: true,
-        composition_offset: 0,
-    }]
+    vec![
+        MuxSample::default()
+            .with_data(bytes.to_vec())
+            .with_duration(100)
+            .with_keyframe(true)
+            .with_composition_offset(0),
+    ]
 }
 
 fn counter_sample(v: u32) -> Vec<MuxSample> {
     let bytes = Tmcd::encode_sample(&TimecodeSample::Counter(v));
-    vec![MuxSample {
-        data: bytes.to_vec(),
-        duration: 100,
-        keyframe: true,
-        composition_offset: 0,
-    }]
+    vec![
+        MuxSample::default()
+            .with_data(bytes.to_vec())
+            .with_duration(100)
+            .with_keyframe(true)
+            .with_composition_offset(0),
+    ]
 }
 
 fn add_video(m: &mut MovMuxer) -> u32 {
@@ -49,12 +51,13 @@ fn add_video(m: &mut MovMuxer) -> u32 {
             height: 1080,
         },
         30000,
-        vec![MuxSample {
-            data: vec![0x55u8; 8],
-            duration: 1001,
-            keyframe: true,
-            composition_offset: 0,
-        }],
+        vec![
+            MuxSample::default()
+                .with_data(vec![0x55u8; 8])
+                .with_duration(1001)
+                .with_keyframe(true)
+                .with_composition_offset(0),
+        ],
         &[],
     )
 }
@@ -262,12 +265,13 @@ fn multiple_timecode_samples_roundtrip() {
             frames: f,
         };
         let bytes = Tmcd::encode_sample(&TimecodeSample::Record(rec));
-        samples.push(MuxSample {
-            data: bytes.to_vec(),
-            duration: 100,
-            keyframe: true,
-            composition_offset: 0,
-        });
+        samples.push(
+            MuxSample::default()
+                .with_data(bytes.to_vec())
+                .with_duration(100)
+                .with_keyframe(true)
+                .with_composition_offset(0),
+        );
     }
     let mut m = MovMuxer::new();
     let _ = m.add_track(

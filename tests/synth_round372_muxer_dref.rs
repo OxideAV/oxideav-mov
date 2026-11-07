@@ -15,12 +15,13 @@ use oxideav_mov::{
 };
 
 fn one_sample() -> Vec<MuxSample> {
-    vec![MuxSample {
-        data: vec![0x44u8; 8],
-        duration: 1024,
-        keyframe: true,
-        composition_offset: 0,
-    }]
+    vec![
+        MuxSample::default()
+            .with_data(vec![0x44u8; 8])
+            .with_duration(1024)
+            .with_keyframe(true)
+            .with_composition_offset(0),
+    ]
 }
 
 fn add_video(m: &mut MovMuxer) -> u32 {

@@ -68,6 +68,7 @@ pub struct ChapterEntry {
 /// track's timescale (so callers can convert ticks → seconds without
 /// having to walk the demuxer's track list).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChapterList {
     /// Resolved chapter track index inside `MovDemuxer::tracks`
     /// (0-based).
@@ -152,6 +153,7 @@ pub struct FontTableEntry {
 /// "Text Sample Display Properties" extension atoms documented in QTFF
 /// pp. 55–57 (`styl` / `hlit` / `hclr` / `ftab` / `drpo`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TextSampleStyles {
     /// Encoding override from a trailing `encd` atom, when present.
     pub encoding_id: Option<u32>,

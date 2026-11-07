@@ -34,11 +34,12 @@ fn build_video_mov(compress: bool) -> (Vec<u8>, Vec<MuxSample>) {
     // bytes themselves) deflate well — keeps the "compressed is smaller"
     // assertion robust across zlib levels.
     let samples: Vec<MuxSample> = (0..8u32)
-        .map(|i| MuxSample {
-            data: vec![0xAB; 64],
-            duration: 1000,
-            keyframe: i == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![0xAB; 64])
+                .with_duration(1000)
+                .with_keyframe(i == 0)
+                .with_composition_offset(0)
         })
         .collect();
 

@@ -188,6 +188,7 @@ pub struct Tfhd {
 ///   same data-reference (i.e., the data for these tracks must be in
 ///   the same file)".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TrafAddressing {
     /// `base-data-offset-present` (`0x000001`): the explicit
     /// `base_data_offset` field anchors the track runs.
@@ -688,6 +689,7 @@ pub fn parse_traf<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Resul
 /// `saiz` / `saio` sample-auxiliary-information boxes living at
 /// `traf` scope (§8.7.8.1 / §8.7.9.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TrafParse {
     /// Mandatory `tfhd` (§8.8.7) — only `None` when the `traf` is
     /// malformed (the demuxer treats `None` as "skip this fragment").
@@ -797,6 +799,7 @@ pub fn parse_moof<R: Read + Seek + ?Sized>(
 
 /// One parsed `traf` row.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TrafRecord {
     /// The mandatory `tfhd` defaults.
     pub tfhd: Tfhd,

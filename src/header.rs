@@ -76,6 +76,7 @@ impl Ftyp {
 /// - ISO/IEC 23000-22 (MIAF: `mif1`, `mif2`, `MA1A`, `MA1B`).
 /// - AOM AVIF spec (`avif`, `avis`, `avio`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum BrandClass {
     /// `heic` — HEVC main-profile single-image (HEIF §10.2).
     Heic,
@@ -732,6 +733,7 @@ pub fn parse_hmhd(payload: &[u8]) -> Result<Hmhd> {
 /// the handler subtype alone doesn't always pin down (e.g. a generic
 /// stream can use either `gmhd` or `nmhd`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MediaHeaderKind {
     /// No media-header box was found in `minf` (malformed per spec, but
     /// tolerated; the default).

@@ -157,6 +157,7 @@ pub struct SubTrackSampleGroup {
 /// children — the mandatory `stri` plus every `stsg` found inside the
 /// mandatory `strd`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SubTrack {
     /// `stri` Sub Track Information (§8.14.4). §8.14.4.1 declares it
     /// `Mandatory: Yes, Quantity: One`; we surface the first one found

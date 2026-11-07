@@ -36,6 +36,7 @@ use crate::standalone::{Error, Result};
 
 /// One alternate-data reference (`rmda` payload).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReferenceMovie {
     /// Parsed `rdrf` data reference (the alias or URL pointing at the
     /// external media).
@@ -55,6 +56,7 @@ pub struct ReferenceMovie {
 
 /// Decoded `rdrf` payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DataReference {
     /// `url ` — NUL-terminated UTF-8 URL.
     Url(String),

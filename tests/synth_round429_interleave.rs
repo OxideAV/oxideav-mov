@@ -31,11 +31,12 @@ fn open(bytes: Vec<u8>) -> MovDemuxer {
 /// shuffles can't cancel out.
 fn video_samples() -> Vec<MuxSample> {
     (0..20)
-        .map(|i| MuxSample {
-            data: vec![0x40 + i as u8; 32],
-            duration: 60,
-            keyframe: i % 5 == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![0x40 + i as u8; 32])
+                .with_duration(60)
+                .with_keyframe(i % 5 == 0)
+                .with_composition_offset(0)
         })
         .collect()
 }
@@ -43,11 +44,12 @@ fn video_samples() -> Vec<MuxSample> {
 /// 40 audio samples, 400 ticks each at timescale 8000 ⇒ 2 s.
 fn audio_samples() -> Vec<MuxSample> {
     (0..40)
-        .map(|i| MuxSample {
-            data: vec![0xA0u8.wrapping_add(i as u8); 11],
-            duration: 400,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![0xA0u8.wrapping_add(i as u8); 11])
+                .with_duration(400)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect()
 }
@@ -237,11 +239,9 @@ fn interleave_keeps_aux_slab_contiguous_and_addressable() {
     );
     m.set_sample_aux(
         tid,
-        oxideav_mov::SampleAuxStream {
-            aux_info_type: Some(*b"cenc"),
-            aux_info_type_parameter: 0,
-            per_sample: blobs.clone(),
-        },
+        oxideav_mov::SampleAuxStream::new(blobs.clone())
+            .with_aux_info_type(Some(*b"cenc"))
+            .with_aux_info_type_parameter(0),
     )
     .expect("attach aux stream");
     let bytes = m.encode_to_vec().expect("encode");

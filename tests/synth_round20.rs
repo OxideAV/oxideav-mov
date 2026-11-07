@@ -30,17 +30,18 @@ use oxideav_mov::{FragmentationMode, MovDemuxer, MovMuxer, MuxSample, MuxTrackKi
 /// corruption.
 fn synth_5_video_samples() -> Vec<MuxSample> {
     (0..5)
-        .map(|i| MuxSample {
-            data: {
-                let mut buf = vec![0u8; 40 + i * 2];
-                for (j, b) in buf.iter_mut().enumerate() {
-                    *b = ((i << 4) | (j & 0xF)) as u8;
-                }
-                buf
-            },
-            duration: 1000, // 1000 ticks @ 30000/s ≈ 30 fps
-            keyframe: i == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data({
+                    let mut buf = vec![0u8; 40 + i * 2];
+                    for (j, b) in buf.iter_mut().enumerate() {
+                        *b = ((i << 4) | (j & 0xF)) as u8;
+                    }
+                    buf
+                })
+                .with_duration(1000)
+                .with_keyframe(i == 0)
+                .with_composition_offset(0)
         })
         .collect()
 }
@@ -105,11 +106,12 @@ fn fragmented_by_duration_slices_along_primary_timebase() {
     // threshold of 2000 ticks per fragment, we expect 3 fragments of
     // 2 samples each.
     let samples: Vec<MuxSample> = (0..6)
-        .map(|i| MuxSample {
-            data: vec![(0x70 + i) as u8; 32],
-            duration: 1000,
-            keyframe: i == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(0x70 + i) as u8; 32])
+                .with_duration(1000)
+                .with_keyframe(i == 0)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new()
@@ -207,12 +209,13 @@ fn fragmented_requires_fragmentation_mode() {
             height: 16,
         },
         30000,
-        vec![MuxSample {
-            data: vec![0u8; 16],
-            duration: 1000,
-            keyframe: true,
-            composition_offset: 0,
-        }],
+        vec![
+            MuxSample::default()
+                .with_data(vec![0u8; 16])
+                .with_duration(1000)
+                .with_keyframe(true)
+                .with_composition_offset(0),
+        ],
         &[],
     );
     assert!(
@@ -231,12 +234,13 @@ fn fragmented_by_frame_count_zero_rejected() {
             height: 16,
         },
         30000,
-        vec![MuxSample {
-            data: vec![0u8; 16],
-            duration: 1000,
-            keyframe: true,
-            composition_offset: 0,
-        }],
+        vec![
+            MuxSample::default()
+                .with_data(vec![0u8; 16])
+                .with_duration(1000)
+                .with_keyframe(true)
+                .with_composition_offset(0),
+        ],
         &[],
     );
     assert!(m.encode_fragmented_to_vec().is_err());
@@ -252,12 +256,13 @@ fn fragmented_by_duration_zero_rejected() {
             height: 16,
         },
         30000,
-        vec![MuxSample {
-            data: vec![0u8; 16],
-            duration: 1000,
-            keyframe: true,
-            composition_offset: 0,
-        }],
+        vec![
+            MuxSample::default()
+                .with_data(vec![0u8; 16])
+                .with_duration(1000)
+                .with_keyframe(true)
+                .with_composition_offset(0),
+        ],
         &[],
     );
     assert!(m.encode_fragmented_to_vec().is_err());
@@ -290,11 +295,12 @@ fn fragmented_audio_only_track_works() {
     // 8 PCM samples @ 8000 Hz, all keyframes. Fragmented by
     // ByFrameCount(3) → 3 fragments (3 + 3 + 2 samples).
     let samples: Vec<MuxSample> = (0..8)
-        .map(|i| MuxSample {
-            data: vec![(0x40 + i) as u8; 64],
-            duration: 128,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(0x40 + i) as u8; 64])
+                .with_duration(128)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new().with_fragmentation(FragmentationMode::ByFrameCount(3));

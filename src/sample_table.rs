@@ -311,6 +311,7 @@ pub enum SampleSizeSource {
 
 /// Parsed sample table for a single track.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct SampleTable {
     pub stts: Vec<SttsEntry>,
     pub stsc: Vec<StscEntry>,
@@ -408,6 +409,7 @@ pub struct SampleTable {
 /// One entry in the iterator output: enough to read the sample bytes
 /// from the input stream.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct SampleEntry {
     /// 0-based sample index inside the track.
     pub index: u32,

@@ -15,11 +15,12 @@ use oxideav_mov::{
 
 fn samples(n: usize) -> Vec<MuxSample> {
     (0..n)
-        .map(|i| MuxSample {
-            data: vec![i as u8; 4],
-            duration: 100,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![i as u8; 4])
+                .with_duration(100)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect()
 }

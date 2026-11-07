@@ -31,11 +31,12 @@ fn build_audio_mov_classic(
     indices: Vec<u32>,
 ) -> Vec<u8> {
     let samples: Vec<MuxSample> = (0..indices.len())
-        .map(|i| MuxSample {
-            data: vec![(0xF0 | (i & 0x0F)) as u8; 8],
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(0xF0 | (i & 0x0F)) as u8; 8])
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new().with_movie_timescale(600);
@@ -52,11 +53,8 @@ fn build_audio_mov_classic(
     );
     m.add_sample_to_group_with_form(
         id,
-        SampleToGroupWrite {
-            grouping_type,
-            grouping_type_parameter,
-            indices,
-        },
+        SampleToGroupWrite::new(grouping_type, indices)
+            .with_grouping_type_parameter(grouping_type_parameter),
         SampleGroupBoxForm::Classic,
     )
     .expect("attach classic sbgp");
@@ -136,11 +134,12 @@ fn classic_sbgp_keeps_sample_data_intact() {
 fn replacing_with_different_form_keeps_one_box() {
     // First attach compact, then replace same grouping_type with classic.
     let samples: Vec<MuxSample> = (0..3)
-        .map(|_| MuxSample {
-            data: vec![0u8; 8],
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|_| {
+            MuxSample::default()
+                .with_data(vec![0u8; 8])
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new();
@@ -157,20 +156,12 @@ fn replacing_with_different_form_keeps_one_box() {
     );
     m.add_sample_to_group(
         id,
-        SampleToGroupWrite {
-            grouping_type: *b"roll",
-            grouping_type_parameter: None,
-            indices: vec![1, 1, 1],
-        },
+        SampleToGroupWrite::new(*b"roll", vec![1, 1, 1]).with_grouping_type_parameter(None),
     )
     .unwrap();
     m.add_sample_to_group_with_form(
         id,
-        SampleToGroupWrite {
-            grouping_type: *b"roll",
-            grouping_type_parameter: None,
-            indices: vec![2, 2, 2],
-        },
+        SampleToGroupWrite::new(*b"roll", vec![2, 2, 2]).with_grouping_type_parameter(None),
         SampleGroupBoxForm::Classic,
     )
     .unwrap();

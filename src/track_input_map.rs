@@ -131,6 +131,7 @@ pub const K_TRACK_MODIFIER_TYPE_IMAGE: u32 = u32::from_be_bytes(*b"vide");
 /// well-formed `imap` whose `' ty'` carries an unrecognised identifier
 /// still parses and surfaces the raw value to callers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum InputTypeKind {
     /// `kTrackModifierTypeMatrix` (Table 2-3 value 1).
     Matrix,

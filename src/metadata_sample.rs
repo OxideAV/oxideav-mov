@@ -96,6 +96,7 @@ pub fn parse_btrt(payload: &[u8]) -> Result<BitRate> {
 /// subclass recognised in `stsd`. The `format` FourCC that selected the
 /// variant is preserved on the owning [`crate::track::SampleDescription`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MetadataSampleEntry {
     /// `metx` — XML metadata sample entry.
     Xml(XmlMetadataSampleEntry),
@@ -295,6 +296,7 @@ pub struct UriMetadataSampleEntry {
 /// close sibling of [`MetadataSampleEntry`] — both reuse the BitRateBox
 /// (`btrt`) and, for the text variant, the TextConfigBox (`txtC`).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SubtitleSampleEntry {
     /// `stpp` — XML subtitle sample entry (e.g. TTML).
     Xml(XmlSubtitleSampleEntry),

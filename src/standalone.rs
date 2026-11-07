@@ -15,6 +15,7 @@ use std::io;
 /// (`InvalidData` / `Unsupported` / `Eof` plus an I/O carrier) so the
 /// parsing modules don't need feature gates around individual call sites.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// Synthetic "unexpected end-of-stream" — produced by the demuxer
     /// when the sample queue is exhausted.

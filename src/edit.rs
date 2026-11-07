@@ -607,6 +607,7 @@ pub fn movie_pts_to_media_pts(
 /// origin is the movie timeline's origin (movie time 0), rescaled from
 /// movie- to media-timescale ticks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EditedTiming {
     /// Presentation timestamp on the edited timeline.
     pub pts: i64,

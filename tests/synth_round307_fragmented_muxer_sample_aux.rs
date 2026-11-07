@@ -61,11 +61,12 @@ fn build_fragmented_with_aux(
 ) -> Vec<u8> {
     assert_eq!(blobs.len(), n);
     let samples: Vec<MuxSample> = (0..n)
-        .map(|i| MuxSample {
-            data: vec![(0x10 + i) as u8; 8 + (i % 4)],
-            duration: 100,
-            keyframe: i % frames_per_fragment as usize == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(0x10 + i) as u8; 8 + (i % 4)])
+                .with_duration(100)
+                .with_keyframe(i % frames_per_fragment as usize == 0)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new()
@@ -83,11 +84,9 @@ fn build_fragmented_with_aux(
     );
     m.set_sample_aux(
         id,
-        SampleAuxStream {
-            aux_info_type,
-            aux_info_type_parameter,
-            per_sample: blobs,
-        },
+        SampleAuxStream::new(blobs)
+            .with_aux_info_type(aux_info_type)
+            .with_aux_info_type_parameter(aux_info_type_parameter),
     )
     .expect("attach sample-aux stream");
     m.encode_fragmented_to_vec()
@@ -201,11 +200,12 @@ fn no_sample_aux_track_emits_no_traf_boxes() {
     // A plain fragmented track (no stream attached) carries no
     // traf-scope saiz/saio.
     let samples: Vec<MuxSample> = (0..4)
-        .map(|i| MuxSample {
-            data: vec![i as u8; 8],
-            duration: 100,
-            keyframe: i == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![i as u8; 8])
+                .with_duration(100)
+                .with_keyframe(i == 0)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new().with_fragmentation(FragmentationMode::ByFrameCount(2));

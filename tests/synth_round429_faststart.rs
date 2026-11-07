@@ -27,22 +27,24 @@ fn open(bytes: Vec<u8>) -> MovDemuxer {
 
 fn video_samples(n: usize) -> Vec<MuxSample> {
     (0..n)
-        .map(|i| MuxSample {
-            data: vec![0x10 + i as u8; 24],
-            duration: 100,
-            keyframe: i % 4 == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![0x10 + i as u8; 24])
+                .with_duration(100)
+                .with_keyframe(i % 4 == 0)
+                .with_composition_offset(0)
         })
         .collect()
 }
 
 fn audio_samples(n: usize) -> Vec<MuxSample> {
     (0..n)
-        .map(|i| MuxSample {
-            data: vec![0x80u8.wrapping_add(i as u8); 9],
-            duration: 800,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![0x80u8.wrapping_add(i as u8); 9])
+                .with_duration(800)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect()
 }
@@ -222,11 +224,9 @@ fn faststart_keeps_aux_slab_addressable() {
     let mut m = two_track_muxer().with_faststart();
     m.set_sample_aux(
         1,
-        oxideav_mov::SampleAuxStream {
-            aux_info_type: Some(*b"cenc"),
-            aux_info_type_parameter: 0,
-            per_sample: blobs.clone(),
-        },
+        oxideav_mov::SampleAuxStream::new(blobs.clone())
+            .with_aux_info_type(Some(*b"cenc"))
+            .with_aux_info_type_parameter(0),
     )
     .expect("attach aux stream");
     let bytes = m.encode_to_vec().unwrap();

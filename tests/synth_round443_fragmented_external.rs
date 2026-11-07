@@ -49,10 +49,11 @@ fn sidecar() -> (Vec<u8>, Vec<ExternalSampleLocation>, Vec<Vec<u8>>) {
         if i == 2 {
             file.extend_from_slice(&[0xEE; 9]); // gap ⇒ second run
         }
-        locations.push(ExternalSampleLocation {
-            offset: file.len() as u64,
-            size: p.len() as u32,
-        });
+        locations.push(
+            ExternalSampleLocation::default()
+                .with_offset(file.len() as u64)
+                .with_size(p.len() as u32),
+        );
         file.extend_from_slice(p);
     }
     (file, locations, payloads)
@@ -60,22 +61,24 @@ fn sidecar() -> (Vec<u8>, Vec<ExternalSampleLocation>, Vec<Vec<u8>>) {
 
 fn video_samples(n: usize) -> Vec<MuxSample> {
     (0..n)
-        .map(|i| MuxSample {
-            data: vec![0x10 + i as u8; 12],
-            duration: 100,
-            keyframe: i % 2 == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![0x10 + i as u8; 12])
+                .with_duration(100)
+                .with_keyframe(i % 2 == 0)
+                .with_composition_offset(0)
         })
         .collect()
 }
 
 fn external_audio_samples(n: usize) -> Vec<MuxSample> {
     (0..n)
-        .map(|_| MuxSample {
-            data: Vec::new(),
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|_| {
+            MuxSample::default()
+                .with_data(Vec::new())
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect()
 }
@@ -271,11 +274,12 @@ fn fragmented_external_equivalence_with_self_contained() {
         8000,
         payloads
             .iter()
-            .map(|p| MuxSample {
-                data: p.clone(),
-                duration: 1024,
-                keyframe: true,
-                composition_offset: 0,
+            .map(|p| {
+                MuxSample::default()
+                    .with_data(p.clone())
+                    .with_duration(1024)
+                    .with_keyframe(true)
+                    .with_composition_offset(0)
             })
             .collect(),
         &[],
@@ -366,11 +370,12 @@ fn fragment_locations_spreading_past_i32_are_rejected() {
         a,
         1,
         &[
-            ExternalSampleLocation { offset: 0, size: 4 },
-            ExternalSampleLocation {
-                offset: (i32::MAX as u64) + 8,
-                size: 4,
-            },
+            ExternalSampleLocation::default()
+                .with_offset(0)
+                .with_size(4),
+            ExternalSampleLocation::default()
+                .with_offset((i32::MAX as u64) + 8)
+                .with_size(4),
         ],
     )
     .expect("external");
@@ -404,11 +409,12 @@ fn patched_fragmented(
             },
             8000,
             (0..2)
-                .map(|i| MuxSample {
-                    data: vec![0xC0 + (t as u8) * 0x10 + i as u8; 4],
-                    duration: 1024,
-                    keyframe: true,
-                    composition_offset: 0,
+                .map(|i| {
+                    MuxSample::default()
+                        .with_data(vec![0xC0 + (t as u8) * 0x10 + i as u8; 4])
+                        .with_duration(1024)
+                        .with_keyframe(true)
+                        .with_composition_offset(0)
                 })
                 .collect(),
             &[],
@@ -671,11 +677,12 @@ fn bframe_video_samples(offsets: &[i32]) -> Vec<MuxSample> {
     offsets
         .iter()
         .enumerate()
-        .map(|(i, &cts)| MuxSample {
-            data: vec![0x40 + i as u8; 10],
-            duration: 100,
-            keyframe: i == 0,
-            composition_offset: cts,
+        .map(|(i, &cts)| {
+            MuxSample::default()
+                .with_data(vec![0x40 + i as u8; 10])
+                .with_duration(100)
+                .with_keyframe(i == 0)
+                .with_composition_offset(cts)
         })
         .collect()
 }
@@ -783,11 +790,12 @@ fn fragmented_external_track_keeps_composition_offsets() {
         },
         8000,
         cts.iter()
-            .map(|&c| MuxSample {
-                data: Vec::new(),
-                duration: 1024,
-                keyframe: true,
-                composition_offset: c,
+            .map(|&c| {
+                MuxSample::default()
+                    .with_data(Vec::new())
+                    .with_duration(1024)
+                    .with_keyframe(true)
+                    .with_composition_offset(c)
             })
             .collect(),
         &[],
@@ -959,11 +967,12 @@ fn fragments_without_sync_samples_contribute_no_tfra_entry() {
         },
         600,
         (0..4)
-            .map(|i| MuxSample {
-                data: vec![0x70 + i as u8; 8],
-                duration: 100,
-                keyframe: i == 0,
-                composition_offset: 0,
+            .map(|i| {
+                MuxSample::default()
+                    .with_data(vec![0x70 + i as u8; 8])
+                    .with_duration(100)
+                    .with_keyframe(i == 0)
+                    .with_composition_offset(0)
             })
             .collect(),
         &[],

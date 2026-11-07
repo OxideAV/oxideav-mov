@@ -26,17 +26,18 @@ use oxideav_mov::{MovDemuxer, MovMuxer, MuxSample, MuxTrackKind};
 /// corruption.
 fn build_5_frame_video_mov() -> (Vec<u8>, Vec<MuxSample>) {
     let samples: Vec<MuxSample> = (0..5)
-        .map(|i| MuxSample {
-            data: {
-                let mut buf = vec![0u8; 32 + i];
-                for (j, b) in buf.iter_mut().enumerate() {
-                    *b = ((i << 4) | (j & 0xF)) as u8;
-                }
-                buf
-            },
-            duration: 1000, // 1000 ticks @ 30000/s = 33.33 ms ⇒ ~30 fps
-            keyframe: i == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data({
+                    let mut buf = vec![0u8; 32 + i];
+                    for (j, b) in buf.iter_mut().enumerate() {
+                        *b = ((i << 4) | (j & 0xF)) as u8;
+                    }
+                    buf
+                })
+                .with_duration(1000)
+                .with_keyframe(i == 0)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new().with_movie_timescale(600);
@@ -135,11 +136,12 @@ fn roundtrip_audio_only_mov_preserves_sample_table() {
     // keyframes by audio convention, so `stss` should be omitted
     // (every-sample-keyframe implicit rule from QTFF p. 73).
     let samples: Vec<MuxSample> = (0..3)
-        .map(|i| MuxSample {
-            data: vec![(i * 2) as u8; 256],
-            duration: 128,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(i * 2) as u8; 256])
+                .with_duration(128)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new().with_movie_timescale(600);
@@ -184,20 +186,22 @@ fn roundtrip_audio_only_mov_preserves_sample_table() {
 fn roundtrip_two_track_video_plus_audio_preserves_both_streams() {
     // Track 1: 4 video frames, sizes vary (24, 25, 26, 27 bytes).
     let video_samples: Vec<MuxSample> = (0..4)
-        .map(|i| MuxSample {
-            data: vec![(0xA0 | i) as u8; 24 + i],
-            duration: 1500,
-            keyframe: i == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(0xA0 | i) as u8; 24 + i])
+                .with_duration(1500)
+                .with_keyframe(i == 0)
+                .with_composition_offset(0)
         })
         .collect();
     // Track 2: 2 audio samples, uniform size.
     let audio_samples: Vec<MuxSample> = (0..2)
-        .map(|i| MuxSample {
-            data: vec![(0xB0 | i) as u8; 100],
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(0xB0 | i) as u8; 100])
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
 
@@ -354,19 +358,21 @@ fn ffprobe_accepts_synth_video_plus_audio_mov() {
     };
     // Build a 4-video + 2-audio MOV through MovMuxer.
     let video_samples: Vec<MuxSample> = (0..4)
-        .map(|i| MuxSample {
-            data: vec![(0xA0 | i) as u8; 24 + i],
-            duration: 1500,
-            keyframe: i == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(0xA0 | i) as u8; 24 + i])
+                .with_duration(1500)
+                .with_keyframe(i == 0)
+                .with_composition_offset(0)
         })
         .collect();
     let audio_samples: Vec<MuxSample> = (0..2)
-        .map(|i| MuxSample {
-            data: vec![(0xB0 | i) as u8; 100],
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(0xB0 | i) as u8; 100])
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new().with_movie_timescale(600);

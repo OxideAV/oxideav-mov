@@ -18,11 +18,12 @@ use oxideav_mov::{MovDemuxer, MovMuxer, MuxEdit, MuxSample, MuxTrackKind};
 /// `sync_every` samples (sample 0 always sync).
 fn build(n: usize, sync_every: usize, edits: &[MuxEdit]) -> Vec<u8> {
     let samples: Vec<MuxSample> = (0..n)
-        .map(|i| MuxSample {
-            data: vec![i as u8; 4],
-            duration: 100,
-            keyframe: i % sync_every == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![i as u8; 4])
+                .with_duration(100)
+                .with_keyframe(i % sync_every == 0)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new().with_movie_timescale(1000);

@@ -36,10 +36,11 @@ fn sidecar() -> (Vec<u8>, Vec<ExternalSampleLocation>, Vec<Vec<u8>>) {
             // Gap before the last payload ⇒ a second chunk.
             file.extend_from_slice(&[0xEE; 16]);
         }
-        locations.push(ExternalSampleLocation {
-            offset: file.len() as u64,
-            size: p.len() as u32,
-        });
+        locations.push(
+            ExternalSampleLocation::default()
+                .with_offset(file.len() as u64)
+                .with_size(p.len() as u32),
+        );
         file.extend_from_slice(p);
     }
     (file, locations, payloads)
@@ -50,11 +51,12 @@ fn sidecar() -> (Vec<u8>, Vec<ExternalSampleLocation>, Vec<Vec<u8>>) {
 fn mixed_movie(locations: &[ExternalSampleLocation]) -> Vec<u8> {
     let mut m = MovMuxer::new();
     let video: Vec<MuxSample> = (0..3)
-        .map(|i| MuxSample {
-            data: vec![0x10 + i as u8; 12],
-            duration: 100,
-            keyframe: i == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![0x10 + i as u8; 12])
+                .with_duration(100)
+                .with_keyframe(i == 0)
+                .with_composition_offset(0)
         })
         .collect();
     let v = m.add_track(
@@ -69,11 +71,12 @@ fn mixed_movie(locations: &[ExternalSampleLocation]) -> Vec<u8> {
     );
     assert_eq!(v, 1);
     let audio: Vec<MuxSample> = (0..locations.len())
-        .map(|_| MuxSample {
-            data: Vec::new(),
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|_| {
+            MuxSample::default()
+                .with_data(Vec::new())
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let a = m.add_track(
@@ -238,12 +241,13 @@ fn co64_promotion_for_external_offsets_past_u32() {
             sample_rate: 8000,
         },
         8000,
-        vec![MuxSample {
-            data: Vec::new(),
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
-        }],
+        vec![
+            MuxSample::default()
+                .with_data(Vec::new())
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0),
+        ],
         &[],
     );
     m.set_data_references(a, &[DataReferenceWrite::Url("huge.bin".into())])
@@ -252,10 +256,9 @@ fn co64_promotion_for_external_offsets_past_u32() {
     m.set_external_media(
         a,
         1,
-        &[ExternalSampleLocation {
-            offset: big,
-            size: 3,
-        }],
+        &[ExternalSampleLocation::default()
+            .with_offset(big)
+            .with_size(3)],
     )
     .unwrap();
     let bytes = m.encode_to_vec().expect("encode");
@@ -390,11 +393,12 @@ fn faststart_and_interleaved_local_track_coexist_with_external() {
             .with_moov_placement(placement)
             .with_chunk_strategy(ChunkStrategy::InterleaveByMovieTicks(600));
         let video: Vec<MuxSample> = (0..4)
-            .map(|i| MuxSample {
-                data: vec![0x40 + i as u8; 9],
-                duration: 300,
-                keyframe: true,
-                composition_offset: 0,
+            .map(|i| {
+                MuxSample::default()
+                    .with_data(vec![0x40 + i as u8; 9])
+                    .with_duration(300)
+                    .with_keyframe(true)
+                    .with_composition_offset(0)
             })
             .collect();
         m.add_track(
@@ -408,11 +412,12 @@ fn faststart_and_interleaved_local_track_coexist_with_external() {
             &[],
         );
         let audio: Vec<MuxSample> = (0..locations.len())
-            .map(|_| MuxSample {
-                data: Vec::new(),
-                duration: 1024,
-                keyframe: true,
-                composition_offset: 0,
+            .map(|_| {
+                MuxSample::default()
+                    .with_data(Vec::new())
+                    .with_duration(1024)
+                    .with_keyframe(true)
+                    .with_composition_offset(0)
             })
             .collect();
         let a = m.add_track(
@@ -470,11 +475,12 @@ fn applied_edit_lists_compose_with_external_resolution() {
     // durations line up 1:1 with media ticks.
     let mut m = MovMuxer::new().with_movie_timescale(8000);
     let audio: Vec<MuxSample> = (0..locations.len())
-        .map(|_| MuxSample {
-            data: Vec::new(),
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|_| {
+            MuxSample::default()
+                .with_data(Vec::new())
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let a = m.add_track(
@@ -528,11 +534,12 @@ fn compressed_movie_resource_carries_external_track() {
     let (file, locations, payloads) = sidecar();
     let mut m = MovMuxer::new().with_compressed_movie_resource(true);
     let audio: Vec<MuxSample> = (0..locations.len())
-        .map(|_| MuxSample {
-            data: Vec::new(),
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|_| {
+            MuxSample::default()
+                .with_data(Vec::new())
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let a = m.add_track(
@@ -575,11 +582,12 @@ fn compact_sample_size_composes_with_external_locations() {
     let (file, locations, payloads) = sidecar();
     let mut m = MovMuxer::new();
     let audio: Vec<MuxSample> = (0..locations.len())
-        .map(|_| MuxSample {
-            data: Vec::new(),
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|_| {
+            MuxSample::default()
+                .with_data(Vec::new())
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let a = m.add_track(
@@ -705,11 +713,12 @@ fn external_movie_equals_self_contained_movie_payload_stream() {
     let mut self_contained = MovMuxer::new();
     let sc_samples: Vec<MuxSample> = payloads
         .iter()
-        .map(|p| MuxSample {
-            data: p.clone(),
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|p| {
+            MuxSample::default()
+                .with_data(p.clone())
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     self_contained.add_track(
@@ -727,11 +736,12 @@ fn external_movie_equals_self_contained_movie_payload_stream() {
 
     let mut ext = MovMuxer::new();
     let ext_samples: Vec<MuxSample> = (0..locations.len())
-        .map(|_| MuxSample {
-            data: Vec::new(),
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|_| {
+            MuxSample::default()
+                .with_data(Vec::new())
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let a = ext.add_track(

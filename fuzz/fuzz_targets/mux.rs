@@ -93,12 +93,13 @@ fuzz_target!(|data: &[u8]| {
                 .take(len)
                 .collect::<Vec<u8>>();
             bytes.push(data.clone());
-            samples.push(MuxSample {
-                data,
-                duration: dur,
-                keyframe: !is_video || i == 0 || r.u8() & 3 == 0,
-                composition_offset: offset,
-            });
+            samples.push(
+                MuxSample::default()
+                    .with_data(data)
+                    .with_duration(dur)
+                    .with_keyframe(!is_video || i == 0 || r.u8() & 3 == 0)
+                    .with_composition_offset(offset),
+            );
         }
         inputs.push(bytes);
         if is_video {

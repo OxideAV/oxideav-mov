@@ -21,11 +21,12 @@ fn open(bytes: Vec<u8>) -> MovDemuxer {
 
 fn video_track(m: &mut MovMuxer) -> u32 {
     let samples: Vec<MuxSample> = (0..3)
-        .map(|i| MuxSample {
-            data: vec![(i as u8).wrapping_add(1); 8],
-            duration: 100,
-            keyframe: i == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(i as u8).wrapping_add(1); 8])
+                .with_duration(100)
+                .with_keyframe(i == 0)
+                .with_composition_offset(0)
         })
         .collect();
     m.add_track(

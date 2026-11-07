@@ -44,11 +44,12 @@ fn build_mov_with_sgpd(
 ) -> Vec<u8> {
     let grouping_type = desc.grouping_type;
     let samples: Vec<MuxSample> = (0..sample_count)
-        .map(|i| MuxSample {
-            data: vec![(0xC0 | (i & 0x0F)) as u8; 8],
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(0xC0 | (i & 0x0F)) as u8; 8])
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new().with_movie_timescale(600);
@@ -67,11 +68,7 @@ fn build_mov_with_sgpd(
         .expect("attach sgpd");
     m.add_sample_to_group(
         id,
-        SampleToGroupWrite {
-            grouping_type,
-            grouping_type_parameter: None,
-            indices,
-        },
+        SampleToGroupWrite::new(grouping_type, indices).with_grouping_type_parameter(None),
     )
     .expect("attach csgp");
     m.encode_to_vec().expect("encode MOV with sgpd")
@@ -221,11 +218,12 @@ fn sgpd_precedes_csgp_in_stbl() {
 #[test]
 fn multiple_grouping_types_emit_multiple_sgpd() {
     let samples: Vec<MuxSample> = (0..3)
-        .map(|i| MuxSample {
-            data: vec![(0xD0 | i) as u8; 6],
-            duration: 1000,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![(0xD0 | i) as u8; 6])
+                .with_duration(1000)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new();
@@ -269,11 +267,12 @@ fn multiple_grouping_types_emit_multiple_sgpd() {
 #[test]
 fn replacing_grouping_type_keeps_one_sgpd() {
     let samples: Vec<MuxSample> = (0..2)
-        .map(|_| MuxSample {
-            data: vec![0u8; 8],
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|_| {
+            MuxSample::default()
+                .with_data(vec![0u8; 8])
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect();
     let mut m = MovMuxer::new();
@@ -322,12 +321,13 @@ fn replacing_grouping_type_keeps_one_sgpd() {
 
 #[test]
 fn empty_sgpd_entries_rejected() {
-    let samples = vec![MuxSample {
-        data: vec![0u8; 8],
-        duration: 1024,
-        keyframe: true,
-        composition_offset: 0,
-    }];
+    let samples = vec![
+        MuxSample::default()
+            .with_data(vec![0u8; 8])
+            .with_duration(1024)
+            .with_keyframe(true)
+            .with_composition_offset(0),
+    ];
     let mut m = MovMuxer::new();
     let id = m.add_track(
         MuxTrackKind::Audio {

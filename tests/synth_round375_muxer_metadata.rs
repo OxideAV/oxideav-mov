@@ -29,11 +29,12 @@ fn open(bytes: Vec<u8>) -> MovDemuxer {
 fn samples(payloads: &[&[u8]]) -> Vec<MuxSample> {
     payloads
         .iter()
-        .map(|p| MuxSample {
-            data: p.to_vec(),
-            duration: 100,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|p| {
+            MuxSample::default()
+                .with_data(p.to_vec())
+                .with_duration(100)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect()
 }

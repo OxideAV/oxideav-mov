@@ -20,11 +20,12 @@ use oxideav_mov::{
 
 fn samples(n: usize) -> Vec<MuxSample> {
     (0..n)
-        .map(|i| MuxSample {
-            data: vec![i as u8; 8],
-            duration: 1024,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![i as u8; 8])
+                .with_duration(1024)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect()
 }
@@ -147,10 +148,9 @@ fn iso_v1_srat_and_defined_chnl_roundtrip() {
     let tid = add_audio(&mut m, 6);
     m.set_audio_entry_v1(
         tid,
-        AudioEntryV1 {
-            sampling_rate: Some(96_000),
-            channel_layout: Some(chnl.clone()),
-        },
+        AudioEntryV1::default()
+            .with_sampling_rate(Some(96_000))
+            .with_channel_layout(Some(chnl.clone())),
     )
     .unwrap();
     let bytes = m.encode_to_vec().unwrap();
@@ -190,10 +190,9 @@ fn iso_v1_explicit_positions_roundtrip() {
     let tid = add_audio(&mut m, 2);
     m.set_audio_entry_v1(
         tid,
-        AudioEntryV1 {
-            sampling_rate: None,
-            channel_layout: Some(chnl.clone()),
-        },
+        AudioEntryV1::default()
+            .with_sampling_rate(None)
+            .with_channel_layout(Some(chnl.clone())),
     )
     .unwrap();
     let d = open(m.encode_to_vec().unwrap());
@@ -210,10 +209,9 @@ fn iso_v1_roundtrips_through_fragmented_path() {
     let tid = add_audio(&mut m, 2);
     m.set_audio_entry_v1(
         tid,
-        AudioEntryV1 {
-            sampling_rate: Some(192_000),
-            channel_layout: None,
-        },
+        AudioEntryV1::default()
+            .with_sampling_rate(Some(192_000))
+            .with_channel_layout(None),
     )
     .unwrap();
     let bytes = m.encode_fragmented_to_vec().unwrap();
@@ -250,9 +248,9 @@ fn validation_rejects_bad_configs() {
     assert!(
         m.set_audio_entry_v1(
             aud,
-            AudioEntryV1 {
-                sampling_rate: None,
-                channel_layout: Some(ChannelLayout {
+            AudioEntryV1::default()
+                .with_sampling_rate(None)
+                .with_channel_layout(Some(ChannelLayout {
                     stream_structure: ChannelLayout::CHANNEL_STRUCTURED,
                     channels: Some(ChannelStructure::Explicit(vec![SpeakerPosition {
                         speaker_position: 2,
@@ -260,8 +258,7 @@ fn validation_rejects_bad_configs() {
                         elevation: None,
                     }])),
                     object_count: None,
-                }),
-            },
+                })),
         )
         .is_err()
     );
@@ -269,17 +266,16 @@ fn validation_rejects_bad_configs() {
     assert!(
         m.set_audio_entry_v1(
             aud,
-            AudioEntryV1 {
-                sampling_rate: None,
-                channel_layout: Some(ChannelLayout {
+            AudioEntryV1::default()
+                .with_sampling_rate(None)
+                .with_channel_layout(Some(ChannelLayout {
                     stream_structure: ChannelLayout::CHANNEL_STRUCTURED,
                     channels: Some(ChannelStructure::Defined {
                         defined_layout: 0,
                         omitted_channels_map: 0,
                     }),
                     object_count: None,
-                }),
-            },
+                })),
         )
         .is_err()
     );

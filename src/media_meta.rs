@@ -124,6 +124,7 @@ impl Clap {
 /// * `rICC` / `prof` (ISO BMFF §12.1.5) — embedded ICC profile bytes,
 ///   surfaced as raw blob.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ColorParametersKind {
     Nclc {
         primaries: u16,

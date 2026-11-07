@@ -74,6 +74,7 @@ pub const MAX_ALIAS_DEPTH: usize = 4;
 /// Round-1 demuxer. Lifetime is bounded by the input reader; on
 /// `open` we walk `moov` once and cache enough state to stream
 /// packets without reseeking the index.
+#[non_exhaustive]
 pub struct MovDemuxer {
     input: Box<dyn ReadSeek>,
     pub ftyp: Option<Ftyp>,

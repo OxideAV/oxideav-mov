@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `SampleAuxStream::new(per_sample)`, `SampleToGroupWrite::new(grouping_type, indices)`
+  and `TrackReference::new(reference_type, track_ids)`.
+- `with_<field>` builder setters on the muxer input records `MuxSample`,
+  `ExternalSampleLocation`, `SampleAuxStream`, `SampleToGroupWrite`,
+  `SampleGroupDescriptionWrite`, `MuxEdit`, `AudioEntryV1`,
+  `AudioEntryV2`, `VisualExtensions`, `TrackReference`.
+
+### Changed
+
+- `#[non_exhaustive]` on the muxer input records above; on the decoded
+  aggregates `MovDemuxer`, `Track`, `SampleDescription`, `SampleTable`,
+  `SampleEntry`, `QtMetadata`, `MetaItem`, `MetaValue`, `EditedTiming`,
+  `TrafParse`, `TrafRecord`, `ChapterList`, `TextSampleStyles`,
+  `ReferenceMovie`, `SubTrack`, `Gmhd`; and on the open-ended enums
+  `BrandClass`, `MediaHeaderKind`, `ColorParametersKind`,
+  `MetadataSampleEntry`, `SubtitleSampleEntry`, `MuxTrackKind`,
+  `DataReferenceWrite`, `FragmentationMode`, `ChunkStrategy`,
+  `MoovPlacement`, `WellKnownType`, `DecodedValue`, `DataReference`,
+  `TimecodeSample`, `TrackRefKind`, `TrafAddressing`, `InputTypeKind`,
+  `UserDataKind`, `GraphicsMode` and the standalone `Error`. The 1:1
+  box-layout records (`Mvhd`, `Tkhd`, `Elst`, `Tfhd`, `Sidx`, …) and
+  the fixed-field enums (`IsLeading`, `SampleDependsOn`,
+  `ReferenceType`, `TextJustification`, `FieldOrdering`, …) stay
+  exhaustive.
+
 ## [0.0.7](https://github.com/OxideAV/oxideav-mov/compare/v0.0.6...v0.0.7) - 2026-11-05
 
 ### Other

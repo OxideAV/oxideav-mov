@@ -24,11 +24,12 @@ use oxideav_mov::{MovDemuxer, MovMuxer, MuxEdit, MuxSample, MuxTrackKind};
 /// `n` uniform samples of `dur` media ticks each, all keyframes.
 fn uniform_samples(n: usize, dur: u32) -> Vec<MuxSample> {
     (0..n)
-        .map(|i| MuxSample {
-            data: vec![i as u8; 4],
-            duration: dur,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![i as u8; 4])
+                .with_duration(dur)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect()
 }
@@ -129,11 +130,7 @@ fn dwell_only_list_still_drops_unpresented_samples() {
     // segment to extrapolate against, so the other samples stay
     // dropped even with discard emission enabled.
     let pkts = drain_with_discards(
-        &[MuxEdit {
-            track_duration: 600,
-            media_time: 0,
-            media_rate: 0,
-        }],
+        &[MuxEdit::segment(600, 0).with_media_rate(0)],
         uniform_samples(4, 100),
     );
     assert_eq!(pkts.len(), 1, "only the held sample is emitted");
@@ -183,11 +180,12 @@ fn seek_reports_discard_dts_when_landing_on_never_presented_sync() {
     // (0 + (0 - 700) = -700). With it off, the first *presented*
     // sample's dts (0) is reported instead.
     let samples: Vec<MuxSample> = (0..10)
-        .map(|i| MuxSample {
-            data: vec![i as u8; 4],
-            duration: 100,
-            keyframe: i == 0,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![i as u8; 4])
+                .with_duration(100)
+                .with_keyframe(i == 0)
+                .with_composition_offset(0)
         })
         .collect();
     let build = || {

@@ -38,11 +38,12 @@ fn ffprobe_available() -> bool {
 /// container-timeline observations.
 fn raw_video_samples(n: usize) -> Vec<MuxSample> {
     (0..n)
-        .map(|i| MuxSample {
-            data: vec![i as u8; 192],
-            duration: 100,
-            keyframe: true,
-            composition_offset: 0,
+        .map(|i| {
+            MuxSample::default()
+                .with_data(vec![i as u8; 192])
+                .with_duration(100)
+                .with_keyframe(true)
+                .with_composition_offset(0)
         })
         .collect()
 }

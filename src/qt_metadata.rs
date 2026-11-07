@@ -45,6 +45,7 @@ pub const METADATA_HANDLER_MDTA: [u8; 4] = *b"mdta";
 /// Well-known value types (p. 143, Table 3-5). The type indicator's
 /// top byte selects the type set — only `0` (this table) is defined.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum WellKnownType {
     /// 0 — "Reserved for use where no type needs to be indicated".
     Reserved,
@@ -157,6 +158,7 @@ impl LocaleIndicator {
 
 /// A decoded value (see [`MetaValue::decode`]).
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum DecodedValue {
     /// UTF-8 / UTF-16 text (types 1, 2, 4, 5).
     Text(String),
@@ -175,6 +177,7 @@ pub enum DecodedValue {
 
 /// One `data` value atom (p. 142): `[type:4][locale:4][value]`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MetaValue {
     /// Raw 32-bit type indicator: top byte = type set (must be 0), low
     /// 24 bits = well-known type code.
@@ -323,6 +326,7 @@ impl MetaKey {
 
 /// One `ilst` item (p. 138).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MetaItem {
     /// The item atom's type, which "should be set equal to the index of
     /// the key" (1-based) in the `keys` atom. Preserved verbatim even
@@ -350,6 +354,7 @@ impl MetaItem {
 
 /// A parsed QuickTime metadata atom.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct QtMetadata {
     /// `hdlr` handler type (`mdta` per p. 130), when a handler atom is
     /// present.
