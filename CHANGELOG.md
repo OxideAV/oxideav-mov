@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-mov/compare/v0.0.6...v0.0.7) - 2026-11-05
+
+### Other
+
+- walk the audio stream-parameter surface; refresh the fuzz lock to core 0.1.42
+- truthful audio params — PCM codec ids, AAC AudioSpecificConfig, chan layouts; muxer writes them back
+- pixel_format / cropped size / frame_rate for video, sample_format for PCM
+- stream extradata is the codec configuration record (avcC/hvcC/av1C/vpcC/dOps/dfLa/alac/dac3/dec3), muxer frames it back
+- edition 2024, MSRV 1.95
+
 ### Fixed
 
 - H.264 (and HEVC / AV1 / VP8 / VP9 / Opus / FLAC / ALAC / AC-3 /
