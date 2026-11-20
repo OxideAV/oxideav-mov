@@ -728,9 +728,15 @@ pass with discard emission on (`emit_never_presented`) plus the
 typed elst summary accessors, and a fourth pass that attaches an
 always-failing data-reference opener (never touching filesystem or
 network) so the external-media resolution + sticky-failure cache face
-hostile `dref` tables. Alias
-resolution is excluded so a fuzz input can't reach the network or
-filesystem. A daily 30-minute run is scheduled.
+hostile `dref` tables, and a fifth that re-cuts frame-counted sound
+at both packet-size extremes and seeks into the middle of frame runs.
+Alias resolution is excluded so a fuzz input can't reach the network or
+filesystem. A second target (`mux`) turns the input into a
+valid-by-construction recipe and asserts the round trip through both
+writers — the buffered `MovMuxer` across chunk strategies and `moov`
+placements, and the streaming registry muxer with interleaved packets,
+frame-counted sound and derived edit lists. A daily 30-minute run is
+scheduled.
 
 ## Performance
 
@@ -739,7 +745,7 @@ video frames with reordering, 168 750 compressed-audio packets, an
 hour of 48 kHz 8-bit PCM; 259 MiB of payload), muxes it through the
 registry `Muxer`, then opens, drains and seeks it. Apple M-series,
 release build, medians of three runs on a machine shared with other
-builds; "before" is this crate at 0.0.7.
+builds; "before" is the revision this work started from (0.0.7).
 
 | one-hour movie | before | after |
 |---|---|---|
@@ -752,7 +758,7 @@ builds; "before" is this crate at 0.0.7.
 
 The open / drain / seek rows read the same file (the 0.0.7 muxer's
 track-contiguous layout) with both versions. The streaming muxer's own
-interleaved output has 276 750 chunks instead of 3 and opens in 8.7 ms.
+interleaved output has 254 250 chunks instead of 3 and opens in 8.7 ms.
 
 Uncompressed sound written by a black-box encoder (`MOV_BENCH_FILE=`):
 
@@ -762,7 +768,7 @@ Uncompressed sound written by a black-box encoder (`MOV_BENCH_FILE=`):
 | — peak memory | 12.5 GB | 34 MB |
 | — drain | 28.8 M one-frame packets, 1.3 s | 28 125 packets, 7 ms |
 | — seek + first packet | 22.5 ms | 0.3 µs |
-| 1 h, 48 kHz stereo 16-bit (172.8 M frames, 691 MB): open | (≈ 8 GB of queue) | 1.3 ms |
+| 1 h, 48 kHz stereo 16-bit (172.8 M frames, 691 MB): open | not run — 8.3 GB of queue entries | 1.3 ms |
 | — drain, movie in memory | — | 168 750 packets, 0.022 s |
 
 Where it went: a frame-counted sound track is queued per packet rather
