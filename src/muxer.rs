@@ -1301,6 +1301,7 @@ impl TrackWrite {
                 && self.stdp.is_empty()
                 && self.padb.is_empty()
                 && self.stsh.is_empty()
+                && self.stps.is_empty()
                 && self.subs.is_empty())
     }
 
@@ -1468,6 +1469,10 @@ struct TrackWrite {
     /// `shadowed_sample_number`. Empty ⇒ no `stsh`. Set via
     /// [`MovMuxer::set_shadow_sync_samples`].
     stsh: Vec<StshEntry>,
+    /// Partial sync sample numbers (1-based, ascending) for the
+    /// QuickTime `stps` atom; empty ⇒ no atom. Set via
+    /// [`MovMuxer::set_partial_sync_samples`].
+    stps: Vec<u32>,
     /// Optional `stbl`-scope Sub-Sample Information Box (`subs`, ISO/IEC
     /// 14496-12 §8.7.7). When non-empty the muxer emits the sparse
     /// per-sample sub-sample table (delta-coded sample numbers). Empty ⇒
@@ -2180,6 +2185,7 @@ impl MovMuxer {
             stdp: Vec::new(),
             padb: Vec::new(),
             stsh: Vec::new(),
+            stps: Vec::new(),
             subs: Vec::new(),
             load: None,
             clipping: None,
@@ -3310,6 +3316,49 @@ impl MovMuxer {
             )));
         }
         self.tracks[idx].padb = pads.to_vec();
+        Ok(())
+    }
+
+    /// List a track's **partial sync samples** in a QuickTime `stps`
+    /// atom (QTFF 2012-08-14 pp. 108 – 109), written after the sync
+    /// sample table. `sample_numbers` are 1-based; they are sorted,
+    /// and an empty list removes the atom. "Since such samples are
+    /// not full sync samples, they should not also be listed in the
+    /// sync sample atom": a number naming a sample added as a
+    /// keyframe is refused, as is a duplicate or a number past the
+    /// track's sample count. QuickTime-only; round-trips onto
+    /// [`crate::SampleTable::stps`].
+    pub fn set_partial_sync_samples(
+        &mut self,
+        track_id: u32,
+        sample_numbers: &[u32],
+    ) -> Result<()> {
+        let idx = self.track_index(track_id, "set_partial_sync_samples")?;
+        let t = &self.tracks[idx];
+        let mut sorted = sample_numbers.to_vec();
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|w| w[0] == w[1]) {
+            return Err(Error::invalid(
+                "MOV muxer: stps lists a sample number twice",
+            ));
+        }
+        for &n in &sorted {
+            let sample = n
+                .checked_sub(1)
+                .and_then(|i| t.samples.get(i as usize))
+                .ok_or_else(|| {
+                    Error::invalid(format!(
+                        "MOV muxer: stps sample number {n} out of range 1..={}",
+                        t.samples.len()
+                    ))
+                })?;
+            if sample.keyframe {
+                return Err(Error::invalid(format!(
+                    "MOV muxer: sample {n} is a sync sample and cannot also be a partial sync sample"
+                )));
+            }
+        }
+        self.tracks[idx].stps = sorted;
         Ok(())
     }
 
@@ -5524,6 +5573,17 @@ fn build_stbl(
     if let Some(stss_atom) = build_stss(t) {
         push_atom(&mut stbl, *b"stss", &stss_atom);
     }
+    if !t.stps.is_empty() {
+        // QTFF 2012-08-14 p. 108: version + flags, entry count, the
+        // sample numbers.
+        let mut stps = Vec::with_capacity(8 + t.stps.len() * 4);
+        stps.extend_from_slice(&0u32.to_be_bytes());
+        stps.extend_from_slice(&(t.stps.len() as u32).to_be_bytes());
+        for n in &t.stps {
+            stps.extend_from_slice(&n.to_be_bytes());
+        }
+        push_atom(&mut stbl, *b"stps", &stps);
+    }
     push_atom(&mut stbl, *b"stsc", &build_stsc(chunks));
     push_sample_size_atom(&mut stbl, t);
     if need_co64 {
@@ -7442,6 +7502,7 @@ mod tests {
             stdp: Vec::new(),
             padb: Vec::new(),
             stsh: Vec::new(),
+            stps: Vec::new(),
             subs: Vec::new(),
             load: None,
             clipping: None,
@@ -7511,6 +7572,7 @@ mod tests {
             stdp: Vec::new(),
             padb: Vec::new(),
             stsh: Vec::new(),
+            stps: Vec::new(),
             subs: Vec::new(),
             load: None,
             clipping: None,
@@ -7981,6 +8043,7 @@ mod tests {
             stdp: Vec::new(),
             padb: Vec::new(),
             stsh: Vec::new(),
+            stps: Vec::new(),
             subs: Vec::new(),
             load: None,
             clipping: None,
@@ -8031,6 +8094,7 @@ mod tests {
             stdp: Vec::new(),
             padb: Vec::new(),
             stsh: Vec::new(),
+            stps: Vec::new(),
             subs: Vec::new(),
             load: None,
             clipping: None,
@@ -8109,6 +8173,7 @@ mod tests {
             stdp: Vec::new(),
             padb: Vec::new(),
             stsh: Vec::new(),
+            stps: Vec::new(),
             subs: Vec::new(),
             load: None,
             clipping: None,
@@ -8178,6 +8243,7 @@ mod tests {
             stdp: Vec::new(),
             padb: Vec::new(),
             stsh: Vec::new(),
+            stps: Vec::new(),
             subs: Vec::new(),
             load: None,
             clipping: None,

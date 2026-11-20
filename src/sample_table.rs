@@ -336,6 +336,11 @@ pub struct SampleTable {
     /// Sync sample numbers (1-based per QTFF p. 73). Empty means
     /// "every sample is a keyframe" (the spec's implicit-sync case).
     pub stss: Vec<u32>,
+    /// Partial sync sample numbers (1-based, ascending) from the
+    /// QuickTime `stps` atom (QTFF 2012-08-14 pp. 108 – 109). Such
+    /// samples "are not full sync samples" and are not listed in
+    /// `stss`. Empty when the track carries no `stps`.
+    pub stps: Vec<u32>,
     /// `ctts` composition-time offsets per sample run. Empty means
     /// "no composition offsets" — DTS == PTS for every sample.
     pub ctts: Vec<CttsEntry>,
@@ -1213,6 +1218,27 @@ pub fn parse_stss(payload: &[u8]) -> Result<Vec<u32>> {
     Ok(out)
 }
 
+/// Parse a `stps` partial sync sample atom body (QTFF 2012-08-14
+/// pp. 108 – 109): `[version:1][flags:3][entry_count:4]` then
+/// `entry_count` 32-bit sample numbers (1-based). The numbers must
+/// ascend strictly, like the sync sample table's.
+pub fn parse_stps(payload: &[u8]) -> Result<Vec<u32>> {
+    need(payload, 0, 8, "stps header")?;
+    let n = read_u32(&payload[4..]) as usize;
+    let body = &payload[8..];
+    if body.len() / 4 < n {
+        return Err(Error::invalid("MOV: stps truncated table"));
+    }
+    let (rows, _) = body[..n * 4].as_chunks::<4>();
+    let out: Vec<u32> = rows.iter().map(|row| u32::from_be_bytes(*row)).collect();
+    if out.windows(2).any(|w| w[0] >= w[1]) {
+        return Err(Error::invalid(
+            "MOV: stps sample numbers must be strictly increasing",
+        ));
+    }
+    Ok(out)
+}
+
 /// Parse `stsh` (Shadow Sync Sample Box) payload.
 ///
 /// Layout per ISO/IEC 14496-12 §8.6.3.2: `[version:1][flags:3]
@@ -1671,6 +1697,14 @@ impl Iterator for FramePacketIter<'_> {
 }
 
 impl SampleTable {
+    /// Whether 0-based sample `sample_idx` is a partial sync sample
+    /// (listed in `stps`).
+    pub fn is_partial_sync(&self, sample_idx: u32) -> bool {
+        sample_idx
+            .checked_add(1)
+            .is_some_and(|n| self.stps.binary_search(&n).is_ok())
+    }
+
     /// `true` when the table counts audio frames the way QTFF's
     /// original sound tables do: one constant non-zero sample size,
     /// every sample one tick long, no sync or composition tables — the
@@ -1679,6 +1713,7 @@ impl SampleTable {
         self.stsz_default_size.is_some_and(|s| s > 0)
             && self.stsz_count > 0
             && self.stss.is_empty()
+            && self.stps.is_empty()
             && self.ctts.is_empty()
             && !self.stts.is_empty()
             && self.stts.iter().all(|e| e.sample_duration == 1)
@@ -1827,6 +1862,7 @@ mod tests {
             stsz_table: vec![],
             chunk_offsets: vec![512],
             stss: vec![],
+            stps: Vec::new(),
             ctts: vec![],
             sbgp: vec![],
             sgpd: vec![],
@@ -1897,6 +1933,7 @@ mod tests {
             stsz_table: vec![],
             chunk_offsets: vec![100],
             stss: vec![],
+            stps: Vec::new(),
             ctts: vec![
                 CttsEntry {
                     sample_count: 3,
@@ -1945,6 +1982,7 @@ mod tests {
             stsz_table: vec![10, 20, 30, 40],
             chunk_offsets: vec![1000, 2000],
             stss: vec![1, 3],
+            stps: Vec::new(),
             ctts: vec![],
             sbgp: vec![],
             sgpd: vec![],

@@ -70,7 +70,9 @@ Decoding stays in codec crates: this crate calls
   at whole compressed frames. Redefined (`-2`) tables, variable sizes
   and fragments keep one table sample per packet.
 - Sample tables: `stsd`, `stts`, `stsc`, `stsz` / `stz2` (compact),
-  `stco` / `co64`, `stss`, `stsh` (shadow sync), `sdtp`, `stdp`,
+  `stco` / `co64`, `stss`, `stps` (QuickTime partial sync samples —
+  not full sync samples: no keyframe flag, no seek landing), `stsh`
+  (shadow sync), `sdtp`, `stdp`,
   `padb`, `subs` (sub-samples), `saiz` / `saio` (sample-aux), and
   sample groups (`sbgp` / `sgpd` v0/v1/v2 plus the compact `csgp`)
   with typed per-sample lookups for every standardized §10 grouping
@@ -575,6 +577,10 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   safe. Both forms round-trip onto the same per-sample sizes; the
   read-side `MovDemuxer::sample_size_source` reports which box (and the
   `stz2` `field_size`) carried them.
+- `set_partial_sync_samples(track_id, &[u32])` writes the QuickTime
+  partial sync sample atom (`stps`, QTFF 2012-08-14 pp. 108 – 109)
+  after the sync sample table; a number naming a sync sample is
+  refused ("they should not also be listed in the sync sample atom").
 - Per-sample auxiliary sample-table boxes (`stbl` scope, written after
   the chunk-offset table): `set_sample_dependencies(track_id,
   &[SdtpEntry])` writes the Independent and Disposable Samples Box

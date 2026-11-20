@@ -147,7 +147,8 @@ pub use sample_groups::{
 pub use sample_table::{
     FramePacketIter, FramePacketing, IsLeading, SampleDependsOn, SampleEntry, SampleHasRedundancy,
     SampleIsDependedOn, SampleSizeSource, SampleTable, SdtpEntry, StshEntry, SubSampleEntry,
-    SubSampleInfo, parse_padb, parse_sdtp, parse_stdp, parse_stsh, parse_stz2, parse_subs,
+    SubSampleInfo, parse_padb, parse_sdtp, parse_stdp, parse_stps, parse_stsh, parse_stz2,
+    parse_subs,
 };
 pub use sidx::{ReferenceType, Sidx, SidxReference, parse_sidx};
 pub use ssix::{Ssix, SsixRange, SsixSubsegment, parse_ssix};

@@ -55,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back keeps its presentation: a black-box reader reports the same
   start, duration and decoded frames for an H.264 (B-frames) + AAC
   (priming) movie.
+- QuickTime partial sync sample atom (`stps`, QTFF 2012-08-14
+  pp. 108 – 109): read onto `SampleTable::stps`
+  (`is_partial_sync`, `MovDemuxer::partial_sync_samples`,
+  `parse_stps`), written by `MovMuxer::set_partial_sync_samples`.
 - `MovMuxer::set_written_media` + `encode_movie_resource`: declare
   sample bytes the caller has already written into the output and
   take the `moov` alone — the building blocks of a streaming writer.

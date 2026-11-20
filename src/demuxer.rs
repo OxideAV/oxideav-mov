@@ -2662,6 +2662,18 @@ impl MovDemuxer {
             .chunk_byte_extent(chunk_1based)
     }
 
+    /// The partial sync samples of `track_index` — 1-based sample
+    /// numbers, ascending — from its QuickTime `stps` atom (QTFF
+    /// 2012-08-14 pp. 108 – 109). They "are not full sync samples":
+    /// their packets carry no keyframe flag and a seek does not land
+    /// on them. Empty for a track without the atom or an index out of
+    /// range.
+    pub fn partial_sync_samples(&self, track_index: usize) -> &[u32] {
+        self.tracks
+            .get(track_index)
+            .map_or(&[], |t| &t.sample_table.stps)
+    }
+
     /// Look up the alternative sync sample for a shadowed sample via the
     /// `stsh` (Shadow Sync Sample Box, ISO/IEC 14496-12 §8.6.3).
     ///
@@ -4774,6 +4786,10 @@ fn parse_stbl<R: Read + Seek + ?Sized>(
             t if t == &STSS => {
                 let body = read_payload(r, child)?;
                 table.stss = parse_stss(&body)?;
+            }
+            t if t == &crate::atom::STPS => {
+                let body = read_payload(r, child)?;
+                table.stps = crate::sample_table::parse_stps(&body)?;
             }
             t if t == &STSH => {
                 let body = read_payload(r, child)?;
