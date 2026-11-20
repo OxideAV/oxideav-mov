@@ -227,7 +227,74 @@ pub struct TimecodeRecord {
     pub frames: u8,
 }
 
+impl StartTimecode {
+    /// The starting timecode as an **absolute non-drop-frame frame
+    /// number**.
+    ///
+    /// QTFF 2012-08-14 p. 192 says of a sample whose description has
+    /// the Counter flag clear that it "is a signed 32-bit integer and
+    /// is used to calculate a timecode record", then lists the record's
+    /// fields — 8-bit hours, sign bit, 7-bit minutes, 8-bit seconds,
+    /// 8-bit frames, 32 bits in all. [`Tmcd::decode_sample`] takes
+    /// that list as the layout of the integer. Files exist whose
+    /// integer is instead the frame number the record is calculated
+    /// *from* (a black-box writer asked for 01:00:00:00 at 25 frames
+    /// per second stores 90000), and unpacked as a layout such a value
+    /// usually breaks the record's own limits — p. 192: frames "cannot
+    /// exceed the value of the number of frames field"; minutes and
+    /// seconds run to 59. So:
+    ///
+    /// * a record within those limits is converted positionally
+    ///   ([`TimecodeRecord::to_frames`]);
+    /// * a record outside them cannot be a packed timecode, and the
+    ///   integer is returned as the frame number itself;
+    /// * a counter (Counter flag set) is returned as stored.
+    ///
+    /// A frame number that happens to unpack to an in-range record is
+    /// read as the record: the two cannot be told apart from the
+    /// sample alone. `None` when the frame rate is 0.
+    pub fn frame_number(&self) -> Option<i64> {
+        match self.sample {
+            TimecodeSample::Counter(v) => Some(i64::from(v)),
+            TimecodeSample::Record(r) if r.is_in_range(self.number_of_frames) => {
+                r.to_frames(self.number_of_frames)
+            }
+            TimecodeSample::Record(r) => {
+                (self.number_of_frames != 0).then_some(i64::from(r.to_raw() as i32))
+            }
+        }
+    }
+
+    /// The starting timecode as an in-range `[H:M:S:F]` record: the
+    /// stored record when it is one, else the record calculated from
+    /// [`Self::frame_number`] (non-drop-frame arithmetic).
+    pub fn timecode(&self) -> Option<TimecodeRecord> {
+        match self.sample {
+            TimecodeSample::Record(r) if r.is_in_range(self.number_of_frames) => Some(r),
+            _ => TimecodeRecord::from_frames(self.frame_number()?, self.number_of_frames),
+        }
+    }
+}
+
 impl TimecodeRecord {
+    /// The 32-bit sample value this record packs to (QTFF p. 192:
+    /// hours, sign + minutes, seconds, frames).
+    pub fn to_raw(&self) -> u32 {
+        u32::from_be_bytes([
+            self.hours,
+            (u8::from(self.negative) << 7) | (self.minutes & 0x7F),
+            self.seconds,
+            self.frames,
+        ])
+    }
+
+    /// Whether the fields are within a timecode's limits at `fps`
+    /// frames per second: minutes and seconds below 60, frames below
+    /// `fps` (QTFF p. 192).
+    pub fn is_in_range(&self, fps: u8) -> bool {
+        self.minutes < 60 && self.seconds < 60 && self.frames < fps
+    }
+
     /// Convert this record to an **absolute non-drop-frame frame
     /// count**, treating `fps` as the number of frames per second
     /// (the sample description's `number_of_frames`).
@@ -428,6 +495,55 @@ fn decode_name_payload(raw: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn start(fps: u8, raw: u32) -> StartTimecode {
+        let tmcd = Tmcd {
+            number_of_frames: fps,
+            ..Tmcd::default()
+        };
+        StartTimecode {
+            timecode_track_index: 0,
+            number_of_frames: fps,
+            time_scale: 0,
+            frame_duration: 0,
+            drop_frame: false,
+            sample: tmcd.decode_sample(&raw.to_be_bytes()).unwrap(),
+        }
+    }
+
+    #[test]
+    fn start_timecode_reads_packed_records_and_frame_numbers() {
+        // A packed 01:02:03:04 record.
+        let s = start(25, 0x0102_0304);
+        assert_eq!(s.frame_number(), Some((3600 + 123) * 25 + 4));
+        let r = s.timecode().unwrap();
+        assert_eq!((r.hours, r.minutes, r.seconds, r.frames), (1, 2, 3, 4));
+        assert_eq!(r.to_raw(), 0x0102_0304);
+
+        // 90000 = 01:00:00:00 at 25 fps stored as a frame number: as a
+        // layout it reads 0:01:95:144, outside a timecode's limits.
+        let s = start(25, 90000);
+        assert_eq!(s.frame_number(), Some(90000));
+        let r = s.timecode().unwrap();
+        assert_eq!((r.hours, r.minutes, r.seconds, r.frames), (1, 0, 0, 0));
+
+        // Frames at the limit: not a packed record.
+        assert_eq!(start(25, 25).frame_number(), Some(25));
+        assert_eq!(start(25, 24).frame_number(), Some(24));
+        // Negative packed record.
+        let s = start(30, 0x0080_0001);
+        assert_eq!(s.frame_number(), Some(-1));
+        assert!(s.timecode().unwrap().negative);
+        // No frame rate: nothing to calculate with.
+        assert_eq!(start(0, 90000).frame_number(), None);
+
+        // A counter is returned as stored.
+        let counter = StartTimecode {
+            sample: TimecodeSample::Counter(1234),
+            ..start(25, 0)
+        };
+        assert_eq!(counter.frame_number(), Some(1234));
+    }
 
     #[test]
     fn tmcd_minimum_body_parses() {

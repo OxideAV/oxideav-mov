@@ -12,7 +12,10 @@
 
 use crate::audio_params::PcmLayout;
 use crate::demuxer;
-use crate::muxer::{AudioEntryV2, ExternalSampleLocation, MovMuxer, MuxSample, MuxTrackKind};
+use crate::muxer::{
+    AudioEntryV2, ExternalSampleLocation, MovMetadata, MovMuxer, MuxSample, MuxTrackKind,
+    VisualExtensions,
+};
 use crate::track::LpcmFlags;
 
 use std::io::SeekFrom;
@@ -198,6 +201,37 @@ fn audio_description(params: &CodecParameters, sample_rate: u32) -> Result<Audio
     })
 }
 
+/// The `colr` record stating a colour signal; `None` when the signal
+/// says nothing. A signalled range needs the `nclx` record (ISO/IEC
+/// 14496-12 §12.1.5, with its full-range flag); with the range left
+/// open the QuickTime `nclc` record (QTFF 2012-08-14 p. 162), which
+/// has no range field, says exactly as much.
+fn colr_for(signal: &oxideav_core::ColorSignal) -> Option<crate::media_meta::ColorParameters> {
+    use crate::media_meta::ColorParametersKind;
+    if signal.is_unspecified() {
+        return None;
+    }
+    let primaries = u16::from(signal.primaries.code_point());
+    let transfer = u16::from(signal.transfer.code_point());
+    let matrix = u16::from(signal.matrix.code_point());
+    let kind = match signal.range {
+        oxideav_core::ColorRange::Full | oxideav_core::ColorRange::Limited => {
+            ColorParametersKind::Nclx {
+                primaries,
+                transfer,
+                matrix,
+                full_range: signal.range == oxideav_core::ColorRange::Full,
+            }
+        }
+        _ => ColorParametersKind::Nclc {
+            primaries,
+            transfer,
+            matrix,
+        },
+    };
+    Some(crate::media_meta::ColorParameters { kind })
+}
+
 /// One input packet already written to the output: where its bytes
 /// are, and its timestamps in the stream's own time base.
 struct WrittenSample {
@@ -227,6 +261,12 @@ struct PendingTrack {
     sound_v2: Option<AudioEntryV2>,
     /// See [`AudioPlan::frame_bytes`].
     frame_bytes: Option<u32>,
+    /// The stream's language tag, written to `mdhd` (a three-letter
+    /// ISO 639-2/T code) or to an `elng` (anything longer).
+    language: Option<String>,
+    /// The video stream's colour signal as a `colr` record, when any
+    /// of it is specified.
+    color: Option<crate::media_meta::ColorParameters>,
     /// One row per packet written (per run of frames for a
     /// frame-counted sound track).
     written: Vec<WrittenSample>,
@@ -354,6 +394,10 @@ pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<
             extra,
             sound_v2: v2,
             frame_bytes,
+            language: s.params.language.clone().filter(|l| !l.is_empty()),
+            color: (s.params.media_type == MediaType::Video)
+                .then(|| colr_for(&s.params.color_signal))
+                .flatten(),
             written: Vec::new(),
             carry: Vec::new(),
             next_auto_dts: 0,
@@ -561,6 +605,20 @@ impl Muxer for MovRegistryMuxer {
             }
             if let Some(v2) = t.sound_v2 {
                 m.set_sound_description_v2(id, v2)?;
+            }
+            if let Some(language) = &t.language {
+                match <[u8; 3]>::try_from(language.as_bytes()) {
+                    Ok(code) if code.iter().all(u8::is_ascii_lowercase) => {
+                        m.set_track_language(id, MovMetadata::iso_language(code))?
+                    }
+                    _ => m.set_track_extended_language(id, language)?,
+                }
+            }
+            if let Some(colr) = &t.color {
+                m.set_visual_extensions(
+                    id,
+                    VisualExtensions::default().with_colr(Some(colr.clone())),
+                )?;
             }
         }
         let moov = m.encode_movie_resource()?;

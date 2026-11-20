@@ -35,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failing the open; `MovDemuxer::is_truncated` reports it. Samples
   whose bytes are present read back, the first missing one fails at
   its own read.
+- Stream metadata from the container: `CodecParameters::language`
+  (the `elng` extended tag, else the `mdhd` packed ISO 639-2/T code)
+  and `color_signal` (`colr` `nclx` code points and range; `nclc`
+  indices with the range left open). The registry muxer writes both
+  back (`mdhd` / `elng`; `nclx` for a signalled range, `nclc`
+  otherwise).
+- `StartTimecode::frame_number` / `timecode`: the starting timecode
+  whether the sample integer is the packed record of QTFF p. 192 or
+  the frame number the record is calculated from (a record outside a
+  timecode's limits cannot be packed); `TimecodeRecord::to_raw` /
+  `is_in_range`.
 - `MovMuxer::set_written_media` + `encode_movie_resource`: declare
   sample bytes the caller has already written into the output and
   take the `moov` alone — the building blocks of a streaming writer.

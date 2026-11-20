@@ -3109,6 +3109,64 @@ impl MovDemuxer {
     }
 }
 
+/// The colour signal a `colr` atom states. An `nclx` record (ISO/IEC
+/// 14496-12 §12.1.5) carries the H.273 code points and the full-range
+/// flag. The QuickTime `nclc` record (QTFF 2012-08-14 pp. 162 – 167)
+/// indexes its own tables — primaries 1 / 5 / 6, transfer 1 / 7,
+/// matrix 1 / 6 / 7, 2 for unspecified — whose entries are the
+/// systems H.273 gives the same numbers, and says nothing of the
+/// range. ICC and other records, and indices past eight bits, state
+/// no code points.
+#[cfg(feature = "registry")]
+fn color_signal_for(
+    colr: &crate::media_meta::ColorParameters,
+) -> Option<oxideav_core::ColorSignal> {
+    use crate::media_meta::ColorParametersKind;
+    use oxideav_core::{
+        ColorPrimaries, ColorRange, ColorSignal, MatrixCoefficients, TransferCharacteristics,
+    };
+    let (primaries, transfer, matrix, range) = match colr.kind {
+        ColorParametersKind::Nclc {
+            primaries,
+            transfer,
+            matrix,
+        } => (primaries, transfer, matrix, ColorRange::Unspecified),
+        ColorParametersKind::Nclx {
+            primaries,
+            transfer,
+            matrix,
+            full_range,
+        } => {
+            let range = if full_range {
+                ColorRange::Full
+            } else {
+                ColorRange::Limited
+            };
+            (primaries, transfer, matrix, range)
+        }
+        _ => return None,
+    };
+    Some(ColorSignal::new(
+        range,
+        ColorPrimaries(u8::try_from(primaries).ok()?),
+        TransferCharacteristics(u8::try_from(transfer).ok()?),
+        MatrixCoefficients(u8::try_from(matrix).ok()?),
+    ))
+}
+
+/// A track's language: the `elng` extended language tag (ISO/IEC
+/// 14496-12 §8.4.6 — it "overrides" the media header's) when present,
+/// else the ISO 639-2/T code packed in `mdhd.language`. `None` for
+/// the undetermined code `und` and for a Macintosh language code.
+#[cfg(feature = "registry")]
+fn track_language(track: &Track) -> Option<String> {
+    if let Some(tag) = track.extended_language.as_deref().filter(|t| !t.is_empty()) {
+        return Some(tag.to_string());
+    }
+    let tag = crate::user_data::iso_language_tag(track.mdhd.language)?;
+    (&tag != b"und").then(|| String::from_utf8_lossy(&tag).into_owned())
+}
+
 /// Default for [`MovDemuxer::set_sound_frames_per_packet`].
 pub const DEFAULT_SOUND_FRAMES_PER_PACKET: u32 = 1024;
 
@@ -3700,7 +3758,11 @@ fn build_streams(tracks: &[Track], resolver: &dyn CodecResolver) -> Vec<StreamIn
                 if desc.height != 0 {
                     params.height = Some(desc.height as u32);
                 }
+                if let Some(signal) = desc.colr.as_ref().and_then(color_signal_for) {
+                    params.color_signal = signal;
+                }
             }
+            params.language = track_language(t);
             // The decoder configuration is the codec's configuration
             // record (`avcC` / `hvcC` / `av1C` / `vpcC` / esds DSI /
             // `dOps` / `dfLa` / `alac` / `dac3` / `dec3`, directly or

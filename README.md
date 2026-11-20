@@ -44,6 +44,11 @@ Decoding stays in codec crates: this crate calls
   last aside) has the same duration; uncompressed-audio
   `sample_format` from the sound description (`raw ` / `twos` / `sowt`
   / `in24` / `in32` / `fl32` / `fl64`, version-2 `lpcm` flags).
+- Stream metadata: `language` is the `elng` extended tag when present,
+  else the `mdhd` packed ISO 639-2/T code (`und` and Macintosh codes
+  stay unset); a video stream's `color_signal` is the `colr` record —
+  `nclx` code points and range, or the QuickTime `nclc` indices with
+  the range left open. The registry muxer writes both back.
 - Audio stream parameters come from the source the format makes
   authoritative: PCM codec ids (`pcm_s24le`, `pcm_f32be`, …) from the
   format code, version-1 / version-2 fields and the `wave` byte-order
@@ -133,7 +138,13 @@ Decoding stays in codec crates: this crate calls
   resolves a media track's governing timecode through its `tref/tmcd`
   reference. `TimecodeRecord::to_frames` / `from_frames` give
   non-drop-frame conversions (drop-frame absolute counts are out of
-  scope — the SMPTE-12M skip rule is outside the QTFF spec).
+  scope — the SMPTE-12M skip rule is outside the QTFF spec). QTFF
+  p. 192 can be read two ways — the 32-bit sample *is* the packed
+  record, or it is the frame number the record is calculated from, and
+  files of both kinds exist: `StartTimecode::frame_number()` /
+  `timecode()` take a record within a timecode's limits (minutes and
+  seconds below 60, frames below the frame rate) as packed and
+  anything else as a frame number.
 - QuickTime Text Sample Description (`text` format inside `stsd` on a
   classic `text`-handler track, QTFF pp. 108–110): the display config of
   a QuickTime text track is decoded into a typed `TextSampleDescription`
