@@ -679,7 +679,6 @@ impl MovDemuxer {
             if body_end > total_len {
                 if mvhd.is_some() {
                     truncated = true;
-                    seen_mdat |= hdr.fourcc == MDAT;
                     break;
                 }
                 return Err(Error::invalid(format!(
