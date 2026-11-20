@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.8](https://github.com/OxideAV/oxideav-mov/compare/v0.0.7...v0.0.8) - 2026-11-20
+
+### Other
+
+- registry muxer: edit duration of frame-counted sound in its own timescale
+- demux target touches the partial sync, truncation, duration and timecode-reading surfaces
+- QuickTime partial sync sample atom read and written
+- fuzz targets and benchmark provenance
+- mux target drives the streaming registry writer over the same recipe
+- registry muxer: derive edit lists from packet timestamps
+- read each sample with one allocation and one read, no seek between consecutive samples
+- stream metadata: language and colour signal both ways; starting timecode as record or frame number
+- drop a dead assignment in the truncated-tail branch (clippy unused_assignments)
+- open a movie whose tail atom is still being written
+- QuickTime metadata filed in udta; fragmented stream and movie durations
+- edit lists: cut sound frame runs at edit boundaries in the applied mode
+- registry muxer: write payloads as packets arrive, keep a table row per packet
+- frame-counted sample tables read and written; sync-index seek; streamed mdat write
+- iterate fragment samples instead of indexing (clippy 1.100 needless_range_loop)
+- API hygiene: non_exhaustive muxer inputs, decoded aggregates, open enums
+
 ### Added
 
 - Frame-counted sound tables (QTFF 2012-08-14 pp. 179 – 180). A sound
