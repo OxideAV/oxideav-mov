@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frames). The registry muxer uses it for every PCM flavour and for
   `ulaw` / `alaw`, whatever packet sizes it is fed (a frame split
   across packets is rejoined).
+- Applied edit lists cut sound frame runs where presentation starts
+  and stops (`edit::media_cut_points`), so the edited stream of a
+  frame-counted track — and an edited-timeline seek into it — is
+  exact to the frame.
 - `MovMuxer::set_written_media` + `encode_movie_resource`: declare
   sample bytes the caller has already written into the output and
   take the `moov` alone — the building blocks of a streaming writer.

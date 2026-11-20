@@ -94,7 +94,9 @@ Decoding stays in codec crates: this crate calls
   timestamps move onto the edited presentation timeline (still in the
   stream's media timescale), rate-N segments scale spacing and
   durations, dwells stretch their held sample, and a mid-sample trim
-  clamps the final duration. Per-sample mapping surfaces via
+  clamps the final duration. A frame-counted sound run is cut at
+  every edit boundary first, so edited uncompressed sound is exact to
+  the frame. Per-sample mapping surfaces via
   `edited_timing_for` / `edit::edited_timing_for_sample`
   (`EditedTiming { pts, dts, duration }`), validated against an
   ffprobe black-box oracle. Opt-in `emit_never_presented(true)` keeps

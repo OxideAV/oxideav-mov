@@ -755,6 +755,57 @@ pub fn edited_timing_for_sample(
     None
 }
 
+/// The media times at which presentation by `segments` starts or
+/// stops — each media segment's first tick and the tick after its
+/// last (the span [`edited_timing_for_sample`] tests membership
+/// against), and the single tick a dwell holds — ascending, without
+/// duplicates. A run of sound frames cut at these times lies wholly
+/// inside or wholly outside every segment.
+pub fn media_cut_points(
+    segments: &[EditSegment],
+    movie_timescale: u32,
+    media_timescale: u32,
+) -> Vec<u64> {
+    if media_timescale == 0 || movie_timescale == 0 {
+        return Vec::new();
+    }
+    let mvs = movie_timescale as i128;
+    let mds = media_timescale as i128;
+    const RATE_ONE: i128 = 0x0001_0000;
+    let mut cuts: Vec<u64> = Vec::with_capacity(segments.len() * 2);
+    let mut push = |v: i128| {
+        if let Ok(v) = u64::try_from(v) {
+            cuts.push(v);
+        }
+    };
+    for seg in segments {
+        match seg.kind {
+            EditSegmentKind::Empty => {}
+            EditSegmentKind::Dwell { media_time } => {
+                push(media_time as i128);
+                push(media_time as i128 + 1);
+            }
+            EditSegmentKind::Media {
+                media_time_start,
+                media_rate,
+            } => {
+                let seg_dur_movie = seg.movie_time_end as i128 - seg.movie_time_start as i128;
+                if media_rate <= 0 || seg_dur_movie <= 0 {
+                    continue;
+                }
+                let num = seg_dur_movie * mds * media_rate as i128;
+                let denom = mvs * RATE_ONE;
+                let seg_dur_media = (num + denom / 2) / denom;
+                push(media_time_start as i128);
+                push(media_time_start as i128 + seg_dur_media);
+            }
+        }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts
+}
+
 /// Extrapolated edited-timeline timing for a sample **no edit
 /// presents** — the decode-only companion to
 /// [`edited_timing_for_sample`].

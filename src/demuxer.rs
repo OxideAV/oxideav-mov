@@ -239,6 +239,11 @@ pub struct MovDemuxer {
     /// [`MovDemuxer::apply_edit_lists`] enables the edited timeline
     /// (parallel to `tracks`; empty while the mode is off).
     edited_segments: Vec<Vec<crate::EditSegment>>,
+    /// Per track, parallel to `edited_segments`: the media times at
+    /// which presentation starts or stops
+    /// ([`crate::edit::media_cut_points`]) — where a run of sound
+    /// frames is cut in the applied edit-list mode.
+    edit_cuts: Vec<Vec<u64>>,
     /// Per-track `trex` defaults from `moov/mvex` (ISO/IEC 14496-12
     /// §8.8.3). Empty for non-fragmented streams. Round 18 surfaces
     /// the parsed records so callers can inspect the per-track
@@ -1132,6 +1137,7 @@ impl MovDemuxer {
             apply_edits: false,
             emit_never_presented: false,
             edited_segments: Vec::new(),
+            edit_cuts: Vec::new(),
             trex_defaults,
             mehd: mehd_box,
             leva: leva_box,
@@ -1337,7 +1343,7 @@ impl MovDemuxer {
     /// the next sample. See [`MovDemuxer::sample_data_in_file`] /
     /// [`MovDemuxer::track_has_external_data`].
     pub fn read_next(&mut self) -> Result<(u32, SampleEntry, Vec<u8>)> {
-        let (stream_idx, sample) = match self.head.take() {
+        let (stream_idx, mut sample) = match self.head.take() {
             Some(head) => head,
             None => {
                 let Some(&entry) = self.samples.get(self.next) else {
@@ -1347,6 +1353,37 @@ impl MovDemuxer {
                 entry
             }
         };
+        // Applied edit lists: a run of sound frames is cut where
+        // presentation starts or stops, so every packet lies wholly
+        // inside or outside each edit and the edited stream is exact
+        // to the frame. The rest of the run is read next.
+        if self.apply_edits
+            && let Some(p) = self.packeting.get(stream_idx as usize).copied().flatten()
+            && let Some(cuts) = self.edit_cuts.get(stream_idx as usize)
+        {
+            let end = sample.dts + u64::from(sample.duration);
+            let first = cuts.partition_point(|&c| c <= sample.dts);
+            let keep = cuts[first..]
+                .iter()
+                .take_while(|&&c| c < end)
+                .map(|&c| {
+                    let into = (c - sample.dts) as u32;
+                    into - into % p.unit_samples
+                })
+                .find(|&k| k > 0);
+            if let Some(keep) = keep {
+                let keep_bytes = p.bytes_for(keep).min(u64::from(sample.size)) as u32;
+                let mut rest = sample;
+                rest.index += keep;
+                rest.dts += u64::from(keep);
+                rest.duration -= keep;
+                rest.offset += u64::from(keep_bytes);
+                rest.size -= keep_bytes;
+                self.head = Some((stream_idx, rest));
+                sample.duration = keep;
+                sample.size = keep_bytes;
+            }
+        }
         if !self.sample_data_in_file(stream_idx as usize, &sample) {
             let dri = self.tracks[stream_idx as usize]
                 .sample_descriptions
@@ -1673,6 +1710,14 @@ impl MovDemuxer {
                 .tracks
                 .iter()
                 .map(|t| t.edit_segments(mvhd.time_scale, Some(mvhd.duration)))
+                .collect();
+            self.edit_cuts = self
+                .tracks
+                .iter()
+                .zip(&self.edited_segments)
+                .map(|(t, segs)| {
+                    crate::edit::media_cut_points(segs, mvhd.time_scale, t.mdhd.time_scale)
+                })
                 .collect();
         }
         self.apply_edits = enable;

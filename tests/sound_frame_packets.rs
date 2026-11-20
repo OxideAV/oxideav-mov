@@ -512,3 +512,89 @@ fn black_box_reader_cuts_the_same_compressed_frames() {
     assert_eq!(ours, 340);
     assert_eq!(theirs, ours, "bytes of sound data read from the chunks");
 }
+
+// ─────────────── edit lists ───────────────
+
+/// With the edit list applied, sound frame runs are cut where
+/// presentation starts and stops: the edited stream is exact to the
+/// frame, through an empty edit, two media segments and a seek.
+#[test]
+fn applied_edit_lists_are_exact_to_the_sound_frame() {
+    use oxideav_mov::MuxEdit;
+    let payload = noise(48000 * 2, 21);
+    let samples: Vec<MuxSample> = payload
+        .chunks(2 * 4800)
+        .map(|c| {
+            MuxSample::default()
+                .with_data(c.to_vec())
+                .with_duration(4800)
+                .with_keyframe(true)
+        })
+        .collect();
+    let mut m = MovMuxer::new().with_movie_timescale(48000);
+    let id = m.add_track(
+        MuxTrackKind::Audio {
+            format: *b"sowt",
+            channels: 1,
+            bits_per_sample: 16,
+            sample_rate: 48000,
+        },
+        48000,
+        samples,
+        &[],
+    );
+    m.set_sound_frame_size(id, 2).unwrap();
+    // Half a second of silence, frames 1000..11001, frames 30000..30500.
+    m.set_edit_list(
+        id,
+        &[
+            MuxEdit::empty(24000),
+            MuxEdit::segment(10001, 1000),
+            MuxEdit::segment(500, 30000),
+        ],
+    )
+    .unwrap();
+    let mut d = open(m.encode_to_vec().unwrap());
+
+    // Media-time contract (the default): everything, untouched.
+    assert_eq!(concat(&drain(&mut d)), payload);
+
+    d.apply_edit_lists(true);
+    d.seek_to(0, 0).unwrap();
+    let packets = drain(&mut d);
+    let mut expected = payload[1000 * 2..11001 * 2].to_vec();
+    expected.extend_from_slice(&payload[30000 * 2..30500 * 2]);
+    assert_eq!(concat(&packets), expected);
+    let mut at = 24000i64;
+    for p in &packets {
+        assert_eq!(p.pts, Some(at), "gapless edited timeline");
+        assert_eq!(p.duration, Some(p.data.len() as i64 / 2));
+        at += p.data.len() as i64 / 2;
+    }
+    assert_eq!(at, 24000 + 10001 + 500);
+
+    // Edited-timeline seek: the exact frame, in either segment.
+    for (edited, media) in [
+        (24000i64, 1000usize),
+        (29000, 6000),
+        (34001, 30000),
+        (34400, 30399),
+    ] {
+        assert_eq!(d.seek_to(0, edited).unwrap(), edited);
+        let p = d.next_packet().unwrap();
+        assert_eq!(p.pts, Some(edited));
+        assert_eq!(&p.data[..2], &payload[media * 2..media * 2 + 2]);
+    }
+
+    // Decode-only media surfaced discard-flagged: every frame comes
+    // out once, the presented ones unflagged.
+    d.emit_never_presented(true);
+    d.seek_to(0, 0).unwrap();
+    let all = drain(&mut d);
+    let presented: Vec<u8> = all
+        .iter()
+        .filter(|p| !p.flags.discard)
+        .flat_map(|p| p.data.iter().copied())
+        .collect();
+    assert_eq!(presented, expected);
+}

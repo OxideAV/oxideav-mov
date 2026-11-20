@@ -85,7 +85,8 @@ pub use demuxer::{
 pub use edit::{
     EMPTY_EDIT_MEDIA_TIME, Edit, EditList, EditSegment, EditSegmentKind, EditedTiming, Elst,
     MEDIA_RATE_ONE, edited_timing_for_sample, first_presented_media_time, initial_empty_duration,
-    media_pts_to_movie_pts, movie_pts_to_media_pts, resolve_edit_segments, total_edit_duration,
+    media_cut_points, media_pts_to_movie_pts, movie_pts_to_media_pts, resolve_edit_segments,
+    total_edit_duration,
 };
 pub use fragment::{
     Mehd, Mfhd, Mfro, TFHD_BASE_DATA_OFFSET_PRESENT, TFHD_DEFAULT_BASE_IS_MOOF,
