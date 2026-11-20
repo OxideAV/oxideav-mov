@@ -103,6 +103,10 @@ struct AudioPlan {
     v2: Option<AudioEntryV2>,
     /// A framed `chan` extension atom, or empty.
     chan: Vec<u8>,
+    /// Bytes of one audio frame when the sample table counts frames
+    /// (uncompressed sound and the one-byte-per-sample companded
+    /// formats), `None` when each packet is one table sample.
+    frame_bytes: Option<u32>,
 }
 
 /// The sound sample description that states an audio stream's facts
@@ -139,6 +143,7 @@ fn audio_description(params: &CodecParameters, sample_rate: u32) -> Result<Audio
             (false, true, 16, false) => Some((*b"sowt", 16)),
             _ => None,
         };
+        let frame_bytes = Some(l.bits / 8 * u32::from(channels));
         if let (Some((format, bits)), true) = (v0, classic) {
             return Ok(AudioPlan {
                 format,
@@ -146,6 +151,7 @@ fn audio_description(params: &CodecParameters, sample_rate: u32) -> Result<Audio
                 bits,
                 v2: None,
                 chan,
+                frame_bytes,
             });
         }
         let mut flags = LpcmFlags::IS_PACKED;
@@ -169,6 +175,7 @@ fn audio_description(params: &CodecParameters, sample_rate: u32) -> Result<Audio
                 const_lpcm_frames_per_audio_packet: 1,
             }),
             chan,
+            frame_bytes,
         });
     }
     let format = fourcc_for(params)?;
@@ -176,12 +183,16 @@ fn audio_description(params: &CodecParameters, sample_rate: u32) -> Result<Audio
         audio_sample_rate: f64::from(sample_rate),
         ..AudioEntryV2::default()
     });
+    // QTFF 2012-08-14 pp. 187 – 188: the companded formats hold one
+    // byte per sample per channel.
+    let frame_bytes = matches!(&format, b"ulaw" | b"alaw").then_some(u32::from(channels));
     Ok(AudioPlan {
         format,
         channels,
         bits: 16,
         v2,
         chan,
+        frame_bytes,
     })
 }
 
@@ -211,6 +222,8 @@ struct PendingTrack {
     /// The QTFF version-2 sound description the track is written
     /// with (`lpcm` and multichannel / high-rate audio).
     sound_v2: Option<AudioEntryV2>,
+    /// See [`AudioPlan::frame_bytes`].
+    frame_bytes: Option<u32>,
     samples: Vec<PendingSample>,
     /// Synthesised decode time for the next packet that arrives
     /// without any timestamp of its own.
@@ -255,6 +268,7 @@ pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<
         }
         let mut v2 = None;
         let mut chan = Vec::new();
+        let mut frame_bytes = None;
         let kind = match s.params.media_type {
             MediaType::Video => MuxTrackKind::Video {
                 format: fourcc_for(&s.params)?,
@@ -271,6 +285,7 @@ pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<
                 let plan = audio_description(&s.params, sample_rate)?;
                 v2 = plan.v2;
                 chan = plan.chan;
+                frame_bytes = plan.frame_bytes;
                 MuxTrackKind::Audio {
                     format: plan.format,
                     channels: plan.channels,
@@ -295,12 +310,20 @@ pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<
         if !crate::codec_config::has_top_level_atom(&extra, b"chan") {
             extra.extend_from_slice(&chan);
         }
+        // A frame-counted table has one tick per frame: its media
+        // timescale is the sample rate whatever the stream's time
+        // base.
+        let frame_rate = match (&kind, frame_bytes) {
+            (MuxTrackKind::Audio { sample_rate, .. }, Some(_)) => Some(*sample_rate),
+            _ => None,
+        };
         tracks.push(PendingTrack {
             kind,
-            media_timescale: s.time_base.den() as u32,
+            media_timescale: frame_rate.unwrap_or(s.time_base.den() as u32),
             tick_num: s.time_base.num(),
             extra,
             sound_v2: v2,
+            frame_bytes,
             samples: Vec::new(),
             next_auto_dts: 0,
         });
@@ -376,23 +399,69 @@ impl Muxer for MovRegistryMuxer {
             return Err(Error::invalid("MOV muxer: already finalized"));
         }
         let mut m = MovMuxer::new();
-        for (i, t) in self.tracks.iter().enumerate() {
-            if t.samples.is_empty() {
-                return Err(Error::invalid(format!(
-                    "MOV muxer: stream {i} received no packets"
-                )));
+        if let Some(i) = self.tracks.iter().position(|t| t.samples.is_empty()) {
+            return Err(Error::invalid(format!(
+                "MOV muxer: stream {i} received no packets"
+            )));
+        }
+        for (i, t) in self.tracks.iter_mut().enumerate() {
+            // The buffered payloads move into the encoder: a failed
+            // finalization is terminal either way.
+            let pending = std::mem::take(&mut t.samples);
+            if let Some(frame) = t.frame_bytes {
+                // Frame-counted sound: the packets are one continuous
+                // run of frames, a tick each at the sample rate; a
+                // frame split across two packets is rejoined.
+                let frame = frame as usize;
+                let mut samples = Vec::with_capacity(pending.len());
+                let mut carry: Vec<u8> = Vec::new();
+                for s in pending {
+                    let mut data = s.data;
+                    if !carry.is_empty() {
+                        carry.extend_from_slice(&data);
+                        data = std::mem::take(&mut carry);
+                    }
+                    let whole = data.len() - data.len() % frame;
+                    carry.extend_from_slice(&data[whole..]);
+                    data.truncate(whole);
+                    if whole == 0 {
+                        continue;
+                    }
+                    let frames = u32::try_from(whole / frame).map_err(|_| {
+                        Error::invalid(format!("MOV muxer: stream {i} packet too large"))
+                    })?;
+                    samples.push(MuxSample {
+                        data,
+                        duration: frames,
+                        keyframe: true,
+                        composition_offset: 0,
+                    });
+                }
+                if samples.is_empty() {
+                    return Err(Error::invalid(format!(
+                        "MOV muxer: stream {i} received no whole sound frame"
+                    )));
+                }
+                let id = m.add_track(t.kind.clone(), t.media_timescale, samples, &t.extra);
+                m.set_sound_frame_size(id, frame as u32)?;
+                if let Some(v2) = t.sound_v2 {
+                    m.set_sound_description_v2(id, v2)?;
+                }
+                continue;
             }
-            let n = t.samples.len();
+            let n = pending.len();
+            let durations: Vec<Option<i64>> = pending.iter().map(|s| s.duration).collect();
+            let decode_times: Vec<i64> = pending.iter().map(|s| s.dts).collect();
             let mut samples = Vec::with_capacity(n);
             let mut prev_duration: i64 = 1;
-            for (j, s) in t.samples.iter().enumerate() {
+            for (j, s) in pending.into_iter().enumerate() {
                 // Recover a missing duration from the decode-time gap
                 // to the next sample; the final sample reuses the
                 // previous duration (QTFF sample durations must be
                 // positive, so degrade to 1 tick at worst).
-                let dur_ticks = match s.duration {
+                let dur_ticks = match durations[j] {
                     Some(d) if d > 0 => d,
-                    _ if j + 1 < n => (t.samples[j + 1].dts - s.dts).max(1),
+                    _ if j + 1 < n => (decode_times[j + 1] - s.dts).max(1),
                     _ => prev_duration,
                 };
                 prev_duration = dur_ticks;
@@ -402,7 +471,7 @@ impl Muxer for MovRegistryMuxer {
                 let offset = (s.pts - s.dts).saturating_mul(t.tick_num);
                 let composition_offset = offset.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
                 samples.push(MuxSample {
-                    data: s.data.clone(),
+                    data: s.data,
                     duration: scaled_dur,
                     keyframe: s.keyframe,
                     composition_offset,

@@ -79,7 +79,8 @@ pub use cmov::{
 pub use codec_config::{config_atom_for_format, config_record_from_extensions};
 pub use ctab::{ColorTableEntry, Ctab, parse_ctab};
 pub use demuxer::{
-    DataReferenceOpener, MAX_ALIAS_DEPTH, MovDemuxer, dref_file_opener, open_file_url,
+    DEFAULT_SOUND_FRAMES_PER_PACKET, DataReferenceOpener, MAX_ALIAS_DEPTH, MovDemuxer,
+    dref_file_opener, open_file_url,
 };
 pub use edit::{
     EMPTY_EDIT_MEDIA_TIME, Edit, EditList, EditSegment, EditSegmentKind, EditedTiming, Elst,
@@ -143,9 +144,9 @@ pub use sample_groups::{
     decode_tele, parse_csgp, parse_sbgp, parse_sgpd, split_csgp_index,
 };
 pub use sample_table::{
-    IsLeading, SampleDependsOn, SampleEntry, SampleHasRedundancy, SampleIsDependedOn,
-    SampleSizeSource, SampleTable, SdtpEntry, StshEntry, SubSampleEntry, SubSampleInfo, parse_padb,
-    parse_sdtp, parse_stdp, parse_stsh, parse_stz2, parse_subs,
+    FramePacketIter, FramePacketing, IsLeading, SampleDependsOn, SampleEntry, SampleHasRedundancy,
+    SampleIsDependedOn, SampleSizeSource, SampleTable, SdtpEntry, StshEntry, SubSampleEntry,
+    SubSampleInfo, parse_padb, parse_sdtp, parse_stdp, parse_stsh, parse_stz2, parse_subs,
 };
 pub use sidx::{ReferenceType, Sidx, SidxReference, parse_sidx};
 pub use ssix::{Ssix, SsixRange, SsixSubsegment, parse_ssix};

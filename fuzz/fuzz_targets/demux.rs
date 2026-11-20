@@ -510,6 +510,32 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
+    // Frame-counted sound packeting: rebuild the queue at both
+    // extremes (one frame per packet, the widest packets) and seek
+    // into the middle of frame runs, so hostile constant-size tables
+    // and version-1 / version-2 byte ratios go through the run cutter
+    // and the mid-run seek arithmetic.
+    for frames in [1u32, u32::MAX, 0] {
+        if dmx.set_sound_frames_per_packet(frames).is_err() {
+            continue;
+        }
+        let _ = dmx.sound_frames_per_packet();
+        for ti in 0..ntracks {
+            let _ = dmx.sound_packeting(ti);
+            for pts in [1i64, 1023, 1025, 65_537, i64::MAX] {
+                let _ = dmx.seek_to(ti as u32, pts);
+                let _ = dmx.next_packet();
+            }
+        }
+        let _ = dmx.seek_to(0, 0);
+        for _ in 0..MAX_PACKETS_PER_INPUT {
+            if dmx.next_packet().is_err() {
+                break;
+            }
+        }
+    }
+    let _ = dmx.set_sound_frames_per_packet(oxideav_mov::DEFAULT_SOUND_FRAMES_PER_PACKET);
+
     // Round-440 external data-reference surface. Touch the per-track
     // externality classifier, then attach an opener that always fails
     // WITHOUT touching the filesystem or network (fuzz inputs must

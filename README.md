@@ -53,6 +53,17 @@ Decoding stays in codec crates: this crate calls
   predefined layout tags as `channel_layout`. The registry muxer
   writes the same facts back (`lpcm` version 2 for wide / little-endian
   / multichannel PCM, `chan` atoms).
+- Frame-counted sound (QTFF 2012-08-14 pp. 179 – 180): a sound track
+  whose sample table counts audio frames — one constant sample size,
+  one tick per sample, no version-1 Compression ID `-2` — is read chunk
+  by chunk in packets of up to 1024 frames
+  (`set_sound_frames_per_packet`; `1` gives one frame per packet), so
+  an hour of 48 kHz PCM is 168 750 queue entries, not 172.8 million.
+  The one-byte-per-sample tables of fixed-ratio compressed sound are
+  turned into bytes by the version-1 `samplesPerPacket` /
+  `bytesPerFrame` fields (version 0: channels × sample width) and cut
+  at whole compressed frames. Redefined (`-2`) tables, variable sizes
+  and fragments keep one table sample per packet.
 - Sample tables: `stsd`, `stts`, `stsc`, `stsz` / `stz2` (compact),
   `stco` / `co64`, `stss`, `stsh` (shadow sync), `sdtp`, `stdp`,
   `padb`, `subs` (sub-samples), `saiz` / `saio` (sample-aux), and
@@ -251,9 +262,13 @@ Decoding stays in codec crates: this crate calls
 
 ## Seek
 
-`MovDemuxer::seek_to(stream, pts)` walks the per-track sample queue,
-snaps to the largest sync (`stss`) sample at-or-before the target DTS,
+`MovDemuxer::seek_to(stream, pts)` binary-searches the track's sync
+index for the largest sync (`stss`) sample at-or-before the target DTS
 and resets the cursor so the next `next_packet()` re-emits from there.
+On a frame-counted sound track every frame is a sync sample: the seek
+lands on the exact frame asked for (a whole compressed frame for
+fixed-ratio sound), and the first packet is the rest of that frame's
+run.
 Fragmented files use `tfra` when present. With `apply_edit_lists(true)`
 the input is an edited-timeline timestamp (resolved back to media time
 via the edit list, clamping out-of-presentation targets) and the return
@@ -592,6 +607,15 @@ and satisfies the demuxer's `cslg`/`ctts` cross-validation.
   (`TrackGroupTypeEntry::msrc(id)` for the base-spec source group).
   `to_body_bytes` / `to_framed_atom` invert `parse_track_group_type` /
   `parse_trgr`; round-trips onto `Track::track_groups`.
+- `set_sound_frame_size(track_id, bytes_per_frame)` writes a
+  **frame-counted** sound track: each `MuxSample` is a run of whole
+  audio frames, the `stsz` states the constant frame size and the total
+  frame count, the `stts` one tick per frame, and the chunk tables
+  count frames — how uncompressed sound is stored. The registry muxer
+  does this for every PCM flavour and `ulaw` / `alaw` whatever the
+  packet sizes it is fed (a frame split across packets is rejoined); a
+  black-box reader decodes all fourteen flavours bit-exactly at 1 / 2 /
+  6 channels and 8 – 96 kHz. Not written on the fragmented path.
 - `set_sound_description_v1(track_id, SoundV1, vbr)` writes a QTFF
   `SoundDescriptionV1` (p. 101) audio entry — version 1 with the four
   fixed-compression-ratio longs, `vbr` selecting the p. 102 VBR "third

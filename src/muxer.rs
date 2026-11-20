@@ -1287,6 +1287,28 @@ impl VisualExtensions {
 }
 
 impl TrackWrite {
+    /// `true` when the track carries a table with one row per
+    /// [`MuxSample`], or external sample locations.
+    fn has_per_sample_side_tables(&self) -> bool {
+        self.external_media.is_some()
+            || self.sample_aux.is_some()
+            || !self.sample_to_groups.is_empty()
+            || !(self.sdtp.is_empty()
+                && self.stdp.is_empty()
+                && self.padb.is_empty()
+                && self.stsh.is_empty()
+                && self.subs.is_empty())
+    }
+
+    /// Table samples [`MuxSample`] `i` stands for: its frame count on
+    /// a frame-counted sound track, else 1.
+    fn table_samples(&self, i: usize) -> u64 {
+        match self.sound_frame_bytes {
+            Some(frame) => self.samples[i].data.len() as u64 / u64::from(frame),
+            None => 1,
+        }
+    }
+
     /// Byte length of sample `i` as the `stsz` / `stz2` table must
     /// report it: the external location's declared size for a track
     /// marked external ([`MovMuxer::set_external_media`] — such
@@ -1515,6 +1537,10 @@ struct TrackWrite {
     /// in-movie 0x2 / in-preview 0x4 / in-poster 0x8). `None` ⇒ the
     /// historical default 0x7. Set via [`MovMuxer::set_track_flags`].
     tkhd_flags: Option<u32>,
+    /// Byte size of one audio frame when the track's sample table
+    /// counts frames ([`MovMuxer::set_sound_frame_size`]): each
+    /// [`MuxSample`] is then a run of whole frames.
+    sound_frame_bytes: Option<u32>,
 }
 
 /// The packed `mdhd.language` value for `"und"` (undetermined) — the
@@ -1735,6 +1761,65 @@ enum MdatSegment {
     /// (§8.7.8/§8.7.9) — always contiguous so the single-entry `saio`
     /// (§8.7.9.3) can address it.
     AuxSlab { track_idx: usize },
+}
+
+/// A planned non-fragmented file: everything but the `mdat` payload,
+/// which is written straight from the tracks' samples.
+struct FilePlan {
+    /// The bytes before the payload (`ftyp`, the `mdat` header, and
+    /// `moov` in the moov-before-mdat placement).
+    head: Vec<u8>,
+    /// The payload, in file order.
+    segments: Vec<MdatSegment>,
+    mdat_body_len: u64,
+    /// The bytes after the payload (`moov` in the default placement).
+    tail: Vec<u8>,
+}
+
+/// Gathers the many small sample writes of an `mdat` into blocks so
+/// an unbuffered writer sees one call per block; a payload at least a
+/// block long goes through directly.
+struct BlockWriter<'a, W: Write> {
+    inner: &'a mut W,
+    block: Vec<u8>,
+}
+
+impl<'a, W: Write> BlockWriter<'a, W> {
+    const BLOCK: usize = 256 * 1024;
+
+    fn new(inner: &'a mut W) -> Self {
+        Self {
+            inner,
+            block: Vec::with_capacity(Self::BLOCK),
+        }
+    }
+
+    fn finish(mut self) -> std::io::Result<()> {
+        self.inner.write_all(&self.block)?;
+        self.block.clear();
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for BlockWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.block.len() + buf.len() > Self::BLOCK {
+            self.inner.write_all(&self.block)?;
+            self.block.clear();
+        }
+        if buf.len() >= Self::BLOCK {
+            self.inner.write_all(buf)?;
+        } else {
+            self.block.extend_from_slice(buf);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.write_all(&self.block)?;
+        self.block.clear();
+        self.inner.flush()
+    }
 }
 
 /// Writer-side counterpart of [`crate::demuxer::MovDemuxer`]. Builds a
@@ -2104,6 +2189,7 @@ impl MovMuxer {
             tkhd_alternate_group: 0,
             tkhd_volume: None,
             tkhd_flags: None,
+            sound_frame_bytes: None,
         });
         self.tracks.len() as u32
     }
@@ -2440,6 +2526,65 @@ impl MovMuxer {
             ));
         }
         t.audio_description = AudioDescriptionWrite::QtffV1 { fields, vbr };
+        Ok(())
+    }
+
+    /// Declare an audio track's sample table **frame-counted**: every
+    /// table sample is one audio frame of `bytes_per_frame` bytes and
+    /// one media tick (QTFF 2012-08-14 p. 179 — for uncompressed
+    /// audio "a frame is one sample from each channel"), which is how
+    /// uncompressed sound (`raw ` / `twos` / `sowt` / `in24` / `in32`
+    /// / `fl32` / `fl64` / `lpcm`, and the one-byte-per-sample `ulaw`
+    /// / `alaw`) is stored. Each [`MuxSample`] of the track is then a
+    /// run of whole frames: the `stsz` states the constant frame
+    /// size and the total frame count, the `stts` one tick per frame,
+    /// and the chunk tables count frames.
+    ///
+    /// Errors on an unknown or non-audio track, a zero frame size, a
+    /// sample whose byte length is not a whole number of frames or
+    /// whose duration is not its frame count (the media timescale
+    /// must be the sample rate), a non-sync sample or a composition
+    /// offset, more than `u32::MAX` frames, and a track carrying
+    /// per-sample side tables or external media. The fragmented path
+    /// does not write frame-counted tracks.
+    pub fn set_sound_frame_size(&mut self, track_id: u32, bytes_per_frame: u32) -> Result<()> {
+        let t = self.audio_track_mut(track_id)?;
+        if bytes_per_frame == 0 {
+            return Err(Error::invalid("MOV: sound frame size must be non-zero"));
+        }
+        if t.has_per_sample_side_tables() {
+            return Err(Error::invalid(
+                "MOV: a frame-counted sound track carries no per-sample side tables or external media",
+            ));
+        }
+        let mut frames = 0u64;
+        for (i, s) in t.samples.iter().enumerate() {
+            let len = s.data.len() as u64;
+            let n = len / u64::from(bytes_per_frame);
+            if n == 0 || !len.is_multiple_of(u64::from(bytes_per_frame)) {
+                return Err(Error::invalid(format!(
+                    "MOV: sample {i} holds {len} bytes, not a whole number of {bytes_per_frame}-byte sound frames"
+                )));
+            }
+            if u64::from(s.duration) != n {
+                return Err(Error::invalid(format!(
+                    "MOV: sample {i} holds {n} sound frames but lasts {} ticks (one tick per frame)",
+                    s.duration
+                )));
+            }
+            if !s.keyframe || s.composition_offset != 0 {
+                return Err(Error::invalid(format!(
+                    "MOV: sound frame run {i} must be a sync sample without a composition offset"
+                )));
+            }
+            frames += n;
+        }
+        if frames > u64::from(u32::MAX) {
+            return Err(Error::invalid(
+                "MOV: more sound frames than a sample table can count",
+            ));
+        }
+        t.sound_frame_bytes = Some(bytes_per_frame);
         Ok(())
     }
 
@@ -3613,15 +3758,34 @@ impl MovMuxer {
     /// (8-byte header + one chunk per track in track order) → `moov`.
     /// Returns the total bytes written.
     pub fn write_to<W: Write>(&self, w: &mut W) -> Result<u64> {
-        let bytes = self.encode_to_vec()?;
-        w.write_all(&bytes).map_err(Error::from)?;
-        Ok(bytes.len() as u64)
+        let plan = self.plan_file()?;
+        w.write_all(&plan.head).map_err(Error::from)?;
+        // Sample payloads go to the writer through one bounded block
+        // rather than an in-memory copy of the whole `mdat`.
+        let mut block = BlockWriter::new(w);
+        self.emit_segments(&mut block, &plan.segments)
+            .and_then(|()| block.finish())
+            .map_err(Error::from)?;
+        w.write_all(&plan.tail).map_err(Error::from)?;
+        Ok(plan.head.len() as u64 + plan.mdat_body_len + plan.tail.len() as u64)
     }
 
-    /// Two-pass build: first lay out the file in memory so chunk
-    /// offsets are known, then return the result. Used by both
-    /// `write_to` and the integration tests' in-memory roundtrip.
+    /// The whole file in memory — [`Self::write_to`] into a `Vec`.
     pub fn encode_to_vec(&self) -> Result<Vec<u8>> {
+        let plan = self.plan_file()?;
+        let mut out =
+            Vec::with_capacity(plan.head.len() + plan.mdat_body_len as usize + plan.tail.len());
+        out.extend_from_slice(&plan.head);
+        self.emit_segments(&mut out, &plan.segments)
+            .map_err(Error::from)?;
+        out.extend_from_slice(&plan.tail);
+        Ok(out)
+    }
+
+    /// Two-pass layout: predict the file layout so chunk offsets are
+    /// known, then build everything but the `mdat` payload — the
+    /// bytes before it (`head`) and after it (`tail`).
+    fn plan_file(&self) -> Result<FilePlan> {
         if self.tracks.is_empty() {
             return Err(Error::invalid("MOV muxer: at least one track required"));
         }
@@ -3634,6 +3798,15 @@ impl MovMuxer {
             }
         }
         self.validate_data_reference_tables()?;
+        for (i, t) in self.tracks.iter().enumerate() {
+            if t.sound_frame_bytes.is_some() && t.has_per_sample_side_tables() {
+                return Err(Error::invalid(format!(
+                    "MOV muxer: track {} is a frame-counted sound track and carries no \
+                     per-sample side tables or external media",
+                    i + 1
+                )));
+            }
+        }
 
         // ── Pass 1: predict the file layout to compute mdat chunk
         //    offsets per track. The `ftyp` is fixed at 28 bytes
@@ -3655,7 +3828,13 @@ impl MovMuxer {
             8
         };
         if self.moov_placement == MoovPlacement::BeforeMdat {
-            return self.encode_faststart(&segments, ftyp_size, mdat_body_len, mdat_header_len);
+            let head = self.faststart_head(&segments, ftyp_size, mdat_body_len, mdat_header_len)?;
+            return Ok(FilePlan {
+                head,
+                segments,
+                mdat_body_len,
+                tail: Vec::new(),
+            });
         }
         let mdat_payload_offset = ftyp_size + mdat_header_len;
 
@@ -3666,13 +3845,12 @@ impl MovMuxer {
         let (chunks, aux_offsets) = self.layout_segments(&segments, mdat_payload_offset);
         let need_co64 = chunks.iter().flatten().any(|c| c.offset > u32::MAX as u64);
 
-        // ── Pass 2: emit bytes.
-        let mut out =
-            Vec::with_capacity((ftyp_size + mdat_header_len + mdat_body_len + 4096) as usize);
-        out.extend_from_slice(&build_ftyp());
-        emit_mdat_header(&mut out, mdat_body_len);
-        self.emit_segments(&mut out, &segments);
+        // ── Pass 2: the bytes around the payload.
+        let mut head = Vec::with_capacity((ftyp_size + mdat_header_len) as usize);
+        head.extend_from_slice(&build_ftyp());
+        emit_mdat_header(&mut head, mdat_body_len);
         let moov = build_moov(self, &chunks, need_co64, &aux_offsets);
+        let mut tail = Vec::with_capacity(moov.len() + 8);
         if self.compress_movie_resource {
             // QTFF p. 30: the complete movie resource is the full `moov`
             // atom (its 8-byte header included). p. 81: compress that
@@ -3688,11 +3866,16 @@ impl MovMuxer {
             // `moov`.
             let mut compressed_moov = Vec::new();
             push_atom(&mut compressed_moov, *b"cmov", &cmov.to_body_bytes());
-            push_atom(&mut out, *b"moov", &compressed_moov);
+            push_atom(&mut tail, *b"moov", &compressed_moov);
         } else {
-            push_atom(&mut out, *b"moov", &moov);
+            push_atom(&mut tail, *b"moov", &moov);
         }
-        Ok(out)
+        Ok(FilePlan {
+            head,
+            segments,
+            mdat_body_len,
+            tail,
+        })
     }
 
     /// Faststart emission: `ftyp` + `moov` + `mdat`, the "global movie
@@ -3710,7 +3893,7 @@ impl MovMuxer {
     /// the mdat base from its size, and repeat until the size is
     /// stable. Widths only ever widen as offsets grow, so the loop is
     /// monotone and converges in a handful of iterations.
-    fn encode_faststart(
+    fn faststart_head(
         &self,
         segments: &[MdatSegment],
         ftyp_size: u64,
@@ -3737,13 +3920,11 @@ impl MovMuxer {
             let moov = build_moov(self, &chunks, need_co64, &aux_offsets);
             let new_len = moov.len() as u64 + 8;
             if new_len == moov_atom_len {
-                let mut out = Vec::with_capacity(
-                    (ftyp_size + moov_atom_len + mdat_header_len + mdat_body_len) as usize,
-                );
+                let mut out =
+                    Vec::with_capacity((ftyp_size + moov_atom_len + mdat_header_len) as usize);
                 out.extend_from_slice(&build_ftyp());
                 push_atom(&mut out, *b"moov", &moov);
                 emit_mdat_header(&mut out, mdat_body_len);
-                self.emit_segments(&mut out, segments);
                 return Ok(out);
             }
             moov_atom_len = new_len;
@@ -3960,11 +4141,17 @@ impl MovMuxer {
                 MdatSegment::Chunk {
                     track_idx,
                     sample_count,
-                    ..
-                } => chunks[*track_idx].push(TrackChunk {
-                    offset: cursor,
-                    sample_count: *sample_count as u32,
-                }),
+                    first_sample,
+                } => {
+                    let t = &self.tracks[*track_idx];
+                    let table_samples: u64 = (*first_sample..*first_sample + *sample_count)
+                        .map(|i| t.table_samples(i))
+                        .sum();
+                    chunks[*track_idx].push(TrackChunk {
+                        offset: cursor,
+                        sample_count: table_samples as u32,
+                    })
+                }
                 MdatSegment::AuxSlab { track_idx } => aux_offsets[*track_idx] = Some(cursor),
             }
             cursor += self.segment_len(seg);
@@ -3984,7 +4171,11 @@ impl MovMuxer {
 
     /// Append the planned segments' bytes to `out`, in segment order —
     /// the mirror of [`MovMuxer::layout_segments`].
-    fn emit_segments(&self, out: &mut Vec<u8>, segments: &[MdatSegment]) {
+    fn emit_segments<W: Write>(
+        &self,
+        out: &mut W,
+        segments: &[MdatSegment],
+    ) -> std::io::Result<()> {
         for seg in segments {
             match seg {
                 MdatSegment::Chunk {
@@ -3995,18 +4186,19 @@ impl MovMuxer {
                     for s in &self.tracks[*track_idx].samples
                         [*first_sample..*first_sample + *sample_count]
                     {
-                        out.extend_from_slice(&s.data);
+                        out.write_all(&s.data)?;
                     }
                 }
                 MdatSegment::AuxSlab { track_idx } => {
                     if let Some(aux) = &self.tracks[*track_idx].sample_aux {
                         for blob in &aux.per_sample {
-                            out.extend_from_slice(blob);
+                            out.write_all(blob)?;
                         }
                     }
                 }
             }
         }
+        Ok(())
     }
 
     /// Emit the fragmented file to a writer.
@@ -4048,6 +4240,16 @@ impl MovMuxer {
             }
         }
         self.validate_data_reference_tables()?;
+        if let Some(i) = self
+            .tracks
+            .iter()
+            .position(|t| t.sound_frame_bytes.is_some())
+        {
+            return Err(Error::unsupported(format!(
+                "MOV muxer: track {} is a frame-counted sound track, which the fragmented path does not write",
+                i + 1
+            )));
+        }
         match mode {
             FragmentationMode::ByDuration(0) => {
                 return Err(Error::invalid(
@@ -5879,10 +6081,16 @@ fn build_stts(t: &TrackWrite) -> Vec<u8> {
     // Run-length-encode consecutive samples with the same duration.
     // ISO/IEC 14496-12 §8.6.1.2.
     let mut runs: Vec<(u32, u32)> = Vec::new();
-    for s in &t.samples {
-        match runs.last_mut() {
-            Some(last) if last.1 == s.duration => last.0 += 1,
-            _ => runs.push((1, s.duration)),
+    if t.sound_frame_bytes.is_some() {
+        // One tick per frame (validated by `set_sound_frame_size`).
+        let frames: u64 = (0..t.samples.len()).map(|i| t.table_samples(i)).sum();
+        runs.push((frames as u32, 1));
+    } else {
+        for s in &t.samples {
+            match runs.last_mut() {
+                Some(last) if last.1 == s.duration => last.0 += 1,
+                _ => runs.push((1, s.duration)),
+            }
         }
     }
     let mut p = Vec::with_capacity(8 + runs.len() * 8);
@@ -6090,7 +6298,7 @@ fn push_sample_size_atom(stbl: &mut Vec<u8>, t: &TrackWrite) {
 /// smaller than `stsz`'s 32-bit table by enough to matter here, so we
 /// only emit the 4- and 8-bit narrow forms that genuinely save space.
 fn build_stz2(t: &TrackWrite) -> Option<Vec<u8>> {
-    if !t.compact_sample_size {
+    if !t.compact_sample_size || t.sound_frame_bytes.is_some() {
         return None;
     }
     let n = t.samples.len();
@@ -6144,6 +6352,15 @@ fn build_stz2(t: &TrackWrite) -> Option<Vec<u8>> {
 }
 
 fn build_stsz(t: &TrackWrite) -> Vec<u8> {
+    if let Some(frame) = t.sound_frame_bytes {
+        // Frame-counted sound: every table sample is one frame.
+        let frames: u64 = (0..t.samples.len()).map(|i| t.table_samples(i)).sum();
+        let mut p = Vec::with_capacity(12);
+        p.extend_from_slice(&0u32.to_be_bytes()); // ver+flags
+        p.extend_from_slice(&frame.to_be_bytes()); // sample_size
+        p.extend_from_slice(&(frames as u32).to_be_bytes());
+        return p;
+    }
     // Uniform sample size if every sample is the same length;
     // per-sample table otherwise.
     let n = t.samples.len();
@@ -7159,6 +7376,7 @@ mod tests {
             tkhd_alternate_group: 0,
             tkhd_volume: None,
             tkhd_flags: None,
+            sound_frame_bytes: None,
         };
         let stts = build_stts(&t);
         // ver+flags(4) | entry_count=1(4) | run: count=3, duration=33 (8) = 16 bytes total.
@@ -7227,6 +7445,7 @@ mod tests {
             tkhd_alternate_group: 0,
             tkhd_volume: None,
             tkhd_flags: None,
+            sound_frame_bytes: None,
         }
     }
 
@@ -7696,6 +7915,7 @@ mod tests {
             tkhd_alternate_group: 0,
             tkhd_volume: None,
             tkhd_flags: None,
+            sound_frame_bytes: None,
         };
         assert!(build_stss(&t).is_none());
     }
@@ -7745,6 +7965,7 @@ mod tests {
             tkhd_alternate_group: 0,
             tkhd_volume: None,
             tkhd_flags: None,
+            sound_frame_bytes: None,
         };
         // synth_video_samples marks i % 5 == 0 as keyframes ⇒ 0, 5, 10
         let body = build_stss(&t).expect("stss should be emitted");
@@ -7822,6 +8043,7 @@ mod tests {
             tkhd_alternate_group: 0,
             tkhd_volume: None,
             tkhd_flags: None,
+            sound_frame_bytes: None,
         };
         let stsz = build_stsz(&t);
         assert_eq!(stsz.len(), 12);
@@ -7890,6 +8112,7 @@ mod tests {
             tkhd_alternate_group: 0,
             tkhd_volume: None,
             tkhd_flags: None,
+            sound_frame_bytes: None,
         };
         let stsz = build_stsz(&t);
         // sample_size = 0 → table follows

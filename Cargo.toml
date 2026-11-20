@@ -37,3 +37,8 @@ oxideav-core = { version = "0.1", optional = true }
 # standalone build paths — the decompression step is part of the core
 # parsing surface, not of the framework wiring.
 compcol = { version = "0.6", default-features = false, features = ["zlib"] }
+
+[[bench]]
+name = "long_file"
+harness = false
+required-features = ["registry"]

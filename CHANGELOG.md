@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Frame-counted sound tables (QTFF 2012-08-14 pp. 179 – 180). A sound
+  track whose table counts audio frames — one constant sample size,
+  one tick per sample, no version-1 Compression ID `-2` — is read
+  chunk by chunk in packets of up to 1024 frames
+  (`MovDemuxer::set_sound_frames_per_packet`, `sound_packeting`,
+  `SampleTable::is_frame_counted` / `iter_frame_packets`,
+  `FramePacketing`), and a seek lands on the exact frame. The
+  one-byte-per-sample tables of fixed-ratio compressed sound are
+  converted to bytes through the version-1 `samplesPerPacket` /
+  `bytesPerFrame` fields (and the version-0 channel count × sample
+  width for uncompressed sound) and cut at whole compressed frames.
+- `MovMuxer::set_sound_frame_size` writes a frame-counted sound track
+  (constant-size `stsz`, one-tick `stts`, chunk tables counting
+  frames). The registry muxer uses it for every PCM flavour and for
+  `ulaw` / `alaw`, whatever packet sizes it is fed (a frame split
+  across packets is rejoined).
+- `benches/long_file.rs`: mux / open / drain / seek timings on a
+  synthesised one-hour movie.
+
 - `SampleAuxStream::new(per_sample)`, `SampleToGroupWrite::new(grouping_type, indices)`
   and `TrackReference::new(reference_type, track_ids)`.
 - `with_<field>` builder setters on the muxer input records `MuxSample`,
@@ -17,6 +36,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AudioEntryV2`, `VisualExtensions`, `TrackReference`.
 
 ### Changed
+
+- Uncompressed sound is emitted in packets of up to 1024 frames
+  instead of one packet per frame; `set_sound_frames_per_packet(1)`
+  restores the old cut. The queue of a one-hour 48 kHz PCM track
+  drops from 172.8 million entries to 168 750.
+- Seeking uses a per-track sync index (binary search) instead of a
+  scan of the whole packet queue.
+- The registry muxer moves buffered payloads into the encoder at
+  `write_trailer` instead of cloning them.
+- `MovMuxer::write_to` writes the `mdat` payload straight from the
+  samples in 256 KiB blocks instead of building the whole file in
+  memory first.
 
 - `#[non_exhaustive]` on the muxer input records above; on the decoded
   aggregates `MovDemuxer`, `Track`, `SampleDescription`, `SampleTable`,
@@ -33,6 +64,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the fixed-field enums (`IsLeading`, `SampleDependsOn`,
   `ReferenceType`, `TextJustification`, `FieldOrdering`, …) stay
   exhaustive.
+
+### Fixed
+
+- The registry muxer wrote uncompressed sound with one table sample
+  per input packet (a multi-frame "sample" with a multi-tick
+  duration); it now writes one table sample per frame, so the frame
+  count and duration a reader derives from the tables are the
+  stream's.
+- Fixed-ratio compressed sound with one-byte sample tables (version-1
+  descriptions not flagged `-2`) was read one byte per packet.
 
 ## [0.0.7](https://github.com/OxideAV/oxideav-mov/compare/v0.0.6...v0.0.7) - 2026-11-05
 

@@ -41,9 +41,9 @@ use crate::reference::{ReferenceMovie, parse_dref, parse_rdrf};
 use crate::sample_aux::{parse_saio, parse_saiz};
 use crate::sample_groups::{parse_csgp, parse_sbgp, parse_sgpd};
 use crate::sample_table::{
-    SampleEntry, SampleSizeSource, SampleTable, SubSampleInfo, parse_co64, parse_ctts, parse_padb,
-    parse_sdtp, parse_stco, parse_stdp, parse_stsc, parse_stsh, parse_stss, parse_stsz, parse_stts,
-    parse_stz2, parse_subs,
+    FramePacketing, SampleEntry, SampleSizeSource, SampleTable, SubSampleInfo, parse_co64,
+    parse_ctts, parse_padb, parse_sdtp, parse_stco, parse_stdp, parse_stsc, parse_stsh, parse_stss,
+    parse_stsz, parse_stts, parse_stz2, parse_subs,
 };
 use crate::sidx::{Sidx, parse_sidx};
 use crate::ssix::{Ssix, parse_ssix};
@@ -205,6 +205,22 @@ pub struct MovDemuxer {
     samples: Vec<(u32, SampleEntry)>,
     /// Cursor into `samples` for the next packet to emit.
     next: usize,
+    /// A packet to emit before `samples[next]`: the tail of a sound
+    /// frame run a seek landed inside (see
+    /// [`MovDemuxer::set_sound_frames_per_packet`]).
+    head: Option<(u32, SampleEntry)>,
+    /// Per track: how its frame-counted sound table is cut into
+    /// packets, `None` for tracks emitted one table sample per packet.
+    packeting: Vec<Option<FramePacketing>>,
+    /// Per track: queue positions of its sync entries, ascending by
+    /// decode time — the seek index.
+    // Seeking is part of the registry `Demuxer` surface only.
+    #[cfg_attr(not(feature = "registry"), allow(dead_code))]
+    sync_index: Vec<Vec<u32>>,
+    /// Most uncompressed sound frames one packet carries.
+    sound_frames_per_packet: u32,
+    /// Input length at open (bounds the declared sample count).
+    total_len: u64,
     /// When `true`, `next_packet()` applies each track's edit list to
     /// packet timing (QTFF pp. 46–48 / ISO/IEC 14496-12 §8.6.6):
     /// samples outside every edit are dropped and emitted timestamps
@@ -1053,49 +1069,9 @@ impl MovDemuxer {
             }
         }
 
-        // Bound the flattened queue before materialising it. A forged
-        // sample-count field — the constant-size `stsz` count, `stts`
-        // run counts — is a free 32-bit integer with no byte-backed
-        // table behind it, so a kilobyte input can declare billions
-        // of samples; iterating them would allocate gigabytes (and
-        // burn minutes of CPU) before any per-sample read failed.
-        // Every in-file sample occupies at least one byte of this
-        // input, so `total_len` bounds any plausible total; keep a
-        // generous floor so a small reference movie whose samples
-        // live in external files (non-self `dref`) still opens.
-        let declared: u64 = tracks
-            .iter()
-            .map(|t| {
-                (t.sample_table.sample_count() as u64)
-                    .saturating_add(t.fragment_samples.len() as u64)
-            })
-            .fold(0u64, u64::saturating_add);
-        let max_samples = total_len.max(1 << 20);
-        if declared > max_samples {
-            return Err(Error::invalid(format!(
-                "MOV: sample tables declare {declared} samples but the \
-                 {total_len}-byte input cannot back them"
-            )));
-        }
-
-        // Flatten sample tables into a globally offset-sorted queue.
-        // For fragmented streams, the per-track stsz_count may be 0
-        // (an "init segment" with no in-moov samples) while
-        // `fragment_samples` carries the actual data; both sources
-        // contribute to the flat queue.
-        let mut samples: Vec<(u32, SampleEntry)> = Vec::new();
-        for (track_idx, t) in tracks.iter().enumerate() {
-            for sample in t.sample_table.iter_samples() {
-                let s = sample?;
-                samples.push((track_idx as u32, s));
-            }
-            for s in &t.fragment_samples {
-                samples.push((track_idx as u32, *s));
-            }
-        }
-        samples.sort_by_key(|(_, s)| s.offset);
+        let queue = SampleQueue::build(&tracks, DEFAULT_SOUND_FRAMES_PER_PACKET, total_len)?;
         #[cfg(feature = "registry")]
-        fill_params_from_samples(&mut streams, &tracks, &samples, input.as_mut())?;
+        fill_params_from_samples(&mut streams, &tracks, &queue.samples, input.as_mut())?;
 
         // Touch the resolver to silence unused warnings on the
         // standalone build path.
@@ -1146,8 +1122,13 @@ impl MovDemuxer {
             prft: file_prft,
             pnot: file_pnot,
             file_uuids,
-            samples,
+            samples: queue.samples,
             next: 0,
+            head: None,
+            packeting: queue.packeting,
+            sync_index: queue.sync_index,
+            sound_frames_per_packet: DEFAULT_SOUND_FRAMES_PER_PACKET,
+            total_len,
             apply_edits: false,
             emit_never_presented: false,
             edited_segments: Vec::new(),
@@ -1356,11 +1337,16 @@ impl MovDemuxer {
     /// the next sample. See [`MovDemuxer::sample_data_in_file`] /
     /// [`MovDemuxer::track_has_external_data`].
     pub fn read_next(&mut self) -> Result<(u32, SampleEntry, Vec<u8>)> {
-        if self.next >= self.samples.len() {
-            return Err(Error::Eof);
-        }
-        let (stream_idx, sample) = self.samples[self.next];
-        self.next += 1;
+        let (stream_idx, sample) = match self.head.take() {
+            Some(head) => head,
+            None => {
+                let Some(&entry) = self.samples.get(self.next) else {
+                    return Err(Error::Eof);
+                };
+                self.next += 1;
+                entry
+            }
+        };
         if !self.sample_data_in_file(stream_idx as usize, &sample) {
             let dri = self.tracks[stream_idx as usize]
                 .sample_descriptions
@@ -1533,7 +1519,53 @@ impl MovDemuxer {
 
     /// Whether more samples are available.
     pub fn remaining(&self) -> usize {
-        self.samples.len().saturating_sub(self.next)
+        self.samples.len().saturating_sub(self.next) + usize::from(self.head.is_some())
+    }
+
+    /// Most uncompressed sound frames one packet carries (default
+    /// [`DEFAULT_SOUND_FRAMES_PER_PACKET`]).
+    pub fn sound_frames_per_packet(&self) -> u32 {
+        self.sound_frames_per_packet
+    }
+
+    /// Set how many uncompressed sound frames one packet carries and
+    /// rewind to the first packet.
+    ///
+    /// A QuickTime sound track of uncompressed (or fixed-ratio
+    /// compressed, Compression ID not `-2`) audio has a sample table
+    /// that counts **audio frames**: one constant sample size, one
+    /// tick per sample (QTFF 2012-08-14 pp. 179 – 180). Such a track
+    /// is read chunk by chunk as packets of up to `frames` frames
+    /// rather than one packet per frame, so an hour of 48 kHz sound
+    /// costs a queue entry per packet instead of 172.8 million. A
+    /// packet's `pts` / `dts` are its first frame's and its duration
+    /// is its frame count; packets never straddle a chunk, and a seek
+    /// still lands on the exact frame asked for (the first packet
+    /// after it is then the shorter rest of its run). `frames = 1`
+    /// restores one frame per packet. Fixed-ratio compressed sound is
+    /// always cut at whole compressed frames (the version-1
+    /// `samplesPerPacket`). `0` is read as 1.
+    ///
+    /// Tracks whose tables do not have that shape — variable sizes,
+    /// redefined (`-2`) tables, fragments — keep one table sample per
+    /// packet.
+    pub fn set_sound_frames_per_packet(&mut self, frames: u32) -> Result<()> {
+        let frames = frames.max(1);
+        let queue = SampleQueue::build(&self.tracks, frames, self.total_len)?;
+        self.samples = queue.samples;
+        self.packeting = queue.packeting;
+        self.sync_index = queue.sync_index;
+        self.sound_frames_per_packet = frames;
+        self.next = 0;
+        self.head = None;
+        Ok(())
+    }
+
+    /// How track `track_index`'s frame-counted sound table is cut into
+    /// packets; `None` for a track emitted one table sample per
+    /// packet.
+    pub fn sound_packeting(&self, track_index: usize) -> Option<FramePacketing> {
+        self.packeting.get(track_index).copied().flatten()
     }
 
     /// Map a media-timescale presentation timestamp on `track_index`
@@ -2669,7 +2701,7 @@ impl MovDemuxer {
         // right after it) may itself be dropped by the edit list, so
         // report the edited dts of the first post-seek sample of this
         // stream that the applied mode will actually emit.
-        for (sidx, s) in &self.samples[self.next..] {
+        for (sidx, s) in self.head.iter().chain(&self.samples[self.next..]) {
             if *sidx != stream_index {
                 continue;
             }
@@ -2787,6 +2819,7 @@ impl MovDemuxer {
     /// wrapper).
     #[cfg(feature = "registry")]
     fn seek_media_impl(&mut self, stream_index: u32, pts: i64) -> Result<i64> {
+        self.head = None;
         // 1. Range + media-type gate.
         let idx = stream_index as usize;
         let track = self.tracks.get(idx).ok_or_else(|| {
@@ -2810,55 +2843,44 @@ impl MovDemuxer {
             return self.seek_to_fragmented(stream_index, pts);
         }
 
-        // 3. Walk the flattened sample queue, filtering by stream.
-        //    Find the largest sync sample whose `dts <= pts`. The
-        //    queue is already sorted by file offset, but per-track
-        //    sample-index ordering matches decode order (chunks lay
-        //    out samples sequentially), so the first such match per
-        //    track also has monotonically increasing dts.
-        //
-        //    Past-end: when no sync sample has `dts <= pts`, fall
-        //    back to the first sync sample in the track (typically
-        //    sample 0). Past-start: when `pts` is negative or
-        //    smaller than the first sample's dts, the first matching
-        //    keyframe is still the best landing.
+        // 3. The track's sync entries, ascending by decode time: land
+        //    on the last one at or before the target (among equal
+        //    decode times, the one latest in the queue). When none is
+        //    — a target before the first sync sample — land on the
+        //    earliest sync entry.
         let target_dts: i64 = pts.max(0);
-        let mut best_cursor: Option<usize> = None;
-        let mut best_dts: i64 = i64::MIN;
-        for (i, (sidx, s)) in self.samples.iter().enumerate() {
-            if *sidx != stream_index {
-                continue;
-            }
-            if !s.keyframe {
-                continue;
-            }
-            let s_dts = s.dts as i64;
-            if s_dts <= target_dts && s_dts >= best_dts {
-                best_cursor = Some(i);
-                best_dts = s_dts;
-            }
-        }
-        if best_cursor.is_none() {
-            // No keyframe at-or-before target. Land on the *first*
-            // keyframe of this stream (the spec guarantees sample 0
-            // is implicitly a sync sample whenever `stss` is empty;
-            // when `stss` is populated, the first listed entry is
-            // sample 1).
-            for (i, (sidx, s)) in self.samples.iter().enumerate() {
-                if *sidx == stream_index && s.keyframe {
-                    best_cursor = Some(i);
-                    best_dts = s.dts as i64;
-                    break;
-                }
-            }
-        }
-        let cursor = best_cursor.ok_or_else(|| {
+        let sync = &self.sync_index[idx];
+        let after = sync.partition_point(|&p| self.samples[p as usize].1.dts as i64 <= target_dts);
+        let cursor = *sync.get(after.saturating_sub(1)).ok_or_else(|| {
             Error::unsupported(format!(
                 "MOV: stream {stream_index} has no sync samples to seek to"
             ))
-        })?;
+        })? as usize;
+        let entry = self.samples[cursor].1;
         self.next = cursor;
-        Ok(best_dts)
+        // 4. A frame-counted sound run holds many sync frames: start
+        //    at the exact frame asked for (rounded down to a whole
+        //    compressed frame), emitting the rest of the run first.
+        if let Some(p) = self.packeting[idx] {
+            let into = u64::try_from(target_dts)
+                .unwrap_or(0)
+                .saturating_sub(entry.dts)
+                .min(u64::from(entry.duration.saturating_sub(1))) as u32;
+            let skip = into - into % p.unit_samples;
+            let skip_bytes = p.bytes_for(skip);
+            if skip > 0 && skip_bytes < u64::from(entry.size) {
+                let mut rest = entry;
+                rest.index += skip;
+                rest.dts += u64::from(skip);
+                rest.duration -= skip;
+                rest.offset += skip_bytes;
+                rest.size -= skip_bytes as u32;
+                self.head = Some((stream_index, rest));
+                self.next = cursor + 1;
+                return Ok(rest.dts as i64);
+            }
+        }
+        Ok(entry.dts as i64)
     }
 
     /// Fragmented-MP4 seek path — companion to [`Self::seek_to_impl`]
@@ -3006,6 +3028,188 @@ impl MovDemuxer {
         })?;
         self.next = cursor;
         Ok(landed)
+    }
+}
+
+/// Default for [`MovDemuxer::set_sound_frames_per_packet`].
+pub const DEFAULT_SOUND_FRAMES_PER_PACKET: u32 = 1024;
+
+/// How a sound track's frame-counted sample table is cut into
+/// packets, or `None` when the track is emitted one table sample per
+/// packet.
+///
+/// The table must have the original QuickTime sound shape
+/// ([`SampleTable::is_frame_counted`]) and no version-1 sample
+/// description may carry Compression ID `-2` (QTFF 2012-08-14 p. 180: only then are
+/// the tables redefined so that "a frame of compressed audio is
+/// treated as a single media sample"). The bytes of a table sample:
+///
+/// * a constant `stsz` size other than 1 is taken as written (the
+///   byte size of one frame);
+/// * a constant size of 1 is the "individual uncompressed audio
+///   samples, each one byte in size" convention, converted through
+///   the description — the version-2 constant bytes / frames per
+///   packet, the version-1 `bytesPerFrame` per `samplesPerPacket`
+///   ("historically … not always reliable", hence the `bytesPerPacket`
+///   × channels fallback), else channels × the sample width for the
+///   version-0 formats.
+fn frame_packeting_for(track: &Track, frames_per_packet: u32) -> Option<FramePacketing> {
+    let table = &track.sample_table;
+    if !track.is_audio() || !track.fragment_samples.is_empty() || !table.is_frame_counted() {
+        return None;
+    }
+    let size = table.stsz_default_size?;
+    let mut unit: Option<(u32, u32)> = None;
+    for desc in &track.sample_descriptions {
+        // Version 1 with Compression ID -2 (version 2 holds the constant
+        // -2 in that position for every format).
+        if desc.is_vbr() {
+            return None;
+        }
+        let channels = u32::from(desc.channels.max(1));
+        let this = if size != 1 {
+            (1, size)
+        } else if let Some(v2) = desc.sound_v2 {
+            if v2.const_bytes_per_audio_packet == 0 || v2.const_lpcm_frames_per_audio_packet == 0 {
+                (1, 1)
+            } else {
+                (
+                    v2.const_lpcm_frames_per_audio_packet,
+                    v2.const_bytes_per_audio_packet,
+                )
+            }
+        } else if let Some(v1) = desc.sound_v1.filter(|v| v.samples_per_packet != 0) {
+            let bytes = if v1.bytes_per_frame != 0 {
+                v1.bytes_per_frame
+            } else {
+                v1.bytes_per_packet.checked_mul(channels)?
+            };
+            if bytes == 0 {
+                (1, 1)
+            } else {
+                (v1.samples_per_packet, bytes)
+            }
+        } else {
+            let width = match &desc.format {
+                b"twos" | b"sowt" | b"\0\0\0\0" | b"NONE" => {
+                    u32::from(desc.bits_per_sample).div_ceil(8).max(1)
+                }
+                b"raw " | b"ulaw" | b"alaw" => 1,
+                _ => return None,
+            };
+            (1, channels * width)
+        };
+        if unit.is_some_and(|u| u != this) {
+            return None;
+        }
+        unit = Some(this);
+    }
+    let (unit_samples, unit_bytes) = unit?;
+    let per_packet = if unit_samples == 1 {
+        frames_per_packet
+    } else {
+        unit_samples
+    };
+    Some(FramePacketing::new(unit_samples, unit_bytes, per_packet))
+}
+
+/// The flattened packet queue of a movie and its per-track indexes.
+struct SampleQueue {
+    samples: Vec<(u32, SampleEntry)>,
+    packeting: Vec<Option<FramePacketing>>,
+    sync_index: Vec<Vec<u32>>,
+}
+
+impl SampleQueue {
+    /// Flatten every track's sample table (and fragment runs) into a
+    /// globally offset-sorted queue.
+    fn build(tracks: &[Track], frames_per_packet: u32, total_len: u64) -> Result<Self> {
+        let packeting: Vec<Option<FramePacketing>> = tracks
+            .iter()
+            .map(|t| frame_packeting_for(t, frames_per_packet))
+            .collect();
+        // Bound the queue before materialising it. A forged sample
+        // count — the constant-size `stsz` count, `stts` run counts —
+        // is a free 32-bit integer with no byte-backed table behind
+        // it, so a kilobyte input can declare billions of samples;
+        // iterating them would allocate gigabytes (and burn minutes
+        // of CPU) before any per-sample read failed. Every in-file
+        // sample occupies at least one byte of this input, so
+        // `total_len` bounds any plausible total; keep a generous
+        // floor so a small reference movie whose samples live in
+        // external files (non-self `dref`) still opens. A
+        // frame-counted sound track costs one entry per packet: at
+        // most one per `samples_per_packet` samples plus one per
+        // (byte-backed) chunk.
+        let declared: u64 = tracks
+            .iter()
+            .zip(&packeting)
+            .map(|(t, p)| {
+                let count = u64::from(t.sample_table.sample_count());
+                let entries = match p {
+                    Some(p) => {
+                        count / u64::from(p.samples_per_packet)
+                            + t.sample_table.chunk_offsets.len() as u64
+                    }
+                    None => count,
+                };
+                entries.saturating_add(t.fragment_samples.len() as u64)
+            })
+            .fold(0u64, u64::saturating_add);
+        let max_samples = total_len.max(1 << 20);
+        if declared > max_samples {
+            return Err(Error::invalid(format!(
+                "MOV: sample tables declare {declared} samples but the \
+                 {total_len}-byte input cannot back them"
+            )));
+        }
+
+        // For fragmented streams, the per-track stsz_count may be 0
+        // (an "init segment" with no in-moov samples) while
+        // `fragment_samples` carries the actual data; both sources
+        // contribute to the flat queue.
+        let mut samples: Vec<(u32, SampleEntry)> =
+            Vec::with_capacity(declared.min(1 << 22) as usize);
+        for (track_idx, (t, p)) in tracks.iter().zip(&packeting).enumerate() {
+            let track_idx = track_idx as u32;
+            match p {
+                Some(p) => {
+                    for run in t.sample_table.iter_frame_packets(*p) {
+                        samples.push((track_idx, run?));
+                    }
+                }
+                None => {
+                    for sample in t.sample_table.iter_samples() {
+                        samples.push((track_idx, sample?));
+                    }
+                }
+            }
+            samples.extend(t.fragment_samples.iter().map(|s| (track_idx, *s)));
+        }
+        // Stable: a track laid out in decode order stays in it.
+        if !samples.is_sorted_by_key(|(_, s)| s.offset) {
+            samples.sort_by_key(|(_, s)| s.offset);
+        }
+
+        let mut sync_index: Vec<Vec<u32>> = vec![Vec::new(); tracks.len()];
+        for (pos, (track_idx, s)) in samples.iter().enumerate() {
+            if s.keyframe
+                && let Ok(pos) = u32::try_from(pos)
+            {
+                sync_index[*track_idx as usize].push(pos);
+            }
+        }
+        for index in &mut sync_index {
+            let key = |&p: &u32| (samples[p as usize].1.dts as i64, p);
+            if !index.is_sorted_by_key(key) {
+                index.sort_by_key(key);
+            }
+        }
+        Ok(Self {
+            samples,
+            packeting,
+            sync_index,
+        })
     }
 }
 

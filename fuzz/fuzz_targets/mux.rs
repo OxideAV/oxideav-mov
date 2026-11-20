@@ -115,10 +115,13 @@ fuzz_target!(|data: &[u8]| {
             );
         } else {
             m.add_track(
+                // 8-bit mono: a one-byte sample is a whole frame, so a
+                // recipe of constant-size one-tick samples is a
+                // well-formed frame-counted sound table.
                 MuxTrackKind::Audio {
-                    format: *b"twos",
+                    format: *b"raw ",
                     channels: 1,
-                    bits_per_sample: 16,
+                    bits_per_sample: 8,
                     sample_rate: media_ts,
                 },
                 media_ts,
@@ -159,6 +162,11 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
+    // Per-track payload streams are byte-identical, in order. A
+    // frame-counted sound table is read one table sample per packet
+    // here so packets pair with the recipe's samples.
+    d.set_sound_frames_per_packet(1)
+        .expect("requeue one frame per packet");
     // Per-track payload streams are byte-identical, in order.
     let mut got: Vec<Vec<Vec<u8>>> = vec![Vec::new(); n_tracks];
     while let Ok(p) = d.next_packet() {

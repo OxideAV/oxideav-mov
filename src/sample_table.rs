@@ -1523,6 +1523,191 @@ impl Iterator for SampleIter<'_> {
     }
 }
 
+/// How a sound track whose sample table counts **audio frames** —
+/// constant sample size, one tick per sample — is cut into packets
+/// (QTFF 2012-08-14 pp. 179 – 180: for uncompressed sound a table
+/// sample is one frame; for fixed-ratio compressed sound whose
+/// description is not flagged with Compression ID `-2` the tables
+/// "appear to point to individual uncompressed audio samples, each
+/// one byte in size", and the version-1 fields convert a sample count
+/// into bytes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FramePacketing {
+    /// Table samples in the smallest unit that may be cut: 1 for
+    /// uncompressed frames, the version-1 `samplesPerPacket` for a
+    /// fixed-ratio compressed frame.
+    pub unit_samples: u32,
+    /// Bytes one unit occupies in the chunk.
+    pub unit_bytes: u32,
+    /// Most table samples one packet carries (a multiple of
+    /// `unit_samples`; packets never straddle a chunk).
+    pub samples_per_packet: u32,
+}
+
+impl FramePacketing {
+    /// A packeting of `unit_samples`-sample units of `unit_bytes`
+    /// bytes, at most `samples_per_packet` samples per packet (rounded
+    /// down to whole units, one unit at least). Zero inputs are
+    /// raised to 1.
+    pub fn new(unit_samples: u32, unit_bytes: u32, samples_per_packet: u32) -> Self {
+        let unit_samples = unit_samples.max(1);
+        let per = (samples_per_packet / unit_samples).max(1);
+        Self {
+            unit_samples,
+            unit_bytes: unit_bytes.max(1),
+            samples_per_packet: per.saturating_mul(unit_samples),
+        }
+    }
+
+    /// Bytes `samples` table samples occupy: whole units only (a
+    /// trailing partial unit has no bytes of its own).
+    pub fn bytes_for(&self, samples: u32) -> u64 {
+        u64::from(samples / self.unit_samples) * u64::from(self.unit_bytes)
+    }
+}
+
+/// Iterator over the packets of a frame-counted sound track: each
+/// item is a run of consecutive table samples inside one chunk,
+/// reported as a single [`SampleEntry`] whose `index` is the run's
+/// first sample, `size` the run's bytes and `duration` its sample
+/// count. Built by [`SampleTable::iter_frame_packets`]; cost is per
+/// packet, never per table sample.
+pub struct FramePacketIter<'a> {
+    table: &'a SampleTable,
+    packeting: FramePacketing,
+    /// 0-based sample index of the next run.
+    sample_idx: u32,
+    /// 1-based current chunk and the `stsc` row governing it.
+    chunk_idx: u32,
+    stsc_entry: usize,
+    /// Samples of the current chunk not yet emitted, and the file
+    /// offset of the next one.
+    left_in_chunk: u32,
+    cursor: u64,
+    failed: bool,
+}
+
+impl FramePacketIter<'_> {
+    /// Enter chunk `self.chunk_idx`: `false` once the tables run out.
+    fn open_chunk(&mut self) -> Result<()> {
+        let t = self.table;
+        while self.stsc_entry + 1 < t.stsc.len()
+            && self.chunk_idx >= t.stsc[self.stsc_entry + 1].first_chunk
+        {
+            self.stsc_entry += 1;
+        }
+        let per = t
+            .stsc
+            .get(self.stsc_entry)
+            .map(|e| e.samples_per_chunk)
+            .unwrap_or(0);
+        let offset = t
+            .chunk_offsets
+            .get((self.chunk_idx as usize).wrapping_sub(1))
+            .copied();
+        match (per, offset) {
+            (0, _) => Err(Error::invalid(
+                "MOV: stsc declares an empty chunk before the last sample",
+            )),
+            (_, None) => Err(Error::invalid(
+                "MOV: stsc references chunk beyond stco range",
+            )),
+            (per, Some(offset)) => {
+                self.left_in_chunk = per;
+                self.cursor = offset;
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Iterator for FramePacketIter<'_> {
+    type Item = Result<SampleEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let total = self.table.stsz_count;
+        if self.failed || self.sample_idx >= total {
+            return None;
+        }
+        if self.left_in_chunk == 0 {
+            self.chunk_idx += 1;
+            if let Err(e) = self.open_chunk() {
+                self.failed = true;
+                return Some(Err(e));
+            }
+        }
+        let n = self
+            .left_in_chunk
+            .min(self.packeting.samples_per_packet)
+            .min(total - self.sample_idx);
+        let bytes = self.packeting.bytes_for(n);
+        let Ok(size) = u32::try_from(bytes) else {
+            self.failed = true;
+            return Some(Err(Error::invalid(
+                "MOV: sound packet size exceeds the 32-bit sample size range",
+            )));
+        };
+        let entry = SampleEntry {
+            index: self.sample_idx,
+            offset: self.cursor,
+            size,
+            dts: u64::from(self.sample_idx),
+            duration: n,
+            sample_description_id: self
+                .table
+                .stsc
+                .get(self.stsc_entry)
+                .map(|e| e.sample_description_id)
+                .unwrap_or(1),
+            keyframe: true,
+            composition_offset: 0,
+        };
+        self.sample_idx += n;
+        self.left_in_chunk -= n;
+        self.cursor = self.cursor.saturating_add(bytes);
+        Some(Ok(entry))
+    }
+}
+
+impl SampleTable {
+    /// `true` when the table counts audio frames the way QTFF's
+    /// original sound tables do: one constant non-zero sample size,
+    /// every sample one tick long, no sync or composition tables — the
+    /// shape [`Self::iter_frame_packets`] walks.
+    pub fn is_frame_counted(&self) -> bool {
+        self.stsz_default_size.is_some_and(|s| s > 0)
+            && self.stsz_count > 0
+            && self.stss.is_empty()
+            && self.ctts.is_empty()
+            && !self.stts.is_empty()
+            && self.stts.iter().all(|e| e.sample_duration == 1)
+            && self
+                .stts
+                .iter()
+                .map(|e| u64::from(e.sample_count))
+                .sum::<u64>()
+                >= u64::from(self.stsz_count)
+    }
+
+    /// Walk a frame-counted table ([`Self::is_frame_counted`]) as
+    /// packets of at most `packeting.samples_per_packet` samples,
+    /// chunk by chunk. The decode time of a run is its first sample's
+    /// index (one tick per sample).
+    pub fn iter_frame_packets(&self, packeting: FramePacketing) -> FramePacketIter<'_> {
+        FramePacketIter {
+            table: self,
+            packeting,
+            sample_idx: 0,
+            chunk_idx: 0,
+            stsc_entry: 0,
+            left_in_chunk: 0,
+            cursor: 0,
+            failed: false,
+        }
+    }
+}
+
 // ─────────────── helpers ───────────────
 
 #[inline]

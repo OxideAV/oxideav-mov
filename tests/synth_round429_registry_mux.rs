@@ -92,8 +92,10 @@ fn source_movie() -> Vec<u8> {
         })
         .collect();
     m.add_track(
+        // A compressed format: its packets are opaque access units
+        // (uncompressed sound is re-cut into frames by the muxer).
         MuxTrackKind::Audio {
-            format: *b"twos",
+            format: *b".mp3",
             channels: 2,
             bits_per_sample: 16,
             sample_rate: 8000,
@@ -170,7 +172,7 @@ fn demux_registry_mux_demux_round_trip() {
         .iter()
         .map(|t| t.primary_format().expect("format"))
         .collect();
-    assert_eq!(fmts, vec![*b"raw ", *b"twos"]);
+    assert_eq!(fmts, vec![*b"raw ", *b".mp3"]);
 }
 
 #[test]
