@@ -166,7 +166,18 @@ fn mux(streams: &[StreamInfo], packets: &[Packet]) -> Vec<u8> {
         .into_inner()
 }
 
+/// `MOV_BENCH_ON_DISK=<path>`: the movie is written there and read
+/// back through a plain `File` (a system call per read), instead of
+/// from memory.
+fn on_disk() -> Option<std::path::PathBuf> {
+    std::env::var_os("MOV_BENCH_ON_DISK").map(Into::into)
+}
+
 fn open(bytes: &Arc<Vec<u8>>) -> MovDemuxer {
+    if let Some(path) = on_disk() {
+        let r: Box<dyn ReadSeek> = Box::new(std::fs::File::open(path).unwrap());
+        return MovDemuxer::open(r).unwrap();
+    }
     struct View(Arc<Vec<u8>>);
     impl AsRef<[u8]> for View {
         fn as_ref(&self) -> &[u8] {
@@ -221,6 +232,9 @@ fn main() {
     };
     let bytes = Arc::new(bytes);
     println!("file:  {:.1} MiB", bytes.len() as f64 / 1048576.0);
+    if let Some(path) = on_disk() {
+        std::fs::write(path, &bytes[..]).unwrap();
+    }
 
     let runs: Vec<f64> = (0..5)
         .map(|_| {

@@ -727,6 +727,46 @@ hostile `dref` tables. Alias
 resolution is excluded so a fuzz input can't reach the network or
 filesystem. A daily 30-minute run is scheduled.
 
+## Performance
+
+`cargo bench --bench long_file` synthesises a one-hour movie (108 000
+video frames with reordering, 168 750 compressed-audio packets, an
+hour of 48 kHz 8-bit PCM; 259 MiB of payload), muxes it through the
+registry `Muxer`, then opens, drains and seeks it. Apple M-series,
+release build, medians of three runs on a machine shared with other
+builds; "before" is this crate at 0.0.7.
+
+| one-hour movie | before | after |
+|---|---|---|
+| mux (discarding sink) | 0.092 s — 3.4 M packets/s | 0.015 s — 20 M packets/s |
+| mux peak memory (259 MiB of source packets included) | 1 257 MB | 400 MB |
+| open | 3.4 ms | 2.9 ms |
+| drain, movie in memory | 0.065 s — 4.8 M packets/s | 0.016 s — 19.5 M packets/s |
+| drain, from disk through a plain `File` | 0.693 s — 451 k packets/s | 0.128 s — 2.45 M packets/s |
+| seek + first packet (1 000 random targets) | 146 µs | 0.25 µs |
+
+The open / drain / seek rows read the same file (the 0.0.7 muxer's
+track-contiguous layout) with both versions. The streaming muxer's own
+interleaved output has 276 750 chunks instead of 3 and opens in 8.7 ms.
+
+Uncompressed sound written by a black-box encoder (`MOV_BENCH_FILE=`):
+
+| PCM movie | before | after |
+|---|---|---|
+| 10 min, 48 kHz mono 8-bit (28.8 M frames): open | 250 ms | 0.2 ms |
+| — peak memory | 12.5 GB | 34 MB |
+| — drain | 28.8 M one-frame packets, 1.3 s | 28 125 packets, 7 ms |
+| — seek + first packet | 22.5 ms | 0.3 µs |
+| 1 h, 48 kHz stereo 16-bit (172.8 M frames, 691 MB): open | (≈ 8 GB of queue) | 1.3 ms |
+| — drain, movie in memory | — | 168 750 packets, 0.022 s |
+
+Where it went: a frame-counted sound track is queued per packet rather
+than per frame; seeking binary-searches a per-track sync index instead
+of scanning the queue; a sample whose bytes the input is known to hold
+is read with one exact allocation and one read, with no seek between
+consecutive samples; the registry muxer writes payloads as they arrive
+and keeps a table row per packet instead of three copies of the movie.
+
 ## Standalone build
 
 `oxideav-core` is gated behind the default-on `registry` cargo

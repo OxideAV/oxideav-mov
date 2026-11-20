@@ -222,8 +222,13 @@ pub struct MovDemuxer {
     sync_index: Vec<Vec<u32>>,
     /// Most uncompressed sound frames one packet carries.
     sound_frames_per_packet: u32,
-    /// Input length at open (bounds the declared sample count).
+    /// Input length at open (bounds the declared sample count),
+    /// refreshed when a sample read reaches past it.
     total_len: u64,
+    /// Where the input stands after the last in-file sample read, when
+    /// nothing else has moved it: a sample starting there is read
+    /// without a seek.
+    input_pos: Option<u64>,
     /// When `true`, `next_packet()` applies each track's edit list to
     /// packet timing (QTFF pp. 46–48 / ISO/IEC 14496-12 §8.6.6):
     /// samples outside every edit are dropped and emitted timestamps
@@ -1158,6 +1163,7 @@ impl MovDemuxer {
             sync_index: queue.sync_index,
             sound_frames_per_packet: DEFAULT_SOUND_FRAMES_PER_PACKET,
             total_len,
+            input_pos: None,
             apply_edits: false,
             emit_never_presented: false,
             edited_segments: Vec::new(),
@@ -1534,7 +1540,38 @@ impl MovDemuxer {
     /// instead of pre-allocating the declared amount up front. Errors
     /// with `Error::invalid` naming `what` on a short read.
     fn read_exact_bounded(&mut self, offset: u64, size: u64, what: &str) -> Result<Vec<u8>> {
-        read_exact_bounded_from(self.input.as_mut(), offset, size, what)
+        let end = offset.checked_add(size);
+        if end.is_none_or(|e| e > self.total_len) {
+            // Past the end as measured at open: the input may have
+            // grown since (a movie still being written).
+            self.input_pos = None;
+            self.total_len = self.input.seek(SeekFrom::End(0))?;
+        }
+        let Some(end) = end.filter(|&e| e <= self.total_len) else {
+            // The declared bytes are not there: fail without
+            // allocating for them.
+            return Err(Error::invalid(format!(
+                "MOV: {what} truncated: declared {size} bytes, {} available",
+                self.total_len.saturating_sub(offset)
+            )));
+        };
+        // The declared size is backed by the input, so one exact
+        // allocation and one read serve the sample; consecutive
+        // samples need no seek between them.
+        if self.input_pos != Some(offset) {
+            self.input.seek(SeekFrom::Start(offset))?;
+        }
+        self.input_pos = None;
+        let mut buf = Vec::with_capacity(size as usize);
+        (&mut *self.input).take(size).read_to_end(&mut buf)?;
+        if (buf.len() as u64) < size {
+            return Err(Error::invalid(format!(
+                "MOV: {what} truncated: declared {size} bytes, {} available",
+                buf.len()
+            )));
+        }
+        self.input_pos = Some(end);
+        Ok(buf)
     }
 
     /// Whether a sample's media bytes live in **this** file: its
@@ -2556,6 +2593,7 @@ impl MovDemuxer {
             // A timecode sample is 4 bytes; anything shorter is malformed.
             _ => return Ok(None),
         };
+        self.input_pos = None;
         self.input.seek(SeekFrom::Start(offset))?;
         let mut buf = vec![0u8; size];
         self.input.read_exact(&mut buf)?;

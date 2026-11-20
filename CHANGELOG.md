@@ -67,6 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drops from 172.8 million entries to 168 750.
 - Seeking uses a per-track sync index (binary search) instead of a
   scan of the whole packet queue.
+- A sample whose bytes the input is known to hold is read with one
+  exact allocation and one read, and consecutive samples need no seek
+  between them (draining a one-hour movie from a `File`: 451 k →
+  2.45 M packets/s). A declared size the input cannot back fails
+  without allocating; the input length is re-measured first, so a
+  file that has grown since the open reads on.
 - The registry muxer streams: payloads are written as packets arrive
   (`ftyp`, `wide`, `mdat`, then `moov` at the trailer; media
   interleaved in arrival order) and only a table row per packet is
