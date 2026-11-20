@@ -78,6 +78,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A QuickTime Metadata atom (`hdlr` `mdta` + `keys` + `ilst`) filed
+  as a `meta` entry of a `udta` list (movie or track scope) was left
+  as an opaque user-data entry; it now fills `meta` / `qt_metadata`
+  like one directly in `moov` / `trak` (which takes precedence).
+- Fragmented movies reported a zero stream duration and
+  `duration_micros()` (the `moov` sample tables are empty); both now
+  run to the end of the last fragment sample (`mehd` when larger).
 - The registry muxer wrote uncompressed sound with one table sample
   per input packet (a multi-frame "sample" with a multi-tick
   duration); it now writes one table sample per frame, so the frame

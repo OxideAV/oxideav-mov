@@ -3834,6 +3834,21 @@ fn fill_params_from_samples(
     input: &mut dyn ReadSeek,
 ) -> Result<()> {
     for (i, (stream, t)) in streams.iter_mut().zip(tracks).enumerate() {
+        // A fragmented movie's `mdhd` duration covers the samples of
+        // the `moov` only (ISO/IEC 14496-12 §8.8.1 — none, for an
+        // empty init segment): the stream runs to the end of its last
+        // fragment sample.
+        let fragments_end = t
+            .fragment_samples
+            .iter()
+            .map(|s| s.dts.saturating_add(u64::from(s.duration)))
+            .max()
+            .and_then(|end| i64::try_from(end).ok());
+        if let Some(end) = fragments_end
+            && stream.duration.is_none_or(|d| d < end)
+        {
+            stream.duration = Some(end);
+        }
         if !t.is_video() {
             continue;
         }
@@ -4038,6 +4053,14 @@ fn parse_moov<R: Read + Seek + ?Sized>(
             t if t == &UDTA => {
                 let body = read_payload(r, child)?;
                 *user_data = parse_udta(&body)?;
+                // A QuickTime Metadata atom filed in the user data
+                // list; a `meta` directly in `moov` takes precedence.
+                if qt_meta.is_none()
+                    && let Some(m) = qt_metadata_in_udta(&body)
+                {
+                    *meta = m.to_key_values();
+                    *qt_meta = Some(m);
+                }
             }
             t if t == &RMRA => {
                 *reference_movies = parse_rmra(r, child)?;
@@ -4238,6 +4261,12 @@ fn parse_trak<R: Read + Seek + ?Sized>(r: &mut R, hdr: &AtomHeader) -> Result<Tr
             t if t == &UDTA => {
                 let body = read_payload(r, child)?;
                 track.user_data = parse_udta(&body)?;
+                if track.qt_metadata.is_none()
+                    && let Some(m) = qt_metadata_in_udta(&body)
+                {
+                    track.meta = m.to_key_values();
+                    track.qt_metadata = Some(m);
+                }
                 // ISO/IEC 14496-12 §8.10.3 — `tsel` (Track Selection
                 // box) lives inside track-level udta. We re-walk the
                 // same buffer once to extract it as a typed surface
@@ -4357,6 +4386,27 @@ fn parse_meta_atom<R: Read + Seek + ?Sized>(
     let body = read_payload(r, hdr)?;
     let m = parse_qt_metadata(&body)?;
     Ok(m.is_quicktime_shape().then_some(m))
+}
+
+/// The QuickTime Metadata atom (`hdlr` `mdta` + `keys` + `ilst`,
+/// QTFF 2012 pp. 129 – 143) filed as a `meta` entry of a user data
+/// list — where some writers put it instead of directly in `moov` /
+/// `trak`. `None` when the list has no such entry or it is not
+/// QuickTime-shaped; a malformed entry is skipped, not an error.
+fn qt_metadata_in_udta(udta: &[u8]) -> Option<QtMetadata> {
+    let mut at = 0usize;
+    while let Some(head) = udta.get(at..at + 8) {
+        let size = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        if size < 8 || size > udta.len() - at {
+            return None;
+        }
+        if &head[4..] == b"meta" {
+            let m = parse_qt_metadata(&udta[at + 8..at + size]).ok()?;
+            return m.is_quicktime_shape().then_some(m);
+        }
+        at += size;
+    }
+    None
 }
 
 fn parse_mdia<R: Read + Seek + ?Sized>(
@@ -4830,7 +4880,27 @@ impl Demuxer for MovDemuxer {
         if m.time_scale == 0 {
             return None;
         }
-        Some((m.duration as i128 * 1_000_000 / m.time_scale as i128) as i64)
+        let movie = (m.duration as i128 * 1_000_000 / m.time_scale as i128) as i64;
+        if !self.is_fragmented() {
+            return Some(movie);
+        }
+        // Fragmented: the movie header counts the `moov` samples
+        // only. The `mehd` states the whole presentation when the
+        // writer knew it (§8.8.2); else the longest stream decides.
+        let mehd = self
+            .mehd
+            .as_ref()
+            .map(|h| (h.fragment_duration as i128 * 1_000_000 / m.time_scale as i128) as i64);
+        let streams = self
+            .streams
+            .iter()
+            .filter_map(|s| {
+                let (num, den) = (s.time_base.num() as i128, s.time_base.den() as i128);
+                let ticks = s.duration.filter(|_| den > 0)? as i128;
+                Some((ticks * num * 1_000_000 / den) as i64)
+            })
+            .max();
+        Some(movie.max(mehd.unwrap_or(0)).max(streams.unwrap_or(0)))
     }
 
     /// Seek to the nearest sync sample at or before `pts` for
