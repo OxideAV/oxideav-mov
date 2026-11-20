@@ -159,10 +159,12 @@ fn forged_64bit_extended_size_past_eof_rejected() {
 }
 
 #[test]
-fn forged_size_just_one_byte_past_eof_rejected() {
-    // The valid baseline file is, say, N bytes; declare the trailing
-    // `mdat` atom one byte longer than the file actually is. The
-    // guard must still trigger (boundary check is strictly `>`).
+fn size_just_one_byte_past_eof_after_the_movie_atom_is_a_truncated_tail() {
+    // The valid baseline file is N bytes with `moov` ahead of the
+    // trailing `mdat`; declare the `mdat` one byte longer than the
+    // file is (the boundary check is strictly `>`). The movie atom
+    // has been read, so this is the shape of a file still being
+    // written: it opens, flagged truncated.
     let mut bytes = build_baseline_qt();
     let file_len = bytes.len() as u32;
     // Locate the trailing `mdat` size word.
@@ -179,7 +181,21 @@ fn forged_size_just_one_byte_past_eof_rejected() {
     assert!(new_size > current_size);
     bytes[size_pos..size_pos + 4].copy_from_slice(&new_size.to_be_bytes());
 
-    let msg = open_expect_err(bytes);
+    let d = open_bytes(bytes.clone()).expect("a truncated tail after moov opens");
+    assert!(d.is_truncated());
+    assert!(
+        !open_bytes(build_baseline_qt()).unwrap().is_truncated(),
+        "the intact file is not truncated"
+    );
+
+    // With no movie atom read yet, the same forged size is rejected.
+    let moov_fourcc_pos = bytes.windows(4).position(|w| w == b"moov").unwrap();
+    let mut headless = bytes[..moov_fourcc_pos - 4].to_vec();
+    let mdat_at = headless.len();
+    headless.extend_from_slice(&bytes[size_pos..]);
+    let past = (headless.len() - mdat_at) as u32 + 1;
+    headless[mdat_at..mdat_at + 4].copy_from_slice(&past.to_be_bytes());
+    let msg = open_expect_err(headless);
     assert!(
         msg.contains("end-of-file"),
         "expected EOF-bound rejection, got: {msg}"

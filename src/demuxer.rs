@@ -114,6 +114,9 @@ pub struct MovDemuxer {
     /// `moov`, indicating the file is laid out for streaming
     /// ("faststart").
     faststart: bool,
+    /// The top-level walk ended at an atom running past the end of
+    /// the input ([`MovDemuxer::is_truncated`]).
+    truncated: bool,
     /// Progressive Download Information Box (ISO/IEC 14496-12 §8.1.3)
     /// when the file's top-level carries a `pdin`. `None` for QTFF and
     /// for any ISO BMFF file that omits this optional box. Spec
@@ -630,14 +633,22 @@ impl MovDemuxer {
 
         // Top-level walk — accept arbitrary order, recognise the
         // common atoms, skip everything else.
+        let mut truncated = false;
         loop {
             let pos = input.stream_position()?;
             if pos >= total_len {
                 break;
             }
-            let hdr = match read_atom_header(input.as_mut())? {
-                Some(h) => h,
-                None => break,
+            let hdr = match read_atom_header(input.as_mut()) {
+                Ok(Some(h)) => h,
+                Ok(None) => break,
+                // A header cut short at the very end of a movie that
+                // is still being written (see below).
+                Err(_) if mvhd.is_some() && total_len - pos < 16 => {
+                    truncated = true;
+                    break;
+                }
+                Err(e) => return Err(e),
             };
             let body_end = hdr
                 .total_size
@@ -657,7 +668,20 @@ impl MovDemuxer {
             // declared size somehow slipped below `header_len` (the
             // size-floor check in `read_atom_header` already catches
             // this, but defence-in-depth is cheap).
+            //
+            // Once the movie atom has been read, though, an atom that
+            // runs past the end is the tail of a file still being
+            // written or downloaded — a `mdat` whose media has not all
+            // arrived, a fragment in progress. The movie read so far
+            // stands: the walk ends here, nothing of the incomplete
+            // atom is parsed or allocated, and a sample whose bytes
+            // are not there yet fails at its own read.
             if body_end > total_len {
+                if mvhd.is_some() {
+                    truncated = true;
+                    seen_mdat |= hdr.fourcc == MDAT;
+                    break;
+                }
                 return Err(Error::invalid(format!(
                     "MOV: top-level atom '{}' extends to byte {body_end} past end-of-file {total_len}",
                     hdr.type_str(),
@@ -1117,6 +1141,7 @@ impl MovDemuxer {
             reference_movies,
             compressed_movie_algorithm,
             faststart: seen_moov_before_mdat,
+            truncated,
             pdin: file_pdin,
             ctab: movie_ctab,
             clipping: movie_clipping,
@@ -1157,6 +1182,15 @@ impl MovDemuxer {
     /// `fragment_sequence_numbers` directly.
     pub fn is_fragmented(&self) -> bool {
         !self.fragment_sequence_numbers.is_empty() || !self.trex_defaults.is_empty()
+    }
+
+    /// `true` when the input ends inside a top-level atom that
+    /// follows the movie atom — a file still being written or
+    /// downloaded (a `mdat` not yet complete, a fragment in progress)
+    /// or one cut short. Everything up to that atom was read; samples
+    /// whose bytes lie past the end fail at their own read.
+    pub fn is_truncated(&self) -> bool {
+        self.truncated
     }
 
     /// True when the file is laid out for streaming playback

@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and stops (`edit::media_cut_points`), so the edited stream of a
   frame-counted track — and an edited-timeline seek into it — is
   exact to the frame.
+- Growing files: once the movie atom has been read, a top-level atom
+  running past the end of the input (a `mdat` still arriving, a
+  fragment in progress, a cut header) ends the walk instead of
+  failing the open; `MovDemuxer::is_truncated` reports it. Samples
+  whose bytes are present read back, the first missing one fails at
+  its own read.
 - `MovMuxer::set_written_media` + `encode_movie_resource`: declare
   sample bytes the caller has already written into the output and
   take the `moov` alone — the building blocks of a streaming writer.

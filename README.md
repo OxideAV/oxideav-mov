@@ -683,8 +683,19 @@ The walker is injection-hardened for network-supplied input:
   (`stsd`, `keys`, `chan`, `dref`, `sgpd`, …) reject any declared
   count whose minimum on-disk footprint exceeds the remaining body
   before allocating.
-- Top-level and nested atoms whose declared `size` extends past EOF,
-  or whose `start + size` overflows `u64`, are rejected at the header.
+- Nested atoms whose declared `size` extends past EOF, or whose
+  `start + size` overflows `u64`, are rejected at the header; so is a
+  top-level atom, until the movie atom has been read.
+- Growing files: once `moov` has been read, a top-level atom running
+  past the end is the tail of a movie still being written or
+  downloaded — the `mdat` of a moov-first file, a fragment in
+  progress. The file opens (`is_truncated()`), nothing of the
+  incomplete atom is parsed or allocated, every sample whose bytes are
+  present reads back and the first missing one fails at its own read.
+- A frame-counted sound track costs a queue entry per packet, so the
+  declared-sample bound counts its packets and (byte-backed) chunks: a
+  forged four-billion-frame table in a kilobyte file is refused, and a
+  one-hour PCM track is 168 750 entries.
 
 Pinned by synthetic robustness test suites (forged sizes, truncation
 sweeps, random-byte fuzz, extended-size overflow).
