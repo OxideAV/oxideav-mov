@@ -46,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the frame number the record is calculated from (a record outside a
   timecode's limits cannot be packed); `TimecodeRecord::to_raw` /
   `is_in_range`.
+- The registry muxer derives each track's edit list from its
+  packets' timestamps: an empty edit for a stream that starts after
+  the earliest one, and a segment entering the media at the first
+  presented instant — past decode-only (`discard`-flagged) leading
+  packets and the reordering delay. A movie demuxed with
+  `apply_edit_lists(true)` + `emit_never_presented(true)` and written
+  back keeps its presentation: a black-box reader reports the same
+  start, duration and decoded frames for an H.264 (B-frames) + AAC
+  (priming) movie.
 - `MovMuxer::set_written_media` + `encode_movie_resource`: declare
   sample bytes the caller has already written into the output and
   take the `moov` alone — the building blocks of a streaming writer.

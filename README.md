@@ -310,7 +310,12 @@ payload (in 256 KiB blocks) and keeps only a table row, and
 `wide` atom past 4 GiB (QTFF 2012-08-14 p. 22), with `co64` offsets —
 and appends the `moov`. Memory is a row per packet whatever the movie's
 size; media is interleaved in arrival order, one chunk per run of a
-stream's packets. It recovers durations from decode-time
+stream's packets. Each track's edit list is derived from the packet
+timestamps — an empty edit for a stream that starts late, a segment
+entering the media at its first presented instant, past decode-only
+(`discard`-flagged) leading packets and the reordering delay — so a
+movie read with `apply_edit_lists(true)` + `emit_never_presented(true)`
+and written back presents exactly as before. It recovers durations from decode-time
 deltas and `ctts` offsets from pts − dts, and maps codec identities to
 case-correct QTFF sample-description FourCCs. The direct API has the
 same facility: write the payload yourself, declare it with

@@ -13,7 +13,7 @@
 use crate::audio_params::PcmLayout;
 use crate::demuxer;
 use crate::muxer::{
-    AudioEntryV2, ExternalSampleLocation, MovMetadata, MovMuxer, MuxSample, MuxTrackKind,
+    AudioEntryV2, ExternalSampleLocation, MovMetadata, MovMuxer, MuxEdit, MuxSample, MuxTrackKind,
     VisualExtensions,
 };
 use crate::track::LpcmFlags;
@@ -241,6 +241,9 @@ struct WrittenSample {
     pts: i64,
     duration: Option<i64>,
     keyframe: bool,
+    /// Decode-only: not part of the presentation (decoder priming, a
+    /// trimmed head).
+    discard: bool,
 }
 
 /// Per-stream accumulation state for [`MovRegistryMuxer`].
@@ -251,6 +254,10 @@ struct PendingTrack {
     /// Ticks-per-value multiplier — the stream time base's numerator,
     /// so `value × tick_num` is in `media_timescale` units.
     tick_num: i64,
+    /// The stream time base's denominator (the media timescale,
+    /// except for frame-counted sound, whose timescale is the sample
+    /// rate).
+    time_base_den: i64,
     /// Codec-config extension atoms for the `stsd` entry: the
     /// stream's extradata (a bare configuration record, as the
     /// demuxer surfaces it) framed as the format's configuration atom
@@ -273,6 +280,8 @@ struct PendingTrack {
     /// Frame-counted sound: the bytes of a frame whose rest arrives
     /// with the next packet.
     carry: Vec<u8>,
+    /// Frame-counted sound: the first packet's presentation time.
+    frames_start: Option<i64>,
     /// Synthesised decode time for the next packet that arrives
     /// without any timestamp of its own.
     next_auto_dts: i64,
@@ -303,6 +312,107 @@ pub struct MovRegistryMuxer {
     pos: u64,
     /// Payload bytes not yet passed to `out`.
     block: Vec<u8>,
+}
+
+/// Movie timescale of the written file (QTFF's customary 600).
+const MOVIE_TIMESCALE: u32 = 600;
+
+/// An instant as `ticks / timescale` seconds.
+#[derive(Clone, Copy)]
+struct Instant {
+    ticks: i128,
+    timescale: i128,
+}
+
+impl Instant {
+    fn cmp_seconds(&self, other: &Self) -> std::cmp::Ordering {
+        (self.ticks * other.timescale).cmp(&(other.ticks * self.timescale))
+    }
+}
+
+/// What a stream's packets present: from when, starting where in the
+/// media, for how long.
+struct PresentedSpan {
+    /// Presentation time of the earliest presented packet.
+    start: Instant,
+    /// Media time (media timescale ticks from the first packet's
+    /// decode time) of that packet.
+    media_start: i64,
+    /// Presented duration in media timescale ticks.
+    duration: i128,
+}
+
+impl PresentedSpan {
+    /// The edit list placing this span on the movie timeline (QTFF
+    /// 2012-08-14 pp. 46 – 48): an empty edit for the time before the
+    /// stream starts, then one segment entering the media at its
+    /// first presented instant — skipping decode-only leading packets
+    /// and the reordering delay of the composition offsets. Empty
+    /// when the media plays from its start at the origin, which needs
+    /// no edit list.
+    fn edits(&self, origin: &Instant) -> Vec<MuxEdit> {
+        let movie = i128::from(MOVIE_TIMESCALE);
+        let ts = self.start.timescale;
+        // start − origin, in movie ticks, to the nearest tick.
+        let delay_num = self.start.ticks * origin.timescale - origin.ticks * ts;
+        let delay_den = ts * origin.timescale;
+        let delay = ((delay_num * movie + delay_den / 2) / delay_den).max(0) as u64;
+        if delay == 0 && self.media_start == 0 {
+            return Vec::new();
+        }
+        // The whole presented span, rounded up to a movie tick.
+        let duration = ((self.duration * movie + ts - 1) / ts).max(1) as u64;
+        let mut edits = Vec::with_capacity(2);
+        if delay > 0 {
+            edits.push(MuxEdit::empty(delay));
+        }
+        edits.push(MuxEdit::segment(duration, self.media_start));
+        edits
+    }
+}
+
+impl PendingTrack {
+    /// The span this stream's packets present, from their timestamps
+    /// (decode-only packets — the `discard` flag — present nothing).
+    /// `None` when no packet is presented.
+    fn presented(&self) -> Option<PresentedSpan> {
+        let timescale = i128::from(self.media_timescale);
+        if let Some(frame) = self.frame_bytes {
+            // One tick per frame at the sample rate; the first
+            // packet's time is in the stream's time base.
+            let frames: i128 = self
+                .written
+                .iter()
+                .map(|w| i128::from(w.size / frame))
+                .sum();
+            let start = i128::from(self.frames_start?) * i128::from(self.tick_num);
+            let base = i128::from(self.time_base_den);
+            return Some(PresentedSpan {
+                start: Instant {
+                    ticks: start,
+                    timescale: base,
+                },
+                media_start: 0,
+                duration: frames,
+            });
+        }
+        let first_dts = self.written.first()?.dts;
+        let presented = || self.written.iter().filter(|w| !w.discard);
+        let start = presented().map(|w| w.pts).min()?;
+        let end = presented()
+            .map(|w| w.pts.saturating_add(w.duration.unwrap_or(0).max(0)))
+            .max()?;
+        let tick = i128::from(self.tick_num);
+        Some(PresentedSpan {
+            start: Instant {
+                ticks: i128::from(start) * tick,
+                timescale,
+            },
+            media_start: i64::try_from((i128::from(start) - i128::from(first_dts)).max(0) * tick)
+                .ok()?,
+            duration: (i128::from(end) - i128::from(start)).max(0) * tick,
+        })
+    }
 }
 
 /// File offset of the `wide` placeholder: right after the 28-byte
@@ -391,6 +501,7 @@ pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<
             kind,
             media_timescale: frame_rate.unwrap_or(s.time_base.den() as u32),
             tick_num: s.time_base.num(),
+            time_base_den: s.time_base.den(),
             extra,
             sound_v2: v2,
             frame_bytes,
@@ -400,6 +511,7 @@ pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<
                 .flatten(),
             written: Vec::new(),
             carry: Vec::new(),
+            frames_start: None,
             next_auto_dts: 0,
         });
     }
@@ -490,6 +602,9 @@ impl Muxer for MovRegistryMuxer {
             // frames are written; the split frame's head waits for
             // its rest.
             let frame = frame as usize;
+            if track.frames_start.is_none() {
+                track.frames_start = Some(packet.pts.or(packet.dts).unwrap_or(0));
+            }
             let carried = std::mem::take(&mut track.carry);
             let total = carried.len() + packet.data.len();
             let whole = total - total % frame;
@@ -516,6 +631,7 @@ impl Muxer for MovRegistryMuxer {
                     pts: 0,
                     duration: None,
                     keyframe: true,
+                    discard: false,
                 }),
             }
             self.put(&carried)?;
@@ -533,6 +649,7 @@ impl Muxer for MovRegistryMuxer {
             pts,
             duration: packet.duration,
             keyframe: packet.flags.keyframe,
+            discard: packet.flags.discard,
         });
         self.put(&packet.data)
     }
@@ -551,8 +668,17 @@ impl Muxer for MovRegistryMuxer {
                 "MOV muxer: stream {i} received no packets"
             )));
         }
-        let mut m = MovMuxer::new();
-        for t in &mut self.tracks {
+        let mut m = MovMuxer::new().with_movie_timescale(MOVIE_TIMESCALE);
+        let spans: Vec<Option<PresentedSpan>> =
+            self.tracks.iter().map(PendingTrack::presented).collect();
+        // The presentation starts at the earliest presented instant
+        // of any stream.
+        let origin = spans
+            .iter()
+            .flatten()
+            .map(|s| s.start)
+            .min_by(|a, b| a.cmp_seconds(b));
+        for (t, span) in self.tracks.iter_mut().zip(&spans) {
             // The rows move into the encoder: a failed finalization is
             // terminal either way.
             let written = std::mem::take(&mut t.written);
@@ -605,6 +731,12 @@ impl Muxer for MovRegistryMuxer {
             }
             if let Some(v2) = t.sound_v2 {
                 m.set_sound_description_v2(id, v2)?;
+            }
+            if let (Some(span), Some(origin)) = (span, &origin) {
+                let edits = span.edits(origin);
+                if !edits.is_empty() {
+                    m.set_edit_list(id, &edits)?;
+                }
             }
             if let Some(language) = &t.language {
                 match <[u8; 3]>::try_from(language.as_bytes()) {
