@@ -178,7 +178,11 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     if let Some(asc) = oxideav_mov::AudioSpecificConfig::parse(&data[..data.len().min(64)]) {
-        let _ = (asc.output_sample_rate(), asc.output_channels(), asc.coded_channels());
+        let _ = (
+            asc.output_sample_rate(),
+            asc.output_channels(),
+            asc.coded_channels(),
+        );
     }
 
     // Touch the round-162 / round-105 / round-114 / round-125 /

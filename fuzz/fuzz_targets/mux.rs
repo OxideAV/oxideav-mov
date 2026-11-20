@@ -26,9 +26,10 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use std::io::Cursor;
+use std::io::{Cursor, Seek, SeekFrom, Write};
+use std::sync::{Arc, Mutex};
 
-use oxideav_core::{Demuxer, ReadSeek};
+use oxideav_core::{CodecId, CodecParameters, Demuxer, Packet, ReadSeek, StreamInfo, TimeBase};
 use oxideav_mov::{ChunkStrategy, MoovPlacement, MovDemuxer, MovMuxer, MuxSample, MuxTrackKind};
 
 /// Bounded byte reader over the fuzz input.
@@ -71,12 +72,19 @@ fuzz_target!(|data: &[u8]| {
         .with_chunk_strategy(strategy);
 
     let mut inputs: Vec<Vec<Vec<u8>>> = Vec::with_capacity(n_tracks);
+    // The same recipe as registry streams + packets, for the
+    // streaming writer below.
+    let mut streams: Vec<StreamInfo> = Vec::with_capacity(n_tracks);
+    let mut packets: Vec<Vec<Packet>> = Vec::with_capacity(n_tracks);
     for t in 0..n_tracks {
         let media_ts = r.u16().max(1) as u32;
         let n_samples = 1 + (r.u8() % 48) as usize;
         let is_video = r.u8() & 1 == 0;
         let mut samples = Vec::with_capacity(n_samples);
         let mut bytes = Vec::with_capacity(n_samples);
+        let time_base = TimeBase::new(1, media_ts as i64);
+        let mut track_packets = Vec::with_capacity(n_samples);
+        let mut dts = 0i64;
         for i in 0..n_samples {
             let dur = r.u16().max(1) as u32;
             let len = (r.u8() % 32) as usize + 1;
@@ -93,6 +101,14 @@ fuzz_target!(|data: &[u8]| {
                 .take(len)
                 .collect::<Vec<u8>>();
             bytes.push(data.clone());
+            track_packets.push(
+                Packet::new(t as u32, time_base, data.clone())
+                    .with_dts(dts)
+                    .with_pts(dts + offset as i64)
+                    .with_duration(dur as i64)
+                    .with_keyframe(!is_video || i == 0),
+            );
+            dts += dur as i64;
             samples.push(
                 MuxSample::default()
                     .with_data(data)
@@ -102,6 +118,24 @@ fuzz_target!(|data: &[u8]| {
             );
         }
         inputs.push(bytes);
+        packets.push(track_packets);
+        let params = if is_video {
+            let mut v = CodecParameters::video(CodecId::new("rawvideo"));
+            v.width = Some(4);
+            v.height = Some(4);
+            v
+        } else {
+            let mut a = CodecParameters::audio(CodecId::new("pcm_u8")).channels(1);
+            a.sample_rate = Some(media_ts);
+            a
+        };
+        streams.push(StreamInfo {
+            index: t as u32,
+            time_base,
+            duration: None,
+            start_time: None,
+            params,
+        });
         if is_video {
             m.add_track(
                 MuxTrackKind::Video {
@@ -175,4 +209,60 @@ fuzz_target!(|data: &[u8]| {
     for (ti, (a, b)) in inputs.iter().zip(got.iter()).enumerate() {
         assert_eq!(a, b, "track {ti} payload stream");
     }
+
+    // ── The streaming registry writer over the same recipe: packets
+    //    interleaved round-robin, payloads written as they arrive, the
+    //    sound track frame-counted, edit lists derived from the
+    //    timestamps. Every stream's bytes must come back in order. ──
+    let sink = Sink::default();
+    let mut mux = oxideav_mov::registry::open_muxer(Box::new(sink.clone()), &streams)
+        .expect("registry muxer opens");
+    mux.write_header().expect("header");
+    let longest = packets.iter().map(Vec::len).max().unwrap_or(0);
+    for i in 0..longest {
+        for track in &packets {
+            if let Some(p) = track.get(i) {
+                mux.write_packet(p).expect("packet");
+            }
+        }
+    }
+    mux.write_trailer().expect("trailer");
+    let written = sink.0.lock().unwrap().get_ref().clone();
+    let cur: Box<dyn ReadSeek> = Box::new(Cursor::new(written));
+    let mut d = MovDemuxer::open(cur).expect("streamed output must demux");
+    assert_eq!(d.tracks.len(), n_tracks, "streamed track count");
+    let mut streamed: Vec<Vec<u8>> = vec![Vec::new(); n_tracks];
+    while let Ok(p) = d.next_packet() {
+        streamed[p.stream_index as usize].extend_from_slice(&p.data);
+    }
+    for (ti, (a, b)) in inputs.iter().zip(&streamed).enumerate() {
+        assert_eq!(&a.concat(), b, "track {ti} streamed payload");
+    }
+    // The derived edit lists must hold up under the applied mode.
+    d.apply_edit_lists(true);
+    d.emit_never_presented(true);
+    for ti in 0..n_tracks {
+        let _ = d.seek_to(ti as u32, 0);
+        while d.next_packet().is_ok() {}
+    }
 });
+
+/// A seekable in-memory sink whose bytes stay reachable after the
+/// boxed muxer takes ownership of the writer.
+#[derive(Clone, Default)]
+struct Sink(Arc<Mutex<Cursor<Vec<u8>>>>);
+
+impl Write for Sink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for Sink {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.0.lock().unwrap().seek(pos)
+    }
+}
