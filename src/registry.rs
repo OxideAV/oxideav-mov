@@ -340,6 +340,9 @@ struct PresentedSpan {
     media_start: i64,
     /// Presented duration in media timescale ticks.
     duration: i128,
+    /// The media timescale (`duration`'s unit; the start instant has
+    /// its own).
+    media_timescale: i128,
 }
 
 impl PresentedSpan {
@@ -361,7 +364,8 @@ impl PresentedSpan {
             return Vec::new();
         }
         // The whole presented span, rounded up to a movie tick.
-        let duration = ((self.duration * movie + ts - 1) / ts).max(1) as u64;
+        let media = self.media_timescale;
+        let duration = ((self.duration * movie + media - 1) / media).max(1) as u64;
         let mut edits = Vec::with_capacity(2);
         if delay > 0 {
             edits.push(MuxEdit::empty(delay));
@@ -394,6 +398,7 @@ impl PendingTrack {
                 },
                 media_start: 0,
                 duration: frames,
+                media_timescale: timescale,
             });
         }
         let first_dts = self.written.first()?.dts;
@@ -411,6 +416,7 @@ impl PendingTrack {
             media_start: i64::try_from((i128::from(start) - i128::from(first_dts)).max(0) * tick)
                 .ok()?,
             duration: (i128::from(end) - i128::from(start)).max(0) * tick,
+            media_timescale: timescale,
         })
     }
 }

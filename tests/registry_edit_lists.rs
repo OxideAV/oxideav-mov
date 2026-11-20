@@ -176,45 +176,49 @@ fn media_time_packets_keep_their_presentation_times() {
 
 #[test]
 fn a_stream_that_starts_late_gets_an_empty_edit() {
-    let mut v = CodecParameters::video(CodecId::new("rawvideo"));
-    v.width = Some(4);
-    v.height = Some(4);
-    let mut a = CodecParameters::audio(CodecId::new("pcm_s16le")).channels(1);
-    a.sample_rate = Some(8000);
-    let stream = |index, params, den| StreamInfo {
-        index,
-        time_base: TimeBase::new(1, den),
-        duration: None,
-        start_time: None,
-        params,
-    };
-    let streams = [stream(0, v, 25), stream(1, a, 8000)];
-    let mut packets = Vec::new();
-    // Video from 10 s; uncompressed sound from 10.5 s.
-    for i in 0..25i64 {
-        packets.push(
-            Packet::new(0, streams[0].time_base, vec![i as u8; 16])
-                .with_pts(250 + i)
-                .with_dts(250 + i)
-                .with_duration(1)
-                .with_keyframe(true),
-        );
-    }
-    packets.push(Packet::new(1, streams[1].time_base, vec![7u8; 8000]).with_pts(84000));
-    let mut d = open(mux(&streams, &packets));
-    // The movie starts at the earliest stream: no edit there.
-    assert!(d.tracks[0].edits.is_empty());
-    let sound = &d.tracks[1].edits;
-    assert_eq!(sound.len(), 2);
-    assert_eq!((sound[0].media_time, sound[0].track_duration), (-1, 300));
-    assert_eq!((sound[1].media_time, sound[1].track_duration), (0, 300));
+    // The sound's time base need not be its sample rate: 10.5 s is
+    // 84000 at 1/8000 and 10500 at 1/1000.
+    for (sound_base, sound_start) in [(8000i64, 84000i64), (1000, 10500)] {
+        let mut v = CodecParameters::video(CodecId::new("rawvideo"));
+        v.width = Some(4);
+        v.height = Some(4);
+        let mut a = CodecParameters::audio(CodecId::new("pcm_s16le")).channels(1);
+        a.sample_rate = Some(8000);
+        let stream = |index, params, den| StreamInfo {
+            index,
+            time_base: TimeBase::new(1, den),
+            duration: None,
+            start_time: None,
+            params,
+        };
+        let streams = [stream(0, v, 25), stream(1, a, sound_base)];
+        let mut packets = Vec::new();
+        // Video from 10 s; uncompressed sound from 10.5 s.
+        for i in 0..25i64 {
+            packets.push(
+                Packet::new(0, streams[0].time_base, vec![i as u8; 16])
+                    .with_pts(250 + i)
+                    .with_dts(250 + i)
+                    .with_duration(1)
+                    .with_keyframe(true),
+            );
+        }
+        packets.push(Packet::new(1, streams[1].time_base, vec![7u8; 8000]).with_pts(sound_start));
+        let mut d = open(mux(&streams, &packets));
+        // The movie starts at the earliest stream: no edit there.
+        assert!(d.tracks[0].edits.is_empty());
+        let sound = &d.tracks[1].edits;
+        assert_eq!(sound.len(), 2);
+        assert_eq!((sound[0].media_time, sound[0].track_duration), (-1, 300));
+        assert_eq!((sound[1].media_time, sound[1].track_duration), (0, 300));
 
-    d.apply_edit_lists(true);
-    let first_sound = drain(&mut d)
-        .into_iter()
-        .find(|p| p.stream_index == 1)
-        .unwrap();
-    assert_eq!(first_sound.pts, Some(4000), "half a second in");
+        d.apply_edit_lists(true);
+        let first_sound = drain(&mut d)
+            .into_iter()
+            .find(|p| p.stream_index == 1)
+            .unwrap();
+        assert_eq!(first_sound.pts, Some(4000), "half a second in");
+    }
 }
 
 // ─────────────── black-box reader ───────────────
