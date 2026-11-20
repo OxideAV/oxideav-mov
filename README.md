@@ -290,9 +290,19 @@ classified by the demuxer's `is_faststart()`) and `ChunkStrategy`
 QTFF p. 358 time-ordered interleave with run-length `stsc` and one
 `stco`/`co64` entry per chunk). The registry write path is wired too:
 `ContainerRegistry::open_muxer("mov", …)` returns a `Muxer`-trait
-adapter that buffers packets, recovers durations from decode-time
+adapter that **streams**: `write_header` lays down `ftyp`, a `wide`
+placeholder and the `mdat` header, every `write_packet` appends its
+payload (in 256 KiB blocks) and keeps only a table row, and
+`write_trailer` patches the `mdat` size — widening the header over the
+`wide` atom past 4 GiB (QTFF 2012-08-14 p. 22), with `co64` offsets —
+and appends the `moov`. Memory is a row per packet whatever the movie's
+size; media is interleaved in arrival order, one chunk per run of a
+stream's packets. It recovers durations from decode-time
 deltas and `ctts` offsets from pts − dts, and maps codec identities to
-case-correct QTFF sample-description FourCCs. Per-sample composition offsets (`MuxSample.composition_offset`,
+case-correct QTFF sample-description FourCCs. The direct API has the
+same facility: write the payload yourself, declare it with
+`set_written_media(track_id, locations)` and take the `moov` from
+`encode_movie_resource()`. Per-sample composition offsets (`MuxSample.composition_offset`,
 PTS − DTS) emit a `ctts` Composition Time to Sample Box (§8.6.1.3):
 omitted when every offset is zero, version 0 for an all-non-negative
 track, auto-promoted to version 1 (signed `int(32)`) the moment any

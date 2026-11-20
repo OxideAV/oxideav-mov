@@ -116,16 +116,48 @@ fn synth_streams() -> Vec<StreamInfo> {
     ]
 }
 
-fn mux(streams: &[StreamInfo], packets: &[Packet]) -> Vec<u8> {
-    let buf = SharedBuf::default();
-    let out: Box<dyn WriteSeek> = Box::new(buf.clone());
+/// A sink that counts and discards: the mux timing measures the
+/// muxer, not the growth of an in-memory file.
+#[derive(Default)]
+struct Discard {
+    pos: u64,
+    len: u64,
+}
+
+impl Write for Discard {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.pos += buf.len() as u64;
+        self.len = self.len.max(self.pos);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for Discard {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        self.pos = match to {
+            SeekFrom::Start(p) => p,
+            SeekFrom::End(d) => (self.len as i64 + d) as u64,
+            SeekFrom::Current(d) => (self.pos as i64 + d) as u64,
+        };
+        Ok(self.pos)
+    }
+}
+
+fn mux_into(out: Box<dyn WriteSeek>, streams: &[StreamInfo], packets: &[Packet]) {
     let mut m = oxideav_mov::registry::open_muxer(out, streams).unwrap();
     m.write_header().unwrap();
     for p in packets {
         m.write_packet(p).unwrap();
     }
     m.write_trailer().unwrap();
-    drop(m);
+}
+
+fn mux(streams: &[StreamInfo], packets: &[Packet]) -> Vec<u8> {
+    let buf = SharedBuf::default();
+    mux_into(Box::new(buf.clone()), streams, packets);
     Arc::try_unwrap(buf.0)
         .ok()
         .unwrap()
@@ -169,10 +201,8 @@ fn main() {
         let runs: Vec<f64> = (0..3)
             .map(|_| {
                 let t = Instant::now();
-                let b = mux(&streams, &packets);
-                let s = t.elapsed().as_secs_f64();
-                std::hint::black_box(b.len());
-                s
+                mux_into(Box::new(Discard::default()), &streams, &packets);
+                t.elapsed().as_secs_f64()
             })
             .collect();
         let s = median(runs);

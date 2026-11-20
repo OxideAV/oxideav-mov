@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frames). The registry muxer uses it for every PCM flavour and for
   `ulaw` / `alaw`, whatever packet sizes it is fed (a frame split
   across packets is rejoined).
+- `MovMuxer::set_written_media` + `encode_movie_resource`: declare
+  sample bytes the caller has already written into the output and
+  take the `moov` alone — the building blocks of a streaming writer.
 - `benches/long_file.rs`: mux / open / drain / seek timings on a
   synthesised one-hour movie.
 
@@ -43,8 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drops from 172.8 million entries to 168 750.
 - Seeking uses a per-track sync index (binary search) instead of a
   scan of the whole packet queue.
-- The registry muxer moves buffered payloads into the encoder at
-  `write_trailer` instead of cloning them.
+- The registry muxer streams: payloads are written as packets arrive
+  (`ftyp`, `wide`, `mdat`, then `moov` at the trailer; media
+  interleaved in arrival order) and only a table row per packet is
+  kept, instead of buffering the whole movie and encoding it at
+  `write_trailer`. The `mdat` header widens over the `wide`
+  placeholder past 4 GiB.
 - `MovMuxer::write_to` writes the `mdat` payload straight from the
   samples in 256 KiB blocks instead of building the whole file in
   memory first.

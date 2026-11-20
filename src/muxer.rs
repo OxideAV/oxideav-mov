@@ -184,6 +184,10 @@ struct ExternalMediaWrite {
     data_reference_index: u16,
     /// One location per sample, in sample (decode) order.
     locations: Vec<ExternalSampleLocation>,
+    /// The locations are in **this** file — sample bytes the caller
+    /// has already written ([`MovMuxer::set_written_media`]) — and
+    /// `data_reference_index` names the self-reference.
+    in_file: bool,
 }
 
 /// Per-track sample-auxiliary-information stream destined for a
@@ -1290,7 +1294,7 @@ impl TrackWrite {
     /// `true` when the track carries a table with one row per
     /// [`MuxSample`], or external sample locations.
     fn has_per_sample_side_tables(&self) -> bool {
-        self.external_media.is_some()
+        self.external_media.as_ref().is_some_and(|e| !e.in_file)
             || self.sample_aux.is_some()
             || !self.sample_to_groups.is_empty()
             || !(self.sdtp.is_empty()
@@ -1304,7 +1308,7 @@ impl TrackWrite {
     /// a frame-counted sound track, else 1.
     fn table_samples(&self, i: usize) -> u64 {
         match self.sound_frame_bytes {
-            Some(frame) => self.samples[i].data.len() as u64 / u64::from(frame),
+            Some(frame) => u64::from(self.sample_size(i)) / u64::from(frame),
             None => 1,
         }
     }
@@ -2559,7 +2563,7 @@ impl MovMuxer {
         }
         let mut frames = 0u64;
         for (i, s) in t.samples.iter().enumerate() {
-            let len = s.data.len() as u64;
+            let len = u64::from(t.sample_size(i));
             let n = len / u64::from(bytes_per_frame);
             if n == 0 || !len.is_multiple_of(u64::from(bytes_per_frame)) {
                 return Err(Error::invalid(format!(
@@ -2892,7 +2896,11 @@ impl MovMuxer {
         // Re-validate a previously-declared external marking: its
         // 1-based index must still name a non-self entry of the new
         // table.
-        if let Some(ext) = &self.tracks[idx].external_media {
+        if let Some(ext) = self.tracks[idx]
+            .external_media
+            .as_ref()
+            .filter(|e| !e.in_file)
+        {
             check_external_dref_entry(references, ext.data_reference_index)?;
         }
         self.tracks[idx].data_references = references.to_vec();
@@ -2999,8 +3007,68 @@ impl MovMuxer {
         self.tracks[idx].external_media = Some(ExternalMediaWrite {
             data_reference_index,
             locations: locations.to_vec(),
+            in_file: false,
         });
         Ok(())
+    }
+
+    /// Declare a track's sample bytes **already written** into the
+    /// output file by the caller, one location (absolute file offset
+    /// and size) per sample; the samples themselves carry no data.
+    /// The streaming counterpart of the buffered layout: the caller
+    /// lays the `mdat` payload down as packets arrive and asks for the
+    /// movie resource alone ([`Self::encode_movie_resource`]).
+    ///
+    /// Offsets are absolute in the output file and are written to the
+    /// chunk-offset table as given (`co64` once any passes 4 GiB);
+    /// byte-contiguous samples share a chunk. Errors on an unknown
+    /// track, a location count other than the sample count, or a
+    /// sample that carries data.
+    pub fn set_written_media(
+        &mut self,
+        track_id: u32,
+        locations: Vec<ExternalSampleLocation>,
+    ) -> Result<()> {
+        let t = (track_id as usize)
+            .checked_sub(1)
+            .and_then(|i| self.tracks.get_mut(i))
+            .ok_or_else(|| Error::invalid(format!("MOV muxer: unknown track id {track_id}")))?;
+        if locations.len() != t.samples.len() || t.samples.iter().any(|s| !s.data.is_empty()) {
+            return Err(Error::invalid(
+                "MOV muxer: written media needs one location per data-less sample",
+            ));
+        }
+        t.external_media = Some(ExternalMediaWrite {
+            data_reference_index: self_ref_index(&t.data_references),
+            locations,
+            in_file: true,
+        });
+        Ok(())
+    }
+
+    /// The framed `moov` atom of a movie whose every track's media is
+    /// already in place ([`Self::set_written_media`] /
+    /// [`Self::set_external_media`]).
+    pub fn encode_movie_resource(&self) -> Result<Vec<u8>> {
+        if self.tracks.is_empty() {
+            return Err(Error::invalid("MOV muxer: at least one track required"));
+        }
+        if let Some(i) = self
+            .tracks
+            .iter()
+            .position(|t| t.samples.is_empty() || t.external_media.is_none())
+        {
+            return Err(Error::invalid(format!(
+                "MOV muxer: track {} has no samples in place",
+                i + 1
+            )));
+        }
+        let (chunks, aux_offsets) = self.layout_segments(&[], 0);
+        let need_co64 = chunks.iter().flatten().any(|c| c.offset > u32::MAX as u64);
+        let moov = build_moov(self, &chunks, need_co64, &aux_offsets);
+        let mut out = Vec::with_capacity(moov.len() + 8);
+        push_atom(&mut out, *b"moov", &moov);
+        Ok(out)
     }
 
     /// Set a previously-added track's media language — the packed
@@ -3945,7 +4013,7 @@ impl MovMuxer {
     /// the media's data is in the same file as the movie atom").
     fn validate_data_reference_tables(&self) -> Result<()> {
         for (i, t) in self.tracks.iter().enumerate() {
-            if t.external_media.is_none()
+            if t.external_media.as_ref().is_none_or(|e| e.in_file)
                 && !t.data_references.is_empty()
                 && !t
                     .data_references
@@ -4163,7 +4231,7 @@ impl MovMuxer {
         // run-length `stsc` stays compact.
         for (track_idx, t) in self.tracks.iter().enumerate() {
             if let Some(ext) = &t.external_media {
-                chunks[track_idx] = coalesce_external_chunks(&ext.locations);
+                chunks[track_idx] = coalesce_external_chunks(&ext.locations, t.sound_frame_bytes);
             }
         }
         (chunks, aux_offsets)
@@ -4467,7 +4535,7 @@ impl MovMuxer {
 
 // ─────────────────────────── encoders ───────────────────────────
 
-fn build_ftyp() -> Vec<u8> {
+pub(crate) fn build_ftyp() -> Vec<u8> {
     // Body: major(4) + minor(4) + compatible_brands.
     // We pick `qt  ` as major and list `qt  ` + `isom` + `mp42` for
     // broad downstream tooling acceptance. Total body = 4+4+12 = 20
@@ -6035,15 +6103,26 @@ fn check_external_dref_entry(refs: &[DataReferenceWrite], index: u16) -> Result<
 /// previous one ended) forms one chunk, matching the demuxer's
 /// within-chunk offset recovery (chunk offset + sum of preceding
 /// sample sizes). Any gap or backward jump opens a new chunk.
-fn coalesce_external_chunks(locations: &[ExternalSampleLocation]) -> Vec<TrackChunk> {
+fn coalesce_external_chunks(
+    locations: &[ExternalSampleLocation],
+    sound_frame_bytes: Option<u32>,
+) -> Vec<TrackChunk> {
     let mut out: Vec<TrackChunk> = Vec::new();
     let mut expected_next: u64 = 0;
     for l in locations {
+        // Table samples at this location: its frames on a
+        // frame-counted sound track.
+        let samples = sound_frame_bytes.map_or(1, |frame| l.size / frame);
         match out.last_mut() {
-            Some(last) if l.offset == expected_next => last.sample_count += 1,
+            Some(last)
+                if l.offset == expected_next
+                    && last.sample_count.checked_add(samples).is_some() =>
+            {
+                last.sample_count += samples
+            }
             _ => out.push(TrackChunk {
                 offset: l.offset,
-                sample_count: 1,
+                sample_count: samples,
             }),
         }
         expected_next = l.offset.saturating_add(l.size as u64);
@@ -8614,7 +8693,7 @@ mod tests {
                 size: 4,
             }, // backward ⇒ new chunk
         ];
-        let chunks = coalesce_external_chunks(&locs);
+        let chunks = coalesce_external_chunks(&locs, None);
         assert_eq!(chunks.len(), 3);
         assert_eq!((chunks[0].offset, chunks[0].sample_count), (0, 3));
         assert_eq!((chunks[1].offset, chunks[1].sample_count), (100, 2));

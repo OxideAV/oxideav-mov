@@ -12,8 +12,10 @@
 
 use crate::audio_params::PcmLayout;
 use crate::demuxer;
-use crate::muxer::{AudioEntryV2, MovMuxer, MuxSample, MuxTrackKind};
+use crate::muxer::{AudioEntryV2, ExternalSampleLocation, MovMuxer, MuxSample, MuxTrackKind};
 use crate::track::LpcmFlags;
+
+use std::io::SeekFrom;
 
 use oxideav_core::{
     CodecParameters, CodecTag, ContainerRegistry, Error, MediaType, Muxer, Packet, Result,
@@ -196,10 +198,11 @@ fn audio_description(params: &CodecParameters, sample_rate: u32) -> Result<Audio
     })
 }
 
-/// One buffered input packet, timestamps in the stream's own
-/// time base.
-struct PendingSample {
-    data: Vec<u8>,
+/// One input packet already written to the output: where its bytes
+/// are, and its timestamps in the stream's own time base.
+struct WrittenSample {
+    offset: u64,
+    size: u32,
     dts: i64,
     pts: i64,
     duration: Option<i64>,
@@ -224,7 +227,12 @@ struct PendingTrack {
     sound_v2: Option<AudioEntryV2>,
     /// See [`AudioPlan::frame_bytes`].
     frame_bytes: Option<u32>,
-    samples: Vec<PendingSample>,
+    /// One row per packet written (per run of frames for a
+    /// frame-counted sound track).
+    written: Vec<WrittenSample>,
+    /// Frame-counted sound: the bytes of a frame whose rest arrives
+    /// with the next packet.
+    carry: Vec<u8>,
     /// Synthesised decode time for the next packet that arrives
     /// without any timestamp of its own.
     next_auto_dts: i64,
@@ -233,19 +241,41 @@ struct PendingTrack {
 /// [`Muxer`]-trait adapter over [`MovMuxer`] for the
 /// [`ContainerRegistry`] path.
 ///
-/// The QTFF non-fragmented layout needs the complete sample tables
-/// before anything can be finalized, so packets are buffered:
-/// `write_header` only validates state, `write_packet` accumulates,
-/// and `write_trailer` performs the entire encode and single write to
-/// the output. Missing per-packet durations are recovered at trailer
-/// time from decode-timestamp deltas (last sample: previous duration,
-/// or 1 tick).
+/// Packet payloads go to the output as they arrive; only a
+/// table row per packet is kept. `write_header` writes `ftyp`, a
+/// `wide` placeholder and the `mdat` header; `write_packet` appends
+/// the payload (so the media is interleaved in arrival order, a chunk
+/// per run of one stream's packets); `write_trailer` patches the
+/// `mdat` size — widening the header over the `wide` atom when the
+/// payload passes 4 GiB (QTFF 2012-08-14 p. 22) — and appends the
+/// `moov`. Missing per-packet durations are recovered at trailer time
+/// from decode-timestamp deltas (last sample: previous duration, or 1
+/// tick).
 pub struct MovRegistryMuxer {
     out: Box<dyn WriteSeek>,
     tracks: Vec<PendingTrack>,
     header_written: bool,
     finished: bool,
+    /// Output position of the first byte this muxer writes.
+    base: u64,
+    /// Bytes handed to the muxer so far, relative to `base`: the
+    /// file offset of the next payload byte.
+    pos: u64,
+    /// Payload bytes not yet passed to `out`.
+    block: Vec<u8>,
 }
+
+/// File offset of the `wide` placeholder: right after the 28-byte
+/// `ftyp`.
+const WIDE_AT: u64 = 28;
+/// File offset of the first `mdat` payload byte: `ftyp`, `wide`, and
+/// the 8-byte `mdat` header.
+const PAYLOAD_AT: u64 = WIDE_AT + 16;
+/// Payload bytes gathered before they are passed to the output.
+const BLOCK: usize = 256 * 1024;
+/// Most bytes one frame-run row may grow to by absorbing the packets
+/// that follow it contiguously.
+const MAX_RUN_BYTES: u32 = 1 << 20;
 
 /// [`ContainerRegistry`] muxer factory (`OpenMuxerFn`) for the `mov`
 /// format. Accepts video and audio streams; each stream's codec
@@ -324,7 +354,8 @@ pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<
             extra,
             sound_v2: v2,
             frame_bytes,
-            samples: Vec::new(),
+            written: Vec::new(),
+            carry: Vec::new(),
             next_auto_dts: 0,
         });
     }
@@ -333,7 +364,32 @@ pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<
         tracks,
         header_written: false,
         finished: false,
+        base: 0,
+        pos: 0,
+        block: Vec::new(),
     }))
+}
+
+impl MovRegistryMuxer {
+    /// Append payload bytes at the current file position.
+    fn put(&mut self, data: &[u8]) -> Result<()> {
+        if self.block.len() + data.len() > BLOCK {
+            self.flush_block()?;
+        }
+        if data.len() >= BLOCK {
+            self.out.write_all(data).map_err(Error::from)?;
+        } else {
+            self.block.extend_from_slice(data);
+        }
+        self.pos += data.len() as u64;
+        Ok(())
+    }
+
+    fn flush_block(&mut self) -> Result<()> {
+        self.out.write_all(&self.block).map_err(Error::from)?;
+        self.block.clear();
+        Ok(())
+    }
 }
 
 impl Muxer for MovRegistryMuxer {
@@ -348,9 +404,16 @@ impl Muxer for MovRegistryMuxer {
         if self.header_written {
             return Err(Error::invalid("MOV muxer: header already written"));
         }
-        // Nothing hits the output yet: the non-fragmented QTFF layout
-        // is finalized in one piece at write_trailer once the sample
-        // tables are complete.
+        self.base = self.out.stream_position().map_err(Error::from)?;
+        let mut head = crate::muxer::build_ftyp();
+        debug_assert_eq!(head.len() as u64, WIDE_AT);
+        head.extend_from_slice(&8u32.to_be_bytes());
+        head.extend_from_slice(b"wide");
+        // Size 0 — "extends to the end of the file" — until the
+        // trailer states the real one.
+        head.extend_from_slice(&0u32.to_be_bytes());
+        head.extend_from_slice(b"mdat");
+        self.put(&head)?;
         self.header_written = true;
         Ok(())
     }
@@ -376,17 +439,58 @@ impl Muxer for MovRegistryMuxer {
             // description's codec-config atoms, not the sample stream.
             return Ok(());
         }
+        let offset = self.pos;
+        if let Some(frame) = track.frame_bytes {
+            // Frame-counted sound: the packets are one continuous run
+            // of frames, a tick each at the sample rate. Only whole
+            // frames are written; the split frame's head waits for
+            // its rest.
+            let frame = frame as usize;
+            let carried = std::mem::take(&mut track.carry);
+            let total = carried.len() + packet.data.len();
+            let whole = total - total % frame;
+            if whole == 0 {
+                track.carry = carried;
+                track.carry.extend_from_slice(&packet.data);
+                return Ok(());
+            }
+            let from_packet = whole - carried.len();
+            track.carry.extend_from_slice(&packet.data[from_packet..]);
+            let size = u32::try_from(whole)
+                .map_err(|_| Error::invalid(format!("MOV muxer: stream {idx} packet too large")))?;
+            match track.written.last_mut() {
+                Some(last)
+                    if last.offset + u64::from(last.size) == offset
+                        && last.size.saturating_add(size) <= MAX_RUN_BYTES =>
+                {
+                    last.size += size
+                }
+                _ => track.written.push(WrittenSample {
+                    offset,
+                    size,
+                    dts: 0,
+                    pts: 0,
+                    duration: None,
+                    keyframe: true,
+                }),
+            }
+            self.put(&carried)?;
+            return self.put(&packet.data[..from_packet]);
+        }
+        let size = u32::try_from(packet.data.len())
+            .map_err(|_| Error::invalid(format!("MOV muxer: stream {idx} packet too large")))?;
         let dts = packet.dts.or(packet.pts).unwrap_or(track.next_auto_dts);
         let pts = packet.pts.unwrap_or(dts);
         track.next_auto_dts = dts.saturating_add(packet.duration.unwrap_or(1).max(1));
-        track.samples.push(PendingSample {
-            data: packet.data.clone(),
+        track.written.push(WrittenSample {
+            offset,
+            size,
             dts,
             pts,
             duration: packet.duration,
             keyframe: packet.flags.keyframe,
         });
-        Ok(())
+        self.put(&packet.data)
     }
 
     fn write_trailer(&mut self) -> Result<()> {
@@ -398,70 +502,43 @@ impl Muxer for MovRegistryMuxer {
         if self.finished {
             return Err(Error::invalid("MOV muxer: already finalized"));
         }
-        let mut m = MovMuxer::new();
-        if let Some(i) = self.tracks.iter().position(|t| t.samples.is_empty()) {
+        if let Some(i) = self.tracks.iter().position(|t| t.written.is_empty()) {
             return Err(Error::invalid(format!(
                 "MOV muxer: stream {i} received no packets"
             )));
         }
-        for (i, t) in self.tracks.iter_mut().enumerate() {
-            // The buffered payloads move into the encoder: a failed
-            // finalization is terminal either way.
-            let pending = std::mem::take(&mut t.samples);
-            if let Some(frame) = t.frame_bytes {
-                // Frame-counted sound: the packets are one continuous
-                // run of frames, a tick each at the sample rate; a
-                // frame split across two packets is rejoined.
-                let frame = frame as usize;
-                let mut samples = Vec::with_capacity(pending.len());
-                let mut carry: Vec<u8> = Vec::new();
-                for s in pending {
-                    let mut data = s.data;
-                    if !carry.is_empty() {
-                        carry.extend_from_slice(&data);
-                        data = std::mem::take(&mut carry);
-                    }
-                    let whole = data.len() - data.len() % frame;
-                    carry.extend_from_slice(&data[whole..]);
-                    data.truncate(whole);
-                    if whole == 0 {
-                        continue;
-                    }
-                    let frames = u32::try_from(whole / frame).map_err(|_| {
-                        Error::invalid(format!("MOV muxer: stream {i} packet too large"))
-                    })?;
-                    samples.push(MuxSample {
-                        data,
-                        duration: frames,
-                        keyframe: true,
-                        composition_offset: 0,
-                    });
-                }
-                if samples.is_empty() {
-                    return Err(Error::invalid(format!(
-                        "MOV muxer: stream {i} received no whole sound frame"
-                    )));
-                }
-                let id = m.add_track(t.kind.clone(), t.media_timescale, samples, &t.extra);
-                m.set_sound_frame_size(id, frame as u32)?;
-                if let Some(v2) = t.sound_v2 {
-                    m.set_sound_description_v2(id, v2)?;
-                }
-                continue;
-            }
-            let n = pending.len();
-            let durations: Vec<Option<i64>> = pending.iter().map(|s| s.duration).collect();
-            let decode_times: Vec<i64> = pending.iter().map(|s| s.dts).collect();
+        let mut m = MovMuxer::new();
+        for t in &mut self.tracks {
+            // The rows move into the encoder: a failed finalization is
+            // terminal either way.
+            let written = std::mem::take(&mut t.written);
+            let n = written.len();
+            let locations: Vec<ExternalSampleLocation> = written
+                .iter()
+                .map(|w| {
+                    ExternalSampleLocation::default()
+                        .with_offset(w.offset)
+                        .with_size(w.size)
+                })
+                .collect();
             let mut samples = Vec::with_capacity(n);
             let mut prev_duration: i64 = 1;
-            for (j, s) in pending.into_iter().enumerate() {
+            for (j, s) in written.iter().enumerate() {
+                if let Some(frame) = t.frame_bytes {
+                    samples.push(
+                        MuxSample::default()
+                            .with_duration(s.size / frame)
+                            .with_keyframe(true),
+                    );
+                    continue;
+                }
                 // Recover a missing duration from the decode-time gap
                 // to the next sample; the final sample reuses the
                 // previous duration (QTFF sample durations must be
                 // positive, so degrade to 1 tick at worst).
-                let dur_ticks = match durations[j] {
+                let dur_ticks = match s.duration {
                     Some(d) if d > 0 => d,
-                    _ if j + 1 < n => (decode_times[j + 1] - s.dts).max(1),
+                    _ if j + 1 < n => (written[j + 1].dts - s.dts).max(1),
                     _ => prev_duration,
                 };
                 prev_duration = dur_ticks;
@@ -470,20 +547,50 @@ impl Muxer for MovRegistryMuxer {
                     .clamp(1, u32::MAX as i64) as u32;
                 let offset = (s.pts - s.dts).saturating_mul(t.tick_num);
                 let composition_offset = offset.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-                samples.push(MuxSample {
-                    data: s.data,
-                    duration: scaled_dur,
-                    keyframe: s.keyframe,
-                    composition_offset,
-                });
+                samples.push(
+                    MuxSample::default()
+                        .with_duration(scaled_dur)
+                        .with_keyframe(s.keyframe)
+                        .with_composition_offset(composition_offset),
+                );
             }
             let id = m.add_track(t.kind.clone(), t.media_timescale, samples, &t.extra);
+            m.set_written_media(id, locations)?;
+            if let Some(frame) = t.frame_bytes {
+                m.set_sound_frame_size(id, frame)?;
+            }
             if let Some(v2) = t.sound_v2 {
                 m.set_sound_description_v2(id, v2)?;
             }
         }
-        m.write_to(&mut self.out)?;
-        self.out.flush().map_err(Error::from)?;
+        let moov = m.encode_movie_resource()?;
+        self.flush_block()?;
+
+        // State the `mdat` size: in its 32-bit field, or — past
+        // 4 GiB — in an extended header started 8 bytes earlier, over
+        // the `wide` placeholder.
+        let payload = self.pos - PAYLOAD_AT;
+        let io = |e: std::io::Error| Error::from(e);
+        if let Ok(size) = u32::try_from(payload + 8) {
+            self.out
+                .seek(SeekFrom::Start(self.base + WIDE_AT + 8))
+                .map_err(io)?;
+            self.out.write_all(&size.to_be_bytes()).map_err(io)?;
+        } else {
+            self.out
+                .seek(SeekFrom::Start(self.base + WIDE_AT))
+                .map_err(io)?;
+            let mut header = Vec::with_capacity(16);
+            header.extend_from_slice(&1u32.to_be_bytes());
+            header.extend_from_slice(b"mdat");
+            header.extend_from_slice(&(payload + 16).to_be_bytes());
+            self.out.write_all(&header).map_err(io)?;
+        }
+        self.out
+            .seek(SeekFrom::Start(self.base + self.pos))
+            .map_err(io)?;
+        self.out.write_all(&moov).map_err(io)?;
+        self.out.flush().map_err(io)?;
         self.finished = true;
         Ok(())
     }
