@@ -525,6 +525,7 @@ fuzz_target!(|data: &[u8]| {
         }
         let _ = dmx.sound_frames_per_packet();
         for ti in 0..ntracks {
+            let _ = dmx.partial_sync_samples(ti);
             let _ = dmx.sound_packeting(ti);
             for pts in [1i64, 1023, 1025, 65_537, i64::MAX] {
                 let _ = dmx.seek_to(ti as u32, pts);
@@ -539,6 +540,14 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     let _ = dmx.set_sound_frames_per_packet(oxideav_mov::DEFAULT_SOUND_FRAMES_PER_PACKET);
+    let _ = dmx.is_truncated();
+    let _ = dmx.duration_micros();
+    for ti in 0..ntracks {
+        if let Ok(Some(start)) = dmx.start_timecode(ti) {
+            let _ = start.frame_number();
+            let _ = start.timecode();
+        }
+    }
 
     // Round-440 external data-reference surface. Touch the per-track
     // externality classifier, then attach an opener that always fails
