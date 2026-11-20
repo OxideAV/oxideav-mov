@@ -643,12 +643,8 @@ fn tfdt_baseline_threads_through_to_fragment2_dts() {
     assert_eq!(t.fragment_samples.len(), 10);
 
     // Fragment 1: dts 0..4 × 60000
-    for i in 0..5usize {
-        assert_eq!(
-            t.fragment_samples[i].dts,
-            (i as u64) * 60_000,
-            "fragment 1 sample {i} dts"
-        );
+    for (i, sample) in t.fragment_samples.iter().take(5).enumerate() {
+        assert_eq!(sample.dts, (i as u64) * 60_000, "fragment 1 sample {i} dts");
     }
     // Fragment 2: dts must START AT frag2_tfdt (300000), not climb
     // monotonically from the running 240000+60000=300000 cursor (here
